@@ -232,7 +232,6 @@ print("current pos. az: {0:3.0f} ele: {1:3.0f}".format(current_azi,current_ele))
 
 def get_tel2obs_dict(ocs, obs_tolerance):
     response = ocs.get_status()
-    print(response)
     input_dict ={}
     input_dict["tel_azm_act"] = response["Azimuth current position"] 
     input_dict["tel_elv_act"] = response["Elevation current position"] 
@@ -305,7 +304,7 @@ def get_obs2tel_dict(obs_tolerance):
 
 tel2obs='''
 {0[timestring]}  {0[timestamp]}   File update time stamp   ! ccat_translator (test_computer:1000)
-EMU_OCS   tel_telescope   ! Telescope Identifier (for display and backend_name in FITS header)
+EMU_   tel_telescope   ! Telescope Identifier (for display and backend_name in FITS header)
 {0[tel_on_track]}   tel_on_track   ! Y if tracking on commanded position/track within tolerance [Y/N]
 {0[tel_lost_track]}   tel_lost_track   ! Y if tracking got beyond tolerance since start of track [Y/N]
 {0[tel_pos_in_range]}   tel_pos_in_range   ! Y if commanded position is within telescope range [Y/N]
