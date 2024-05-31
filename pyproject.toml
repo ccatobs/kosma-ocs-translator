@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+
+[project]
+name = "kosma-ocs-translator"
+version = "0.1.0"
+description = "Python client for CCAT observatory control system"
+authors = [
+    {name = "Ronan Higgins", email = "higgins@ph1.uni-koeln.de"},
+]
+dependencies = ["astropy","requests"]
+
+
+[project.scripts]
+# Define your command-line scripts here
+
+
+[tool.pytest.ini_options]
+minversion = "6.0"
+addopts = "--doctest-modules"
+testpaths = ["tests"]
+
+[tool.pytest-runner]
+pytest = "^4.4.1"
