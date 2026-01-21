@@ -7,14 +7,14 @@ from ocs import observatory_control_system
 from astropy.coordinates import SkyCoord
 from astropy import units as u
 import argparse
-
+import threading
 
 
 def ImportKOSMAReadWriteIntoDictionary(files=None, variable=None, update_mod_time=True):
     log = logging.getLogger("kosma-ocs-translator")
     readwrite_dict = {}
     kosma_readwrite_dir = os.environ.get("WRITE_DIR", "/net/KOSMA_file_io/ReadWrite/")
-    #log.debug("polling for changes from {0}".format(kosma_readwrite_dir))
+    # log.debug("polling for changes from {0}".format(kosma_readwrite_dir))
     not_changed_count = 0
     if files == None:
         readwrite_files = glob.glob("%s/*" % (kosma_readwrite_dir))
@@ -84,14 +84,21 @@ def ImportKOSMAReadWriteIntoDictionary(files=None, variable=None, update_mod_tim
             # convert parse value to string, int or float
 
             try:
-                if type(value) == int:
+                if type(value) in [int, float]:
                     continue
                 if "." in value:
                     value = float(value)
                 else:
                     value = int(value)
-            except:
+            except ValueError:
                 value = value.strip()
+            except Exception as e:
+                # includ readwrite_file in error log
+                log.error(
+                    f"error parsing value {value} for variable {variable_found} from file {readwrite_file}"
+                )
+                log.error(e)
+                continue
             #
             if (variable != None) & (variable != variable_found):
                 continue
@@ -107,8 +114,10 @@ class KOSMA_translator:
         self.ocs = ocs
         #
         self.log = logging.getLogger("kosma-ocs-translator")
-        # 
-        self.read_write_dir = os.environ.get("WRITE_DIR", "/net/KOSMA_file_io/ReadWrite/")
+        #
+        self.read_write_dir = os.environ.get(
+            "WRITE_DIR", "/net/KOSMA_file_io/ReadWrite/"
+        )
         self.log.info(f"Using KOSMA ReadWrite directory: {self.read_write_dir}")
         #
         self.load_tel2obs_template()
@@ -120,24 +129,20 @@ class KOSMA_translator:
     def check_for_obs2tel_update(self):
         # check modification time of obs2tel file and store
 
-        current_mod_time = os.path.getmtime(
-            f"{self.read_write_dir}/KOSMA_obs2tel.set"
-        )
-        # on start up set mod time to 0 and return false        
+        current_mod_time = os.path.getmtime(f"{self.read_write_dir}/KOSMA_obs2tel.set")
+        # on start up set mod time to 0 and return false
         if not hasattr(self, "obs2tel_mod_time"):
             self.obs2tel_mod_time = current_mod_time
             return False
-        current_mod_time = os.path.getmtime(
-            f"{self.read_write_dir}/KOSMA_obs2tel.set"
-        )
+        current_mod_time = os.path.getmtime(f"{self.read_write_dir}/KOSMA_obs2tel.set")
         if current_mod_time > self.obs2tel_mod_time:
             self.obs2tel_mod_time = current_mod_time
             return True
         else:
             return False
-        
+
     def read_obs2tel_file(self):
-        # 
+        #
         self.log.info("reading KOSMA_obs2tel.set file")
         self.kio_files = ImportKOSMAReadWriteIntoDictionary(
             files=["KOSMA_obs2tel.set"], variable=None, update_mod_time=True
@@ -183,9 +188,9 @@ class KOSMA_translator:
         input_dict["tel_elv_act"] = response["Elevation current position"]
         input_dict["tel_azm_cmd"] = response["Azimuth commanded position"]
         input_dict["tel_elv_cmd"] = response["Elevation commanded position"]
-        input_dict["tel_latitude"] = "-22.96995611"
-        input_dict["tel_longitude"] = "67.70308139"
-        input_dict["tel_altitude"] = "4863.85"
+        input_dict["tel_latitude"] = -22.7272
+        input_dict["tel_longitude"] = 67.3319
+        input_dict["tel_altitude"] = 37.61978
         input_dict["tel_telescope"] = "CCAT"
         input_dict["tel_plate_scale"] = "1"
         input_dict["tel_angle_focal_plane"] = 53.97
@@ -193,6 +198,8 @@ class KOSMA_translator:
         input_dict["tel_lost_track"] = "N"
         input_dict["tel_return_cookie"] = self.tel_return_cookie
         input_dict["tel_error"] = "0"
+        input_dict["tel_supports_ephemeris"] = "N"
+        #
         current_azi = response["Azimuth current position"]
         current_ele = response["Elevation current position"]
         cmd_azi = response["Azimuth commanded position"]
@@ -224,16 +231,14 @@ class KOSMA_translator:
         tel2obs_handle = open("/net/KOSMA_file_io/ReadWrite/KOSMA_tel2obs.set", "w")
         tel2obs_handle.write(self.tel2obs.format(input_dict))
         tel2obs_handle.close()
-        
+
     def track(self):
         # commanded position
         cmd_lam = self.obs2tel["obs_lam_on"]
         cmd_bet = self.obs2tel["obs_bet_on"]
         cmd_coord_sys_on = self.obs2tel["obs_coord_sys_on"]
         #
-        self.log.info(
-            f"tracking to {cmd_lam} {cmd_bet} in {cmd_coord_sys_on} frame"
-        )
+        self.log.info(f"tracking to {cmd_lam} {cmd_bet} in {cmd_coord_sys_on} frame")
         #
         self.ocs.move_to(azimuth=cmd_lam, elevation=cmd_bet)
 
@@ -244,7 +249,7 @@ def setup_logging(log_level):
     logger.setLevel(log_level)
 
     # Remove existing handlers to avoid conflicts
-    #if logger.hasHandlers():
+    # if logger.hasHandlers():
     #    logger.handlers.clear()
 
     # Prevent propagation to the root logger
@@ -301,12 +306,12 @@ ocs_port = 5600
 certificates_path = None
 ocs = None
 
-if __name__ == "__main__":
+
+def main():
     args = parse_arguments()
     certificates_path = args.certificates_path
     log_level = getattr(logging, args.log_level)
     logger = setup_logging(log_level)
-    # pring the log format for each handler
     print(f"Using certificates path: {certificates_path}")
     ocs = observatory_control_system(
         url=f"https://{ocs_host}:{ocs_port}",
@@ -314,6 +319,48 @@ if __name__ == "__main__":
         client_cert=f"{certificates_path}/client.cert.pem",
         client_key=f"{certificates_path}/client.key.pem",
     )
+    translator = KOSMA_translator(ocs)
+    background_thread = threading.Thread(
+        target=run_write_tel2obs_file_in_background, args=(translator,)
+    )
+    background_thread.daemon = True
+    background_thread.start()
+    translator.log.info(
+        f"obs_tel_info_update_time set to {translator.obs_tel_info_update_time} seconds"
+    )
+    while True:
+        obs2tel_updated = translator.check_for_obs2tel_update()
+        if not obs2tel_updated:
+            time.sleep(translator.obs_tel_info_update_time)
+            translator.log.debug(
+                f"obs2tel file has not changed, waiting {translator.obs_tel_info_update_time} seconds"
+            )
+            continue
+        translator.read_obs2tel_file()
+        if translator.tel_return_cookie == translator.old_tel_return_cookie:
+            translator.log.info(
+                f"obs2tel cookie has not changed ({translator.tel_return_cookie}), no action taken"
+            )
+            time.sleep(translator.obs_tel_info_update_time)
+            continue
+        if translator.obs2tel["obs_otf_mode"] in ["C", "P"]:
+            translator.log.info("OTF mode command received, not yet implemented")
+            time.sleep(translator.obs_tel_info_update_time)
+            continue
+        if translator.obs2tel["obs_otf_mode"] == "N":
+            translator.log.info("track mode command received")
+            translator.track()
+
+
+if __name__ == "__main__":
+    main()
+
+# TODO
+# check if obs2tel has changed
+# read obs2tel file
+# move telescope to commanded position
+# if obs2tel had changed, abort previous command and send new one
+
 
 """
 tel_return_cookie = kio_files["KOSMA_obs2tel.set"]["obs_cookie"]
@@ -364,52 +411,3 @@ current_azi = response["Azimuth current position"]
 current_ele = response["Elevation current position"]
 print("current pos. az: {0:3.0f} ele: {1:3.0f}".format(current_azi, current_ele))
 """
-
-#
-translator = KOSMA_translator(ocs)
-# start background thread to write tel2obs file
-import threading
-
-background_thread = threading.Thread(
-    target=run_write_tel2obs_file_in_background, args=(translator,)
-)
-background_thread.daemon = True
-background_thread.start()
-
-# log update time to screen
-translator.log.info(
-    f"obs_tel_info_update_time set to {translator.obs_tel_info_update_time} seconds"
-)
-
-while True:
-    #
-    obs2tel_updated = translator.check_for_obs2tel_update()
-    if not obs2tel_updated:
-        time.sleep(translator.obs_tel_info_update_time)
-        translator.log.debug(f"obs2tel file has not changed, waiting {translator.obs_tel_info_update_time} seconds")
-        continue
-    # obs2tel comand received from tel2obs file
-    translator.read_obs2tel_file()
-    # check if cookie has changed
-    if translator.tel_return_cookie == translator.old_tel_return_cookie:
-        translator.log.info(
-            f"obs2tel cookie has not changed ({translator.tel_return_cookie}), no action taken"
-        )
-        time.sleep(translator.obs_tel_info_update_time)
-        continue
-    # check if this is a track or mapping command
-    if translator.obs2tel["obs_otf_mode"] in ["C", "P"]:
-        translator.log.info("OTF mode command received, not yet implemented")
-        time.sleep(translator.obs_tel_info_update_time)
-        continue
-    # track mode
-    if translator.obs2tel["obs_otf_mode"] == "N":
-        translator.log.info("track mode command received")
-        translator.track()
-    #time.sleep(translator.obs_tel_info_update_time)
-
-# TODO
-# check if obs2tel has changed
-# read obs2tel file
-# move telescope to commanded position
-# if obs2tel had changed, abort previous command and send new one

@@ -12,8 +12,7 @@ dependencies = ["astropy","requests"]
 
 
 [project.scripts]
-# Define your command-line scripts here
-
+kosma-ocs-translator = "kosma_ocs_translator:main"
 
 [tool.pytest.ini_options]
 minversion = "6.0"
