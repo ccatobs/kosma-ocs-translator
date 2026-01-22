@@ -6,6 +6,7 @@ import pandas as pd
 import time
 import logging
 import astropy.units as u
+import numpy as np
 from astropy.coordinates import SkyCoord, EarthLocation, AltAz
 from astropy.time import Time
 from datetime import timedelta
@@ -28,15 +29,16 @@ from kosma_ocs_translator import KOSMA_translator, ImportKOSMAReadWriteIntoDicti
 
 def is_astra_running():
     logger = logging.getLogger("tests_with_astra")
-    try:
-        result = subprocess.run(
-            ["ps", "aux"], stdout=subprocess.PIPE, text=True, check=True
-        )
-        if "astra" in result.stdout:
-            return True
+    # check is log modtime in the last 10 seconds
+    log_file = "/net/KOSMA_file_io/logs/astra.log"
+    if not os.path.exists(log_file):
+        logger.critical(f"Astra log file {log_file} does not exist.")
         return False
-    except subprocess.CalledProcessError as e:
-        logger.error(f"Error checking processes: {e}")
+    mod_time = os.path.getmtime(log_file)
+    current_time = time.time()
+    if current_time - mod_time > 20:
+        # add the time to the message
+        logger.critical(f"Log file last modified at {time.ctime(mod_time)}")
         return False
 
 
@@ -58,8 +60,151 @@ def save_test_outputs_to_dataframe(test_name="default"):
     return test_data
 
 
-def run_kosma_commands(cmds, astra_time=None):
+def get_track_times(astra_time_str, source_name):
+    cmd = [f"setsource {source_name}", "KOSMA_setoffset -l 00.0"]
+    obs2tel, tel2obs = run_kosma_commands(cmd, astra_time=astra_time_str)
+    # extra l,b from obs2tel
+    l_offset = obs2tel["obs_lam_on"]
+    b_offset = obs2tel["obs_bet_on"]
+    obs_system = obs2tel["obs_coord_sys_on"]
     #
+    frame = coord_sys_map[obs_system]
+    # calculate the time for rising and setting
+    source_coord = SkyCoord(l_offset * u.deg, b_offset * u.deg, frame=frame)
+    observer_location = EarthLocation(
+        lon=-1 * tel2obs["tel_longitude"] * u.deg,
+        lat=tel2obs["tel_latitude"] * u.deg,
+        height=tel2obs["tel_altitude"] * u.m,
+    )
+    rise_time, set_time = rise_set_times_astropy(
+        source=source_coord,
+        location=observer_location,
+        t0=Time(astra_time_str, format="isot", scale="utc"),
+        horizon=15.0 * u.deg,
+        step=1.0 * u.hour,
+        max_hours=36,
+    )
+    track_step = 1 * u.hr
+    time_diff = abs(set_time - rise_time)
+    n_steps = int((time_diff / (track_step * u.s)).decompose().value)
+    astra_times = [rise_time + i * track_step for i in range(n_steps + 1)]
+    return astra_times, rise_time, set_time
+
+
+# Update the function to parse the full TELLMOK line format
+def parse_tellmok_line(line: str):
+    import re
+
+    # Define the regex pattern for the full TELLMOK line
+    pattern = r"(\S+) (\S+) UTC MESSAGE: \(.*?\) TELLMOK: TEST STEER: unix-time ([\d\.]+) time\s+(\d+), pos:\s+(-?\d+)\s+(-?\d+) vel:\s+(-?\d+)\s+(-?\d+)"
+    match = re.match(pattern, line)
+
+    if match:
+        return {
+            "iso_timestamp": match.group(1),
+            "unix_time": float(match.group(3)),
+            "time": int(match.group(4)),
+            "az": int(match.group(5)) / 10000,
+            "el": int(match.group(6)) / 10000,
+            "vel_az": int(match.group(7)),
+            "vel_el": int(match.group(8)),
+        }
+    return None
+
+
+def rise_set_times_astropy(
+    source, location, t0=None, horizon=0 * u.deg, step=1 * u.hour, max_hours=36
+):
+    """
+    Compute rise and set times of a celestial source using Astropy only.
+
+    Parameters
+    ----------
+    source : SkyCoord
+        Source coordinates (any frame, e.g. Galactic).
+    location : EarthLocation
+        Observer location.
+    t0 : Time, optional
+        Start time (UTC). Defaults to now.
+    horizon : Quantity
+        Altitude defining rise/set (default 0 deg).
+    step : Quantity
+        Time sampling step (default 1 hour).
+    max_hours : float
+        Search window (default 36 hours).
+        (>24h handles late set / early rise cases)
+
+    Returns
+    -------
+    rise_time : Time or None
+    set_time : Time or None
+    """
+
+    if t0 is None:
+        t0 = Time.now()
+
+    # Ensure equatorial frame
+    source_icrs = source.icrs
+
+    # Time grid
+    n_steps = int((max_hours * u.hour / step).decompose())
+    times = t0 + np.arange(n_steps + 1) * step
+
+    # AltAz frame (no refraction)
+    altaz_frame = AltAz(obstime=times, location=location, pressure=0 * u.bar)
+
+    # Transform and extract altitude
+    alt = source_icrs.transform_to(altaz_frame).alt.to_value(u.deg)
+    h = horizon.to_value(u.deg)
+
+    rise_time = None
+    set_time = None
+
+    # Rise: below -> above
+    rise_idx = np.where((alt[:-1] < h) & (alt[1:] >= h))[0]
+    if len(rise_idx) > 0:
+        i = rise_idx[0]
+        frac = (h - alt[i]) / (alt[i + 1] - alt[i])
+        rise_time = times[i] + frac * (times[i + 1] - times[i])
+
+    # Set: above -> below
+    set_idx = np.where((alt[:-1] >= h) & (alt[1:] < h))[0]
+    if len(set_idx) > 0:
+        i = set_idx[0]
+        frac = (h - alt[i]) / (alt[i + 1] - alt[i])
+        set_time = times[i] + frac * (times[i + 1] - times[i])
+
+    return rise_time, set_time
+
+
+def get_astra_log_file_between_times(start_time: str, end_time: str) -> pd.DataFrame:
+    file_path = "/net/KOSMA_file_io/logs/astra.log"
+    print(f"Reading Astra log file between {start_time} and {end_time}")
+    start_time = start_time.replace("T", " ")
+    end_time = end_time.replace("T", " ")
+    # open file and check for key value pairs seperated by =
+    with open(file_path, "r") as f:
+        lines = f.readlines()
+        rows = []
+        for line in lines:
+            # Check for TELLMOK line
+            if "TELLMOK: TEST STEER:" in line:
+                parsed_data = parse_tellmok_line(line)
+                if parsed_data:
+                    rows.append(parsed_data)
+
+    # Convert to DataFrame
+    df = pd.DataFrame(rows)
+    # Convert mjd to datetime
+    # convert iso_timestamp to datetime
+    df["sys_time"] = pd.to_datetime(df["iso_timestamp"])
+    #
+    mask = (df["sys_time"] >= start_time) & (df["sys_time"] <= end_time)
+    return df.loc[mask]
+
+
+def run_kosma_commands(cmds, astra_time=None):
+    # start_time in iso format for logs
     logger = logging.getLogger("tests_with_astra")
     #
     if astra_time is not None:
@@ -79,6 +224,9 @@ def run_kosma_commands(cmds, astra_time=None):
         #
         time.sleep(1)  # wait for a second to ensure file is written
         logger.info(f"Set Astra test time to {astra_time} for testing.")
+    else:
+        astra_time = Time.now().iso.replace(" ", "T")
+        logger.info(f"Using current Astra time {astra_time} for testing.")
     #
     for cmd in cmds:
         logger.info(f"Running command: {cmd}")
@@ -105,6 +253,7 @@ def run_kosma_commands(cmds, astra_time=None):
     time.sleep(time_to_wait)
     # wait for it to be on track tel_on_track = Y
     # poll tel2obs.set file
+    attempts = 0
     while True:
         files = ImportKOSMAReadWriteIntoDictionary(["KOSMA_tel2obs.set"])
         on_track = files["KOSMA_tel2obs.set"]["tel_on_track"]
@@ -114,6 +263,10 @@ def run_kosma_commands(cmds, astra_time=None):
         else:
             logger.info("Telescope is not on track yet. Waiting...")
             time.sleep(1)  #   seconds
+            attempts += 1
+            if attempts > 10:
+                logger.error("Telescope did not get on track within 10 seconds.")
+                return None, None
     # read tel2obs and obs2tel files and return
     files = ImportKOSMAReadWriteIntoDictionary(
         files=["KOSMA_obs2tel.set", "KOSMA_tel2obs.set"]
@@ -128,7 +281,9 @@ def run_kosma_commands(cmds, astra_time=None):
     return files["KOSMA_obs2tel.set"], files["KOSMA_tel2obs.set"]
 
 
-def compare_astropy_with_kosma(obs2tel, tel2obs, offset_time_seconds=2):
+def compare_astropy_with_kosma(
+    obs2tel, tel2obs, df_log, astra_status, offset_time_seconds=0
+):
     logger = logging.getLogger("tests_with_astra")
     #
     # run obs2tel though astropy for testing
@@ -142,6 +297,18 @@ def compare_astropy_with_kosma(obs2tel, tel2obs, offset_time_seconds=2):
     observation_time = Time(obs2tel.astra_time, scale="utc")
     # offset by 2 seconds
     observation_time += offset_time_seconds * u.s
+    # compare mjd from astra_status with astropy time
+    astra_status_mjd = astra_status["a_dj1"]
+    observation_time.to_value("mjd", "long")
+    mjd_difference = observation_time.to_value("mjd", "long") - astra_status_mjd
+    # add mjd difference to observation_time
+    observation_time -= mjd_difference * 86400.0 * u.s
+    logger.info(
+        f"Time difference between Astropy and Astra status MJD: {mjd_difference * 86400.0:.6f} seconds"
+    )
+
+    # set as now
+    # observation_time = Time.now()
     # add now instead of fixed time
     # read astra wetter
     files = ImportKOSMAReadWriteIntoDictionary(["KOSMA_wetter.status"])
@@ -209,6 +376,11 @@ def compare_astropy_with_kosma(obs2tel, tel2obs, offset_time_seconds=2):
         f"astropy Azimuth: {az_astropy:.4f}, KOSMA Azimuth: {az_kosma:.4f}, Difference: {az_difference:.4f} ({az_difference * 3600.0:.4f} arcsec) \n"
         f"astropy Elevation: {el_astropy:.4f}, KOSMA Elevation: {el_kosma:.4f}, Difference: {el_difference:.4f} ({el_difference * 3600.0:.4f} arcsec)\n"
     )
+    # from df_log get row with closest time to obs2tel astra_time + offset_time_seconds
+    # use the coordinate_time column
+    df_log["time_diff"] = abs(df_log["unix_time"] - tel2obs["timestamp"].values[0])
+    closest_row = df_log.loc[df_log["time_diff"].idxmin()]
+    #
     # results
     results = {
         "az_difference_arc_sec": az_difference * 3600.0,
@@ -220,6 +392,13 @@ def compare_astropy_with_kosma(obs2tel, tel2obs, offset_time_seconds=2):
         "test_name": obs2tel["test_name"],
         "time": obs2tel["astra_time"],
         "offset_time_seconds": offset_time_seconds,
+        "astra_log_az": closest_row["az"],
+        "astra_log_el": closest_row["el"],
+        "log_diff_to_astropy_az_arc_sec": (az_astropy - closest_row["az"]) * 3600.0,
+        "log_diff_to_astropy_el_arc_sec": (el_astropy - closest_row["el"]) * 3600.0,
+        "mjd_astropy": observation_time.to_value("mjd", "long"),
+        "mjd_astra": astra_status["a_dj1"],
+        "mjd_difference_seconds": mjd_difference * 86400.0,
     }
     return results
 
@@ -256,7 +435,7 @@ def zero_pointing_model():
         )
 
 
-def compare_kosma_tests_with_astropy(make_plots=True):
+def compare_kosma_tests_with_astropy(make_plots=True, plot_logs=False):
     logger = logging.getLogger("tests_with_astra")
     logger.info("Comparing KOSMA tests with Astropy outputs.")
     #
@@ -266,12 +445,25 @@ def compare_kosma_tests_with_astropy(make_plots=True):
     df_tel2obs = pd.read_excel(
         "astra_kosma_test_outputs.xlsx", sheet_name="KOSMA_tel2obs"
     )
+    df_astra_status = pd.read_excel(
+        "astra_kosma_test_outputs.xlsx", sheet_name="KOSMA_astra"
+    )
     # check each test row and compare to astropy outputs
     # range of 20
-    fixed_offset = 2.052  # 2.05
-    time_offset_range = [fixed_offset + offset / 100.0 for offset in range(-10, 10, 1)]
+    fixed_offset = -0.03
+    fixed_offset = 0.0
+    # time_offset_range = [fixed_offset + offset / 10 for offset in range(-10, 10, 1)]
     time_offset_range = []
-
+    # get the max and min time
+    start_time = df_obs2tel["timestamp"].min()
+    end_time = df_obs2tel["timestamp"].max()
+    # convert from unix timestamp to iso time strings
+    start_time_iso = pd.to_datetime(start_time, unit="s").isoformat()
+    end_time_iso = pd.to_datetime(end_time, unit="s").isoformat()
+    # get log data between these times
+    df_log = get_astra_log_file_between_times(start_time_iso, end_time_iso)
+    # save log data to excel sheet
+    #
     results_list = []
     for index, row in df_obs2tel.iterrows():
         # process each row
@@ -279,6 +471,7 @@ def compare_kosma_tests_with_astropy(make_plots=True):
         # get cookies and find tel2obs return
         cookie = obs2tel["obs_cookie"]
         tel2obs = df_tel2obs[df_tel2obs["tel_return_cookie"] == cookie]
+        astra_status = df_astra_status.loc[index]
         # check that there is only one matching tel2obs
         if len(tel2obs) != 1:
             logger.error(
@@ -287,13 +480,21 @@ def compare_kosma_tests_with_astropy(make_plots=True):
             raise SystemExit
         #
         if len(time_offset_range) > 1:
+            plot_axis = "offset_time_seconds"
             for offset_time_seconds in time_offset_range:
                 results = compare_astropy_with_kosma(
-                    obs2tel, tel2obs, offset_time_seconds=offset_time_seconds
+                    obs2tel,
+                    tel2obs,
+                    df_log,
+                    astra_status,
+                    offset_time_seconds=offset_time_seconds,
                 )
                 results_list.append(results)
         else:
-            results = compare_astropy_with_kosma(obs2tel, tel2obs, fixed_offset)
+            plot_axis = "time_dt"
+            results = compare_astropy_with_kosma(
+                obs2tel, tel2obs, df_log, astra_status, fixed_offset
+            )
             results_list.append(results)
         #
     results_df = pd.DataFrame(results_list)
@@ -313,20 +514,20 @@ def compare_kosma_tests_with_astropy(make_plots=True):
         results_df.to_excel(writer, sheet_name="comparison_results", index=False)
     #
     if make_plots:
-        make_comparison_plots(results_df)
+        make_comparison_plots(results_df, plot_axis=plot_axis, plot_logs=plot_logs)
 
 
-def make_comparison_plots(results_df):
+def make_comparison_plots(results_df, plot_axis="time_dt", plot_logs=False):
     # make a 2x2 panel plot: absolute values on top, residuals on the bottom
     import matplotlib.pyplot as plt
 
     fig, axs = plt.subplots(2, 2, figsize=(14, 10), sharex=False)
-    fig.suptitle("Astra vs KOSMA-OCS-Translator Pointing Analysis")
+    fig.suptitle("Astra  vs KOSMA-OCS-Translator Pointing Analysis")
 
     # Convert time strings to datetime objects
     results_df["time_dt"] = pd.to_datetime(results_df["time"])
 
-    # Calculate statistics for residuals
+    # Calculate statistics for residuals from log data
     fixed_offset = results_df["offset_time_seconds"].iloc[0]
     az_residual_mean = results_df["az_difference_arc_sec"].mean()
     az_residual_std = results_df["az_difference_arc_sec"].std()
@@ -350,6 +551,15 @@ def make_comparison_plots(results_df):
         color="red",
         linewidth=2,  # Thinner line for Astropy
     )
+    if plot_logs:
+        # plot log data azimuth as black dots
+        axs[0, 0].plot(
+            results_df["time_dt"],
+            results_df["astra_log_az"],
+            "k.",
+            label="Astra Log Azimuth",
+            markersize=8,
+        )
     axs[0, 0].set_ylabel("Azimuth (deg)")
     axs[0, 0].legend()
     axs[0, 0].grid()
@@ -371,13 +581,21 @@ def make_comparison_plots(results_df):
         color="red",
         linewidth=2,  # Thinner line for Astropy
     )
+    if plot_logs:
+        # plot log data elevation as black dots
+        axs[0, 1].plot(
+            results_df["time_dt"],
+            results_df["astra_log_el"],
+            "k.",
+            label="Astra Log Elevation",
+            markersize=8,
+        )
     axs[0, 1].set_ylabel("Elevation (deg)")
     axs[0, 1].legend()
     axs[0, 1].grid()
 
     # Plot Azimuth residuals (bottom-left)
-    time_axis = "offset_time_seconds"
-    time_axis = "time_dt"
+    time_axis = plot_axis
     if time_axis == "time_dt":
         # add fig suptile with offset time seconds
         fig.suptitle(
@@ -390,6 +608,15 @@ def make_comparison_plots(results_df):
         linestyle="-",
         color="blue",  # Same color as KOSMA
     )
+    if plot_logs:
+        # plot log residuals as black dots
+        axs[1, 0].plot(
+            results_df[time_axis],
+            results_df["log_diff_to_astropy_az_arc_sec"],
+            "k.",
+            label="Astra Log Residuals",
+            markersize=8,
+        )
     axs[1, 0].set_ylabel("Azimuth Residual (arcsec)")
     axs[1, 0].set_xlabel("Time")
     axs[1, 0].grid()
@@ -411,6 +638,15 @@ def make_comparison_plots(results_df):
         linestyle="-",
         color="red",  # Same color as Astropy
     )
+    if plot_logs:
+        # plot log residuals as black dots
+        axs[1, 1].plot(
+            results_df[time_axis],
+            results_df["log_diff_to_astropy_el_arc_sec"],
+            "k.",
+            label="Astra Log Residuals",
+            markersize=8,
+        )
     axs[1, 1].set_ylabel("Elevation Residual (arcsec)")
     axs[1, 1].set_xlabel("Time")
     axs[1, 1].grid()
@@ -429,8 +665,6 @@ def make_comparison_plots(results_df):
     logger.info("Saving pointing analysis plot to astra_kosma_pointing_analysis.png")
     plt.savefig("astra_kosma_pointing_analysis.png")
     plt.show()
-
-    #
 
 
 # Add argument parsing
@@ -451,6 +685,21 @@ parser.add_argument(
     action="store_true",
     help="Run track tests for Galactic coordinate system.",
 )
+
+parser.add_argument(
+    "--run-horizon-tests",
+    action="store_true",
+    help="Run track tests for Horizon coordinate system.",
+)
+
+# add a compare only option
+parser.add_argument(
+    "--compare-data-only",
+    action="store_true",
+    help="Just run comparison and not run any tests.",
+)
+
+
 args = parser.parse_args()
 
 #
@@ -461,30 +710,44 @@ coord_sys_map = {
     "HORIZON": "altaz",
 }
 
+
 zero_pointing_model()
+is_astra_running()
 
 if args.run_track_tests_J2000:
-    track_time = 600  # seconds
-    track_step = 300  # seconds
+    start_time = Time.now().iso.replace(" ", "T")
     test_data_frames = {}
     test_data_frames["KOSMA_obs2tel.set"] = []
     test_data_frames["KOSMA_tel2obs.set"] = []
+    test_data_frames["KOSMA_astra.status"] = []
     # commands to run for testing
-    start_time = "2026-02-10T10:00:00"
-    cmd = ["setsource W43_OFF", "KOSMA_setoffset -l 00.0"]
-    for time_offset in range(0, track_time, track_step):
-        # calculate astra time from start_time
-        astra_time = Time(start_time) + time_offset * u.s
+
+    cmd = ["setsource W43_OFF", "KOSMA_setoffset -l 00.0", "setpoint -p L"]
+    astra_time_str = "2026-02-10T16:00:00"
+    source_name = "W43_OFF"
+    astra_times, rise_time, set_time = get_track_times(astra_time_str, source_name)
+    # make an array of times from rise to set time
+
+    # collect obs2tel and get coord
+    logger.info(
+        f"Running track tests from rise time {rise_time.iso} to set time {set_time.iso}"
+    )
+    logger.info(f"Total of {len(astra_times)} track tests to run.")
+    for astra_time in astra_times:
         # round out to nearest second
         astra_time = Time(astra_time.datetime.strftime("%Y-%m-%dT%H:%M:%S"))
-        # add time now
-        # astra_time = Time.now()
         #
         astra_time_str = astra_time.iso.replace(" ", "T")
         logger.info(f"Running track test at Astra time: {astra_time_str}")
         obs2tel, tel2obs = run_kosma_commands(cmd, astra_time=astra_time_str)
+        if obs2tel is None or tel2obs is None:
+            logger.error("Error running KOSMA commands. Skipping this test.")
+            continue
         test_data_frames["KOSMA_obs2tel.set"].append(obs2tel)
         test_data_frames["KOSMA_tel2obs.set"].append(tel2obs)
+        # read KOSMA_astra.status file
+        files = ImportKOSMAReadWriteIntoDictionary(["KOSMA_astra.status"])
+        test_data_frames["KOSMA_astra.status"].append(files["KOSMA_astra.status"])
     # make datraframe for each file for later analysis
     # save output to an excel file in different sheets
     logger.info("Saving test outputs to Excel file.")
@@ -499,23 +762,35 @@ if args.run_track_tests_J2000:
 
 if args.run_track_tests_galactic:
     #
-    track_time = 600  # seconds
-    track_step = 300  # seconds
     test_data_frames = {}
     test_data_frames["KOSMA_obs2tel.set"] = []
     test_data_frames["KOSMA_tel2obs.set"] = []
+    test_data_frames["KOSMA_astra.status"] = []
     # commands to run for testing
-    cmd = ["setsource G347_PeakB", "KOSMA_setoffset -l 00.0"]
-    start_time = "2026-02-10T10:00:00"
-    for time_offset in range(0, track_time, track_step):
-        astra_time = Time(start_time) + time_offset * u.s
-        astra_time = Time(astra_time.datetime.strftime("%Y-%m-%dT%H:%M:%S"))
+    astra_time_str = "2026-02-10T14:00:00"
+    source_name = "G347_PeakB"
+    astra_times, rise_time, set_time = get_track_times(astra_time_str, source_name)
+    # make an array of times from rise to set time
+
+    # collect obs2tel and get coord
+    logger.info(
+        f"Running track tests from rise time {rise_time.iso} to set time {set_time.iso}"
+    )
+    logger.info(f"Total of {len(astra_times)} track tests to run.")
+    for astra_time in astra_times:
         #
+        logger.info(f"Running track test at Astra time: {astra_time.iso}")
         astra_time_str = astra_time.iso.replace(" ", "T")
-        logger.info(f"Running track test at Astra time: {astra_time_str}")
+        cmd = [f"setsource {source_name}", "KOSMA_setoffset -l 00.0"]
         obs2tel, tel2obs = run_kosma_commands(cmd, astra_time=astra_time_str)
+        if obs2tel is None or tel2obs is None:
+            logger.error("Error running KOSMA commands. Skipping this test.")
+            continue
         test_data_frames["KOSMA_obs2tel.set"].append(obs2tel)
         test_data_frames["KOSMA_tel2obs.set"].append(tel2obs)
+        # read KOSMA_astra.status file
+        files = ImportKOSMAReadWriteIntoDictionary(["KOSMA_astra.status"])
+        test_data_frames["KOSMA_astra.status"].append(files["KOSMA_astra.status"])
     # make datraframe for each file for later analysis
     # save output to an excel file in different sheets
     logger.info("Saving test outputs to Excel file.")
@@ -534,6 +809,51 @@ if args.run_astra_tests:
     # Add logic to run Astra tests here
     # Example: subprocess.run(["astra", "test-command"]
     #
+    #
+    cmds = []
+    cmds += [["setsource H40_40 -l 40 -b 40 -C HORIZON"]]  # HORIZONAL
+    cmds += [["setsource H30_30 -l 30 -b 30 -C HORIZON"]]  # HORIZONAL
+    cmds += [["setsource H30_30 -l 20 -b 20 -C HORIZON"]]  # HORIZONAL
+    cmds += [["setsource H30_30 -l 10 -b 10 -C HORIZON"]]  # HORIZONAL
+    test_data_frames = {}
+    test_data_frames["KOSMA_obs2tel.set"] = []
+    test_data_frames["KOSMA_tel2obs.set"] = []
+    test_data_frames["KOSMA_astra.status"] = []
+    # commands to run for testing
+    astra_time = "2026-02-10T10:00:00"
+    for cmd in cmds:
+        obs2tel, tel2obs = run_kosma_commands(cmd, astra_time=astra_time)
+        test_data_frames["KOSMA_obs2tel.set"].append(obs2tel)
+        test_data_frames["KOSMA_tel2obs.set"].append(tel2obs)
+        # read KOSMA_astra.status file
+        files = ImportKOSMAReadWriteIntoDictionary(["KOSMA_astra.status"])
+        test_data_frames["KOSMA_astra.status"].append(files["KOSMA_astra.status"])
+        test_data = save_test_outputs_to_dataframe(test_name=str(cmd))
+        # test_data["astra_time"] = astra_time
+        for file, data in test_data.items():
+            data["astra_time"] = astra_time
+            if file not in test_data_frames:
+                test_data_frames[file] = []
+            test_data_frames[file].append(data)
+    # make datraframe for each file for later analysis
+    # save output to an excel file in different sheets
+    logger.info("Saving test outputs to Excel file.")
+    with pd.ExcelWriter("astra_kosma_test_outputs.xlsx") as writer:
+        for file, data_list in test_data_frames.items():
+            df = pd.DataFrame(data_list)
+            sheet_name = os.path.splitext(os.path.basename(file))[0]
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
+    logger.info("Test outputs saved successfully.")
+    #
+    compare_kosma_tests_with_astropy(make_plots=True)
+
+
+# Check if Astra tests should be run
+if args.run_horizon_tests:
+    logger.info("Running Astra tests...")
+    # Add logic to run Astra tests here
+    # Example: subprocess.run(["astra", "test-command"]
+    #
     if not is_astra_running():
         logger.critical(
             "Astra is not running. Please start Astra before running the tests."
@@ -543,17 +863,17 @@ if args.run_astra_tests:
         logger.info("Astra is running. Proceeding with tests.")
     #
     cmds = []
-    cmds += [["setsource G347_PeakB"]]  # GALACTIC
+    # cmds += [["setsource G347_PeakB"]]  # GALACTIC
     # cmds += [["setsource G300_10 -l 300 -b 10 -C GALACTIC"]]  # GALACTIC
     # cmds += [["setsource G300_20 -l 300 -b 20 -C GALACTIC"]]  # GALACTIC
     # cmds += [["setsource G300_30 -l 300 -b 30 -C GALACTIC"]]  # GALACTIC
-    # cmds += [["setsource H40_40 -l 40 -b 40 -C HORIZON"]]  # HORIZONAL
-    # cmds += [["setsource H30_30 -l 30 -b 30 -C HORIZON"]]  # HORIZONAL
+    cmds += [["setsource H40_40 -l 40 -b 40 -C HORIZON"]]  # HORIZONAL
+    cmds += [["setsource H30_30 -l 30 -b 30 -C HORIZON"]]  # HORIZONAL
     # cmds += [["setsource H30_30 -l 20 -b 20 -C HORIZON"]]  # HORIZONAL
     # cmds += [["setsource H30_30 -l 10 -b 10 -C HORIZON"]]  # HORIZONAL
     # cmds += [["KOSMA_setoffset -l 10.0"]]
     # cmds += [["KOSMA_setoffset -l 20.0"]]
-    cmds += [["setsource W43_OFF", "KOSMA_setoffset -l 00.0"]]
+    # cmds += [["setsource W43_OFF", "KOSMA_setoffset -l 00.0"]]
     # cmds += [["setsource GC2_J2000", "KOSMA_setoffset -l 00.0"]]
     # cmds += [["KOSMA_setoffset -l 10.0"]]
     # cmds += [["KOSMA_setoffset -l 20.0"]]
@@ -583,7 +903,9 @@ if args.run_astra_tests:
 else:
     logger.info("Skipping Astra tests.")
 
-
+if args.compare_data_only:
+    logger.info("Running comparison only as per user request.")
+    compare_kosma_tests_with_astropy(make_plots=True)
 # TODO check a track and monitor offsets
 # TODO introduce coord offsets
 # TODO introduce instrument/pixel offsets
