@@ -7,7 +7,7 @@ import time
 import logging
 import astropy.units as u
 import numpy as np
-from astropy.coordinates import SkyCoord, EarthLocation, AltAz
+from astropy.coordinates import SkyCoord, EarthLocation, AltAz, ICRS
 from astropy.time import Time
 from datetime import timedelta
 
@@ -27,6 +27,50 @@ from kosma_ocs_translator import KOSMA_translator, ImportKOSMAReadWriteIntoDicti
 # save obs2tel outputs to a row in a csv file
 
 
+def get_visible_sky_range_in_j2000_coordinates(location, obstime, min_alt=10):
+    """
+    Calculates visible RA/Dec range using Astropy objects directly.
+
+    Parameters:
+        location (EarthLocation): Astropy EarthLocation object.
+        obstime (Time): Astropy Time object.
+        min_alt (int/float): Minimum altitude in degrees.
+    """
+    # 1. Create a sampling of the horizon at the min_alt boundary
+    azimuths = np.linspace(0, 360, 1000) * u.deg
+    altitudes = np.full_like(azimuths, min_alt * u.deg)
+
+    # 2. Define the AltAz frame using the passed objects
+    frame_altaz = AltAz(obstime=obstime, location=location)
+
+    # 3. Transform horizon circle to ICRS (J2000)
+    horizon_coords = SkyCoord(az=azimuths, alt=altitudes, frame=frame_altaz)
+    icrs_coords = horizon_coords.transform_to(ICRS())
+
+    # 4. Process Declination
+    dec_values = icrs_coords.dec.degree
+    lat_deg = location.lat.degree
+
+    # Check if a Celestial Pole is visible (circumpolar region)
+    if lat_deg > 0:  # Northern Hemisphere
+        dec_max = 90.0 if (lat_deg + (90 - min_alt) >= 90) else np.max(dec_values)
+        dec_min = np.min(dec_values)
+    else:  # Southern Hemisphere
+        dec_min = -90.0 if (lat_deg - (90 - min_alt) <= -90) else np.min(dec_values)
+        dec_max = np.max(dec_values)
+
+    # 5. Process Right Ascension (with wrap-around handling)
+    ra_values = icrs_coords.ra.wrap_at(180 * u.deg).degree
+
+    return {
+        "ra_min": np.min(ra_values),
+        "ra_max": np.max(ra_values),
+        "dec_min": dec_min,
+        "dec_max": dec_max,
+        "LST": obstime.sidereal_time("mean", longitude=location.lon),
+    }
+
+
 def is_astra_running():
     logger = logging.getLogger("tests_with_astra")
     # check is log modtime in the last 10 seconds
@@ -40,6 +84,15 @@ def is_astra_running():
         # add the time to the message
         logger.critical(f"Log file last modified at {time.ctime(mod_time)}")
         return False
+
+def save_data_test_outputs_to_dataframe(test_data_frames):
+    logger = logging.getLogger("tests_with_astra")
+    logger.info("Saving test outputs to Excel   file.")
+    with pd.ExcelWriter("astra_kosma_test_outputs.xlsx") as writer:
+        for file, data_list in test_data_frames.items():
+            df = pd.DataFrame(data_list)
+            sheet_name = os.path.splitext(os.path.basename(file))[0]
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
 
 
 # read obs2tel using ImportKOSMAReadWriteIntoDictionary and compare values with kosma-ocs-translator outputs
@@ -58,6 +111,60 @@ def save_test_outputs_to_dataframe(test_name="default"):
         test_data[file] = values
     #
     return test_data
+
+
+def get_track_times_from_object(
+    t0, source_coord, location, horizon=15.0 * u.deg, track_step=1.0 * u.hour
+):
+    """
+    Calculates an array of times between the next rising and setting of a source.
+
+    Parameters:
+        t0 (Time): The starting Astropy Time object.
+        source_coord (SkyCoord): The target coordinates (ICRS, Galactic, etc.).
+        location (EarthLocation): The observer's location.
+        horizon (Quantity): Elevation angle for rise/set (default 15 deg).
+        track_step (Quantity): The interval between generated time points.
+    """
+
+    # 1. Calculate rise and set times
+    # Note: Assuming rise_set_times_astropy is your existing utility function
+    rise_time, set_time = rise_set_times_astropy(
+        source=source_coord,
+        location=location,
+        t0=t0,
+        horizon=horizon,
+        step=1.0 * u.hour,
+        max_hours=36,
+    )
+
+    # 2. Calculate the duration and number of steps
+    print(f"Rise time: {rise_time}, Set time: {set_time}")
+    # get time difference in hours
+    time_diff = set_time - rise_time  # hours
+    print("Time difference (hours):", time_diff)
+
+    # Ensure the set time is actually after the rise time
+    # (Handles cases where the source sets the next day)
+    if time_diff.sec < 0:
+        print(
+            "Warning: Set time calculated is before rise time. Check horizon/constraints."
+        )
+        return [], rise_time, set_time
+
+    # Calculate steps based on the provided track_step
+    print("Time difference:", time_diff)
+    print("Track step:", track_step)
+    #
+    n_steps = int(np.floor(time_diff.to_value(u.hour) / track_step.to_value(u.hour)))
+    print(n_steps)
+
+    # 3. Generate the array of times
+    # We use TimeDelta to increment the rise_time
+    astra_times = rise_time + (np.arange(n_steps + 1) * track_step)
+    print(astra_times)
+    #
+    return astra_times, rise_time, set_time
 
 
 def get_track_times(astra_time_str, source_name):
@@ -113,66 +220,42 @@ def parse_tellmok_line(line: str):
 
 
 def rise_set_times_astropy(
-    source, location, t0=None, horizon=0 * u.deg, step=1 * u.hour, max_hours=36
+    source, location, t0=None, horizon=0 * u.deg, step=0.5 * u.hour, max_hours=48
 ):
-    """
-    Compute rise and set times of a celestial source using Astropy only.
-
-    Parameters
-    ----------
-    source : SkyCoord
-        Source coordinates (any frame, e.g. Galactic).
-    location : EarthLocation
-        Observer location.
-    t0 : Time, optional
-        Start time (UTC). Defaults to now.
-    horizon : Quantity
-        Altitude defining rise/set (default 0 deg).
-    step : Quantity
-        Time sampling step (default 1 hour).
-    max_hours : float
-        Search window (default 36 hours).
-        (>24h handles late set / early rise cases)
-
-    Returns
-    -------
-    rise_time : Time or None
-    set_time : Time or None
-    """
-
     if t0 is None:
         t0 = Time.now()
 
-    # Ensure equatorial frame
-    source_icrs = source.icrs
+    h = horizon.to_value(u.deg)
 
-    # Time grid
+    # 1. Create a broad time grid to find the transitions
     n_steps = int((max_hours * u.hour / step).decompose())
     times = t0 + np.arange(n_steps + 1) * step
 
-    # AltAz frame (no refraction)
     altaz_frame = AltAz(obstime=times, location=location, pressure=0 * u.bar)
-
-    # Transform and extract altitude
-    alt = source_icrs.transform_to(altaz_frame).alt.to_value(u.deg)
-    h = horizon.to_value(u.deg)
+    alt = source.transform_to(altaz_frame).alt.to_value(u.deg)
 
     rise_time = None
     set_time = None
 
-    # Rise: below -> above
-    rise_idx = np.where((alt[:-1] < h) & (alt[1:] >= h))[0]
-    if len(rise_idx) > 0:
-        i = rise_idx[0]
-        frac = (h - alt[i]) / (alt[i + 1] - alt[i])
-        rise_time = times[i] + frac * (times[i + 1] - times[i])
+    # 2. Find the FIRST Rising event (below -> above)
+    rise_indices = np.where((alt[:-1] < h) & (alt[1:] >= h))[0]
 
-    # Set: above -> below
-    set_idx = np.where((alt[:-1] >= h) & (alt[1:] < h))[0]
-    if len(set_idx) > 0:
-        i = set_idx[0]
-        frac = (h - alt[i]) / (alt[i + 1] - alt[i])
-        set_time = times[i] + frac * (times[i + 1] - times[i])
+    if len(rise_indices) > 0:
+        i_r = rise_indices[0]
+        # Linear interpolation for precision
+        frac_r = (h - alt[i_r]) / (alt[i_r + 1] - alt[i_r])
+        rise_time = times[i_r] + frac_r * (times[i_r + 1] - times[i_r])
+
+        # 3. Find the FIRST Setting event that happens AFTER the Rise
+        # We only look at indices greater than i_r
+        set_indices = np.where((alt[:-1] >= h) & (alt[1:] < h))[0]
+        # Filter for the first setting index that is greater than the rise index
+        after_rise = set_indices[set_indices >= i_r]
+
+        if len(after_rise) > 0:
+            i_s = after_rise[0]
+            frac_s = (h - alt[i_s]) / (alt[i_s + 1] - alt[i_s])
+            set_time = times[i_s] + frac_s * (times[i_s + 1] - times[i_s])
 
     return rise_time, set_time
 
@@ -440,7 +523,7 @@ def zero_pointing_model():
         )
 
 
-def compare_kosma_tests_with_astropy(make_plots=True, plot_logs=False):
+def compare_kosma_tests_with_astropy(make_plots=True, figure_tag="", plot_logs=False):
     logger = logging.getLogger("tests_with_astra")
     logger.info("Comparing KOSMA tests with Astropy outputs.")
     #
@@ -520,15 +603,19 @@ def compare_kosma_tests_with_astropy(make_plots=True, plot_logs=False):
         results_df.to_excel(writer, sheet_name="comparison_results", index=False)
     #
     if make_plots:
-        make_comparison_plots(results_df, plot_axis=plot_axis, plot_logs=plot_logs)
+        make_comparison_plots(
+            results_df, plot_axis=plot_axis, plot_logs=plot_logs, figure_tag=figure_tag
+        )
 
 
-def make_comparison_plots(results_df, plot_axis="time_dt", plot_logs=False):
+def make_comparison_plots(
+    results_df, plot_axis="time_dt", plot_logs=False, figure_tag=""
+):
     # make a 2x2 panel plot: absolute values on top, residuals on the bottom
     import matplotlib.pyplot as plt
 
     fig, axs = plt.subplots(2, 2, figsize=(14, 10), sharex=False)
-    fig.suptitle("Astra  vs KOSMA-OCS-Translator Pointing Analysis")
+    fig.suptitle(f"Astra  vs KOSMA-OCS-Translator Pointing Analysis\n{figure_tag}")
 
     # Convert time strings to datetime objects
     results_df["time_dt"] = pd.to_datetime(results_df["time"])
@@ -605,7 +692,7 @@ def make_comparison_plots(results_df, plot_axis="time_dt", plot_logs=False):
     if time_axis == "time_dt":
         # add fig suptile with offset time seconds
         fig.suptitle(
-            f"Astra vs KOSMA-OCS-Translator Pointing Analysis (Offset Time: {fixed_offset} seconds)"
+            f"Astra vs KOSMA-OCS-Translator Pointing Analysis, coords {figure_tag}\n(Offset Time: {fixed_offset} seconds)"
         )
     axs[1, 0].plot(
         results_df[time_axis],
@@ -668,9 +755,10 @@ def make_comparison_plots(results_df, plot_axis="time_dt", plot_logs=False):
 
     # Adjust layout
     plt.tight_layout(rect=[0, 0.03, 1, 0.95])
-    logger.info("Saving pointing analysis plot to astra_kosma_pointing_analysis.png")
-    plt.savefig("astra_kosma_pointing_analysis.png")
-    plt.show()
+    figure_filename = f"figures/astra_kosma_pointing_analysis_{figure_tag}.png"
+    logger.info(f"Saving pointing analysis plot to {figure_filename}")
+    plt.savefig(figure_filename)
+    # plt.show()
 
 
 # Add argument parsing
@@ -711,6 +799,13 @@ parser.add_argument(
     type=float,
     default=0.0,
     help="Offset time in seconds to apply when comparing Astra and Astropy times.",
+)
+
+# parametric j2000 option
+parser.add_argument(
+    "--parametric-j2000-tests",
+    action="store_true",
+    help="Run parametric tests for J2000 coordinate and galactic system.",
 )
 
 
@@ -921,6 +1016,80 @@ else:
 if args.compare_data_only:
     logger.info("Running comparison only as per user request.")
     compare_kosma_tests_with_astropy(make_plots=True)
+
+if args.parametric_j2000_tests:
+    logger.info("Running parametric J2000 tests...")
+    # TODO implement parametric J2000 tests
+    # read tel2obs and extract location
+    files = ImportKOSMAReadWriteIntoDictionary(["KOSMA_tel2obs.set"])
+    tel2obs = files["KOSMA_tel2obs.set"]
+    location = EarthLocation(
+        lon=-1 * tel2obs["tel_longitude"] * u.deg,
+        lat=tel2obs["tel_latitude"] * u.deg,
+        height=tel2obs["tel_altitude"] * u.m,
+    )
+    # get range of ra and dec available
+    obs_time = Time("2026-02-10T10:00:00", scale="utc")
+    results = get_visible_sky_range_in_j2000_coordinates(location, obs_time, min_alt=20)
+    # log results
+    logger.info(
+        f"Visible sky range in J2000 coordinates at time {obs_time.iso} from location"
+        f" (lon: {location.lon.deg}, lat: {location.lat.deg}, height: {location.height.value} m):\n"
+        f"RA range: {results['ra_min']:.2f} deg to {results['ra_max']:.2f} deg\n"
+        f"Dec range: {results['dec_min']:.2f} deg to {results['dec_max']:.2f} deg"
+    )
+    # generate test points in this range
+    ra_values = np.linspace(results["ra_min"], results["ra_max"], 5)
+    dec_values = np.linspace(results["dec_min"], results["dec_max"], 5)
+    # make a array of tuples of ra and dec
+    ra_dec_tuples = [(ra, dec) for ra in ra_values for dec in dec_values]
+    for ra, dec in ra_dec_tuples:
+        #  loop over ra and dec values and run tests
+        test_data_frames = {}
+        test_data_frames["KOSMA_obs2tel.set"] = []
+        test_data_frames["KOSMA_tel2obs.set"] = []
+        test_data_frames["KOSMA_astra.status"] = []
+        #
+        source_name = f"TEST_RA{ra:03.0f}_DEC{dec:03.0f}"
+        cmd_create_source = f"setsource {source_name} -l {ra} -b {dec} -C J2000"
+        coord = SkyCoord(ra * u.deg, dec * u.deg, frame="icrs")
+        # get rise and set times for this source
+        try:
+            astra_times, rise_time, set_time = get_track_times_from_object(
+                obs_time, coord, location
+            )
+        except Exception as e:
+            logger.error(
+                f"Error getting track times for source {source_name} at RA: {ra}, Dec: {dec}: {e}"
+            )
+            continue
+        logger.info(f"Running test for source {source_name} at RA: {ra}, Dec: {dec}")
+        for astra_time in astra_times:
+            logger.info(f"Running track test at Astra time: {astra_time.iso}")
+            # create source in Astra
+            obs2tel, tel2obs = run_kosma_commands(
+                [cmd_create_source], astra_time=astra_time.iso.replace(" ", "T")
+            )
+            #
+            if obs2tel is None or tel2obs is None:
+                logger.error("Error running KOSMA commands. Skipping this test.")
+                continue
+            #
+            test_data_frames["KOSMA_obs2tel.set"].append(obs2tel)
+            test_data_frames["KOSMA_tel2obs.set"].append(tel2obs)
+            # read KOSMA_astra.status file
+            files = ImportKOSMAReadWriteIntoDictionary(["KOSMA_astra.status"])
+            test_data_frames["KOSMA_astra.status"].append(files["KOSMA_astra.status"])
+        save_data_test_outputs_to_dataframe(test_data_frames)
+        #
+        compare_kosma_tests_with_astropy(
+            make_plots=True, figure_tag=f"RA{ra:.2f}_DEC{dec:.2f}"
+        )
+
+    # make datraframe for each file for later analysis
+    # save output to an excel file in different sheets
+
+
 # TODO check a track and monitor offsets
 # TODO introduce coord offsets
 # TODO introduce instrument/pixel offsets
