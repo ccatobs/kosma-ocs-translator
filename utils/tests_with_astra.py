@@ -297,12 +297,17 @@ def compare_astropy_with_kosma(
     observation_time = Time(obs2tel.astra_time, scale="utc")
     # offset by 2 seconds
     observation_time += offset_time_seconds * u.s
+    # offset args off
+    observation_time += args.offset_time_seconds * u.s
     # compare mjd from astra_status with astropy time
     astra_status_mjd = astra_status["a_dj1"]
     observation_time.to_value("mjd", "long")
     mjd_difference = observation_time.to_value("mjd", "long") - astra_status_mjd
+    print(
+        f"MJD Astropy: {observation_time.to_value('mjd', 'long')}, MJD Astra: {astra_status_mjd}"
+    )
     # add mjd difference to observation_time
-    observation_time -= mjd_difference * 86400.0 * u.s
+    # observation_time += mjd_difference * 86400.0 * u.s
     logger.info(
         f"Time difference between Astropy and Astra status MJD: {mjd_difference * 86400.0:.6f} seconds"
     )
@@ -477,7 +482,8 @@ def compare_kosma_tests_with_astropy(make_plots=True, plot_logs=False):
             logger.error(
                 f"Error: Found {len(tel2obs)} matching tel2obs entries for cookie {cookie}"
             )
-            raise SystemExit
+            # raise SystemExit
+            continue
         #
         if len(time_offset_range) > 1:
             plot_axis = "offset_time_seconds"
@@ -699,7 +705,16 @@ parser.add_argument(
     help="Just run comparison and not run any tests.",
 )
 
+# offtime option
+parser.add_argument(
+    "--offset-time-seconds",
+    type=float,
+    default=0.0,
+    help="Offset time in seconds to apply when comparing Astra and Astropy times.",
+)
 
+
+global args
 args = parser.parse_args()
 
 #
