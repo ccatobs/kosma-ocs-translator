@@ -824,7 +824,31 @@ coord_sys_map = {
 zero_pointing_model()
 is_astra_running()
 
+files = ImportKOSMAReadWriteIntoDictionary(["KOSMA_tel2obs.set"])
+tel2obs = files["KOSMA_tel2obs.set"]
+location = EarthLocation(
+    lon=-1 * tel2obs["tel_longitude"] * u.deg,
+    lat=tel2obs["tel_latitude"] * u.deg,
+    height=tel2obs["tel_altitude"] * u.m,
+)
+
 if args.run_track_tests_J2000:
+    #
+    ra = -180
+    dec = -50
+    source_name = f"TEST_RA{ra:03.0f}_DEC{dec:03.0f}"
+    cmd_create_source = f"setsource {source_name} -l {ra} -b {dec} -C J2000"
+    coord = SkyCoord(ra * u.deg, dec * u.deg, frame="icrs")
+    obs_time = Time("2026-02-10T16:00:00")
+    # get rise and set times for this source
+    try:
+        astra_times, rise_time, set_time = get_track_times_from_object(
+            obs_time, coord, location
+        )
+    except Exception as e:
+        logger.error(
+            f"Error getting track times for source {source_name} at RA: {ra}, Dec: {dec}: {e}"
+        )
     start_time = Time.now().iso.replace(" ", "T")
     test_data_frames = {}
     test_data_frames["KOSMA_obs2tel.set"] = []
@@ -832,10 +856,7 @@ if args.run_track_tests_J2000:
     test_data_frames["KOSMA_astra.status"] = []
     # commands to run for testing
 
-    cmd = ["setsource W43_OFF", "KOSMA_setoffset -l 00.0", "setpoint -p L"]
-    astra_time_str = "2026-02-10T16:00:00"
-    source_name = "W43_OFF"
-    astra_times, rise_time, set_time = get_track_times(astra_time_str, source_name)
+    cmd = [cmd_create_source, "KOSMA_setoffset -l 00.0", "setpoint -p L"]
     # make an array of times from rise to set time
 
     # collect obs2tel and get coord
@@ -868,7 +889,9 @@ if args.run_track_tests_J2000:
             df.to_excel(writer, sheet_name=sheet_name, index=False)
     logger.info("Test outputs saved successfully.")
     #
-    compare_kosma_tests_with_astropy(make_plots=True)
+    compare_kosma_tests_with_astropy(
+        make_plots=True, figure_tag=f"RA{ra:03.0f}_DEC{dec:03.0f}"
+    )
 
 if args.run_track_tests_galactic:
     #
@@ -1021,13 +1044,6 @@ if args.parametric_j2000_tests:
     logger.info("Running parametric J2000 tests...")
     # TODO implement parametric J2000 tests
     # read tel2obs and extract location
-    files = ImportKOSMAReadWriteIntoDictionary(["KOSMA_tel2obs.set"])
-    tel2obs = files["KOSMA_tel2obs.set"]
-    location = EarthLocation(
-        lon=-1 * tel2obs["tel_longitude"] * u.deg,
-        lat=tel2obs["tel_latitude"] * u.deg,
-        height=tel2obs["tel_altitude"] * u.m,
-    )
     # get range of ra and dec available
     obs_time = Time("2026-02-10T10:00:00", scale="utc")
     results = get_visible_sky_range_in_j2000_coordinates(location, obs_time, min_alt=20)
