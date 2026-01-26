@@ -378,10 +378,10 @@ def compare_astropy_with_kosma(
     )
     # set timezone to UTC
     observation_time = Time(obs2tel.astra_time, scale="utc")
+    #
+    offset_time_seconds += args.offset_time_seconds
     # offset by 2 seconds
     observation_time += offset_time_seconds * u.s
-    # offset args off
-    observation_time += args.offset_time_seconds * u.s
     # compare mjd from astra_status with astropy time
     astra_status_mjd = astra_status["a_dj1"]
     observation_time.to_value("mjd", "long")
@@ -390,7 +390,7 @@ def compare_astropy_with_kosma(
         f"MJD Astropy: {observation_time.to_value('mjd', 'long')}, MJD Astra: {astra_status_mjd}"
     )
     # add mjd difference to observation_time
-    # observation_time += mjd_difference * 86400.0 * u.s
+    # observation_time -= mjd_difference * 86400.0 * u.s
     logger.info(
         f"Time difference between Astropy and Astra status MJD: {mjd_difference * 86400.0:.6f} seconds"
     )
@@ -690,7 +690,7 @@ def make_comparison_plots(
     # Plot Azimuth residuals (bottom-left)
     time_axis = plot_axis
     if time_axis == "time_dt":
-        # add fig suptile with offset time seconds
+        # add fig suptitle with offset time seconds
         fig.suptitle(
             f"Astra vs KOSMA-OCS-Translator Pointing Analysis, coords {figure_tag}\n(Offset Time: {fixed_offset} seconds)"
         )
