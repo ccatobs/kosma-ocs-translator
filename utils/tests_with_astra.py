@@ -504,12 +504,47 @@ def compare_astropy_with_kosma(
         obs2tel["obs_bet_on"] * u.deg,
         frame=frame,
     )
+    # apply offset from obs2tel
+    if obs2tel["obs_coord_sys_del"] not in coord_sys_map.keys():
+        logger.error(
+            f"Offset coordinate system {obs2tel['obs_coord_sys_del']} not supported for offsets."
+        )
+        raise SystemError
+    # check if offset coordinate system matches observation coordinate system
+    if obs2tel["obs_lam_del"] == 0.0 and obs2tel["obs_bet_del"] == 0.0:
+        pass  # no offset to apply
+    elif obs2tel["obs_coord_sys_on"] == obs2tel["obs_coord_sys_del"]:
+        # apply offset using astropy coordinate transformations
+        coord_offset = coord.spherical_offsets_by(
+            d_lon=obs2tel["obs_lam_del"] * u.arcsec,
+            d_lat=obs2tel["obs_bet_del"] * u.arcsec,
+        )
+        coord = coord_offset
+    elif obs2tel["obs_coord_sys_on"] != obs2tel["obs_coord_sys_del"]:
+        # convert to offset coordinate system first
+        frame_offset = coord_sys_map[obs2tel["obs_coord_sys_del"]]
+        coord_in_offset_frame = coord.transform_to(frame_offset)
+        # apply offset
+        coord_offset = coord_in_offset_frame.spherical_offsets_by(
+            d_lon=obs2tel["obs_lam_del"] * u.arcsec,
+            d_lat=obs2tel["obs_bet_del"] * u.arcsec,
+        )
+        # convert back to original frame
+        coord = coord_offset.transform_to(frame)
+
     # astra treats longitudes as postive for west, astropy is negative for east
-    observer_location = EarthLocation(
-        lon=-1 * tel2obs["tel_longitude"].values[0] * u.deg,
-        lat=tel2obs["tel_latitude"].values[0] * u.deg,
-        height=tel2obs["tel_altitude"].values[0] * u.m,
-    )
+    try:
+        observer_location = EarthLocation(
+            lon=-1 * tel2obs["tel_longitude"].values[0] * u.deg,
+            lat=tel2obs["tel_latitude"].values[0] * u.deg,
+            height=tel2obs["tel_altitude"].values[0] * u.m,
+        )
+    except:
+        observer_location = EarthLocation(
+            lon=-1 * tel2obs.tel_longitude * u.deg,
+            lat=tel2obs.tel_latitude * u.deg,
+            height=tel2obs.tel_altitude * u.m,
+        )
     # set timezone to UTC
     observation_time = Time(obs2tel.astra_time, scale="utc", location=observer_location)
     #
@@ -539,6 +574,7 @@ def compare_astropy_with_kosma(
     temperature = weather["wet_temp"]  # convert to celcis from K
     temperature = (temperature - 273.15) * u.deg_C
     humidity = weather["wet_humidity"]
+    # apply offset from args
 
     # get altaz
     altaz_frame = AltAz(
@@ -579,10 +615,10 @@ def compare_astropy_with_kosma(
     az_astropy = altaz.az.deg
     el_astropy = altaz.alt.deg
     # compare with tel2obs values
-    az_kosma = tel2obs["tel_azm_act"].values[0]
-    el_kosma = tel2obs["tel_elv_act"].values[0]
-    az_cmd_kosma = tel2obs["tel_azm_cmd"].values[0]
-    el_cmd_kosma = tel2obs["tel_elv_cmd"].values[0]
+    az_kosma = tel2obs["tel_azm_act"]
+    el_kosma = tel2obs["tel_elv_act"]
+    az_cmd_kosma = tel2obs["tel_azm_cmd"]
+    el_cmd_kosma = tel2obs["tel_elv_cmd"]
     # log differences
     az_difference = round(az_astropy - az_kosma, 6)
     el_difference = round(el_astropy - el_kosma, 6)
@@ -593,8 +629,9 @@ def compare_astropy_with_kosma(
     )
     # from df_log get row with closest time to obs2tel astra_time + offset_time_seconds
     # use the coordinate_time column
-    df_log["time_diff"] = abs(df_log["unix_time"] - tel2obs["timestamp"].values[0])
-    closest_row = df_log.loc[df_log["time_diff"].idxmin()]
+    if df_log is not None:
+        df_log["time_diff"] = abs(df_log["unix_time"] - tel2obs["timestamp"])
+        closest_row = df_log.loc[df_log["time_diff"].idxmin()]
     #
     # results
     results = {
@@ -607,10 +644,6 @@ def compare_astropy_with_kosma(
         "test_name": obs2tel["test_name"],
         "time": obs2tel["astra_time"],
         "offset_time_seconds": offset_time_seconds,
-        "astra_log_az": closest_row["az"],
-        "astra_log_el": closest_row["el"],
-        "log_diff_to_astropy_az_arc_sec": (az_astropy - closest_row["az"]) * 3600.0,
-        "log_diff_to_astropy_el_arc_sec": (el_astropy - closest_row["el"]) * 3600.0,
         "mjd_astropy": observation_time.to_value("mjd", "long"),
         "mjd_astra": astra_status["a_dj1"],
         "mjd_difference_seconds": mjd_difference * 86400.0,
@@ -1037,6 +1070,17 @@ parser.add_argument(
     help="Run track tests for J2000 coordinate system every month.",
 )
 
+parser.add_argument(
+    "--test_offset_application",
+    action="store_true",
+    help="Test how offset time application affects results.",
+)
+
+parser.add_argument(
+    "--test_instrument_offsets",
+    action="store_true",
+    help="Test instrument offsets application affects results.",
+)
 global args
 args = parser.parse_args()
 
@@ -1051,7 +1095,8 @@ coord_sys_map = {
 
 zero_pointing_model()
 if not is_astra_running():
-    raise SystemExit("Astra is not running. Please start Astra and try again.")
+    # raise SystemExit("Astra is not running. Please start Astra and try again.")
+    pass
 
 files = ImportKOSMAReadWriteIntoDictionary(["KOSMA_tel2obs.set", "measurement.set"])
 tel2obs = files["KOSMA_tel2obs.set"]
@@ -1109,7 +1154,7 @@ if args.run_track_tests_J2000:
     source_name = f"TEST_RA{ra:03.0f}_DEC{dec:03.0f}"
     coord = SkyCoord(ra * u.deg, dec * u.deg, frame="icrs")
     obs_time = Time(
-        "2026-02-10T10:00:00",
+        "2026-05-10T10:00:00",
         location=location,
         scale="utc",
     )
@@ -1259,47 +1304,7 @@ if args.run_track_tests_galactic:
 
 # Check if Astra tests should be run
 if args.run_astra_tests:
-    logger.info("Running Astra tests...")
-    # Add logic to run Astra tests here
-    # Example: subprocess.run(["astra", "test-command"]
-    #
-    #
-    cmds = []
-    cmds += [["setsource H40_40 -l 40 -b 40 -C HORIZON"]]  # HORIZONAL
-    cmds += [["setsource H30_30 -l 30 -b 30 -C HORIZON"]]  # HORIZONAL
-    cmds += [["setsource H30_30 -l 20 -b 20 -C HORIZON"]]  # HORIZONAL
-    cmds += [["setsource H30_30 -l 10 -b 10 -C HORIZON"]]  # HORIZONAL
-    test_data_frames = {}
-    test_data_frames["KOSMA_obs2tel.set"] = []
-    test_data_frames["KOSMA_tel2obs.set"] = []
-    test_data_frames["KOSMA_astra.status"] = []
-    # commands to run for testing
-    astra_time = "2026-02-10T10:00:00"
-    for cmd in cmds:
-        obs2tel, tel2obs = run_kosma_commands(cmd, astra_time=astra_time)
-        test_data_frames["KOSMA_obs2tel.set"].append(obs2tel)
-        test_data_frames["KOSMA_tel2obs.set"].append(tel2obs)
-        # read KOSMA_astra.status file
-        files = ImportKOSMAReadWriteIntoDictionary(["KOSMA_astra.status"])
-        test_data_frames["KOSMA_astra.status"].append(files["KOSMA_astra.status"])
-        test_data = save_test_outputs_to_dataframe(test_name=str(cmd))
-        # test_data["astra_time"] = astra_time
-        for file, data in test_data.items():
-            data["astra_time"] = astra_time
-            if file not in test_data_frames:
-                test_data_frames[file] = []
-            test_data_frames[file].append(data)
-    # make datraframe for each file for later analysis
-    # save output to an excel file in different sheets
-    logger.info("Saving test outputs to Excel file.")
-    with pd.ExcelWriter("astra_kosma_test_outputs.xlsx") as writer:
-        for file, data_list in test_data_frames.items():
-            df = pd.DataFrame(data_list)
-            sheet_name = os.path.splitext(os.path.basename(file))[0]
-            df.to_excel(writer, sheet_name=sheet_name, index=False)
-    logger.info("Test outputs saved successfully.")
-    #
-    compare_kosma_tests_with_astropy(make_plots=True)
+    print("Running Astra tests...")
 
 
 # Check if Astra tests should be run
@@ -1323,14 +1328,8 @@ if args.run_horizon_tests:
     # cmds += [["setsource G300_30 -l 300 -b 30 -C GALACTIC"]]  # GALACTIC
     cmds += [["setsource H40_40 -l 40 -b 40 -C HORIZON"]]  # HORIZONAL
     cmds += [["setsource H30_30 -l 30 -b 30 -C HORIZON"]]  # HORIZONAL
-    # cmds += [["setsource H30_30 -l 20 -b 20 -C HORIZON"]]  # HORIZONAL
-    # cmds += [["setsource H30_30 -l 10 -b 10 -C HORIZON"]]  # HORIZONAL
-    # cmds += [["KOSMA_setoffset -l 10.0"]]
-    # cmds += [["KOSMA_setoffset -l 20.0"]]
-    # cmds += [["setsource W43_OFF", "KOSMA_setoffset -l 00.0"]]
-    # cmds += [["setsource GC2_J2000", "KOSMA_setoffset -l 00.0"]]
-    # cmds += [["KOSMA_setoffset -l 10.0"]]
-    # cmds += [["KOSMA_setoffset -l 20.0"]]
+    cmds += [["setsource H20_20 -l 20 -b 20 -C HORIZON"]]  # HORIZONAL
+    cmds += [["setsource H10_10 -l 10 -b 10 -C HORIZON"]]  # HORIZONAL
     test_data_frames = {}
     # commands to run for testing
     astra_time = "2026-02-10T10:00:00"
@@ -1499,9 +1498,95 @@ if args.find_optimal_time_offset:
     print("Number of iterations:", result.nit)
     #
 
+if args.test_offset_application:
+    # apply offset via KOSMA_setoffset command and rerun comparison
+    ra = 180
+    dec = -50
+    source_name = f"TEST_RA{ra:03.0f}_DEC{dec:03.0f}"
+    coord = SkyCoord(ra * u.deg, dec * u.deg, frame="icrs")
+    obs_time_start = Time(
+        "2026-02-10T16:00:00",
+        location=location,
+        scale="utc",
+    )
+    #
+    cmd_create_j2000_source = f"setsource {source_name} -l {ra} -b {dec} -C J2000"
+    # convert ra,dec to galactic for tests
+    coord_galactic = coord.transform_to("galactic")
+    cmd_create_source_galactic = f"setsource {source_name}_GAL -l {coord_galactic.l.deg} -b {coord_galactic.b.deg} -C GALACTIC"
+    #
+    offset_l = 100
+    offset_b = -50
+    cmds = []
+    cmds.append(
+        [f"KOSMA_setoffset -l {offset_l} -b {offset_b} ", cmd_create_j2000_source]
+    )
+    cmds.append(
+        [f"KOSMA_setoffset -l {offset_l} -b {offset_b}", cmd_create_source_galactic]
+    )
+    for cmd in cmds:
+        obs2tel, tel2obs = run_kosma_commands(
+            cmd, astra_time=obs_time_start.iso.replace(" ", "T")
+        )
+        obs2tel = pd.DataFrame([obs2tel]).loc[0]
+        tel2obs = pd.DataFrame([tel2obs]).loc[0]
+        #
+        files = ImportKOSMAReadWriteIntoDictionary(["KOSMA_astra.status"])
+        astra_status = files["KOSMA_astra.status"]
+        df_log = None
+        apply_refraction = False
+        fixed_offset = 0.0
+        compare_astropy_with_kosma(
+            obs2tel, tel2obs, df_log, astra_status, fixed_offset, apply_refraction
+        )
+    #
+
+if args.test_instrument_offsets:
+    logger.info("Testing instrument offsets...")
+    #
+    # apply offset via KOSMA_setoffset command and rerun comparison
+    ra = 180
+    dec = -50
+    source_name = f"TEST_RA{ra:03.0f}_DEC{dec:03.0f}"
+    coord = SkyCoord(ra * u.deg, dec * u.deg, frame="icrs")
+    obs_time_start = Time(
+        "2026-02-10T16:00:00",
+        location=location,
+        scale="utc",
+    )
+    #
+    cmd_create_j2000_source = f"setsource {source_name} -l {ra} -b {dec} -C J2000"
+    # offset a pixel position in instrument coordinates
+    offset_x = 0.1  # mm
+    offset_y = -0.2  # mm
+    cmd_x_offset = f"Kset_hardware Rx_act_px[0] {offset_x}"
+    cmd_y_offset = f"Kset_hardware Ry_act_px[0] {offset_y}"
+    #
+    cmds = []
+    cmds.append([f"{cmd_x_offset}", cmd_create_j2000_source])
+    cmds.append([f"{cmd_y_offset}", cmd_create_j2000_source])
+    for cmd in cmds:
+        obs2tel, tel2obs = run_kosma_commands(
+            cmd, astra_time=obs_time_start.iso.replace(" ", "T")
+        )
+        obs2tel = pd.DataFrame([obs2tel]).loc[0]
+        tel2obs = pd.DataFrame([tel2obs]).loc[0]
+        #
+        files = ImportKOSMAReadWriteIntoDictionary(["KOSMA_astra.status"])
+        astra_status = files["KOSMA_astra.status"]
+        df_log = None
+        apply_refraction = False
+        fixed_offset = 0.0
+        compare_astropy_with_kosma(
+            obs2tel, tel2obs, df_log, astra_status, fixed_offset, apply_refraction
+        )
+    #
 
 # TODO check a track and monitor offsets
 # TODO introduce coord offsets
 # TODO introduce instrument/pixel offsets
 # TODO check refraction corrections
 # TODO check OTF implemnentation
+
+# 294.52101   obs_lam_on   ! first coordinate axis of spherical coordinate system obs_coord_sys_on [degree]
+# 12.029845   obs_bet_on   ! second coordinate axis of spherical coordinate system obs_coord_sys_on [degree]
