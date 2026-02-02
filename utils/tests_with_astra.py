@@ -138,6 +138,10 @@ def get_track_times_from_object(
 
     # 1. Calculate rise and set times
     # Note: Assuming rise_set_times_astropy is your existing utility function
+    # print args
+    print(
+        f"Calculating rise/set times for source at {source_coord} from location {location} starting at {t0.iso}"
+    )
     rise_time, set_time = rise_set_times_astropy(
         source=source_coord,
         location=location,
@@ -1109,7 +1113,7 @@ if args.run_track_tests_J2000:
     source_name = f"TEST_RA{ra:03.0f}_DEC{dec:03.0f}"
     coord = SkyCoord(ra * u.deg, dec * u.deg, frame="icrs")
     obs_time = Time(
-        "2026-02-10T10:00:00",
+        "2026-06-23T10:00:00",
         location=location,
         scale="utc",
     )
@@ -1138,7 +1142,7 @@ if args.run_track_tests_J2000_every_month:
     source_name = f"TEST_RA{ra:03.0f}_DEC{dec:03.0f}"
     coord = SkyCoord(ra * u.deg, dec * u.deg, frame="icrs")
     obs_time_start = Time(
-        "2026-02-10T16:00:00",
+        "2026-02-24T16:00:00",
         location=location,
         scale="utc",
     )
@@ -1154,7 +1158,13 @@ if args.run_track_tests_J2000_every_month:
     # Generate the weekly times
     weekly_times = start_time + TimeDelta(day_step * u.day) * np.arange(n_weeks)
     for obs_time in weekly_times:
+        print("######### running test for obs_time:", obs_time.iso)
         results_df = run_track_test(source_name, coord, location, obs_time)
+
+        if results_df is None:
+            continue
+        # if results_df is None:
+        #    continue
         # find optimal time offset
         fit_result = minimize_scalar(
             minimize_azimith_residuals, bounds=(-0.6, 0.6), method="bounded"
