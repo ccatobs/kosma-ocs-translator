@@ -179,6 +179,8 @@ class KOSMA_translator:
         {0[tel_elv_cmd]:3.4f}   tel_elv_cmd   ! commanded elevation (for tracking display and for atmospheric calibration) [degree]
         {0[tel_azm_act]:3.4f}   tel_azm_act   ! actual azimuth (for tracking display) [degree,cw toward east]
         {0[tel_elv_act]:3.4f}   tel_elv_act   ! actual elevation (for tracking display) [degree]
+        {0[tel_supports_ephemeris]}   tel_supports_ephemeris   ! Telescope supports ephemeris tracking [Y/N] !
+        0.0    tel_mjd1 ! MJD of integer part of current time [days] 
         """
 
     def set_tel2obs_dict(self):
@@ -300,7 +302,7 @@ def run_write_tel2obs_file_in_background(translator):
         time.sleep(translator.obs_tel_info_update_time)
 
 
-ocs_host = "localhost"
+ocs_host = "127.0.0.1"
 ocs_port = 5600
 # certificates_path = "../observatory-control-system/tls"
 certificates_path = None
