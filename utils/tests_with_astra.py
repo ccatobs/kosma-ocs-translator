@@ -334,6 +334,19 @@ def parse_log_line_to_dict(log_line):
 
     return key_value_pairs
 
+def run_system_command(cmd):
+    logger = logging.getLogger("tests_with_astra")
+    logger.info(f"Running system command: {cmd}")
+    result = subprocess.run(
+        cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    logger.info(f"Command output:\n {result.stdout}")
+    if result.returncode != 0:
+        logger.error(f"Error running command {cmd}: {result.stderr}")
+        raise SystemExit
+    else:
+        logger.info(f"Command {cmd} ran successfully.")
+    return result.stdout
 
 def run_kosma_commands_in_fast_mode(cmds, astra_time=None):
     #
@@ -345,14 +358,7 @@ def run_kosma_commands_in_fast_mode(cmds, astra_time=None):
     #
     for cmd in cmds:
         logger.info(f"Running command: {cmd}")
-        result = subprocess.run(
-            cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-        )
-        if result.returncode != 0:
-            logger.error(f"Error running command {cmd}: {result.stderr}")
-            raise SystemExit
-        else:
-            logger.info(f"Command {cmd} ran successfully.")
+        run_system_command(cmd)
     # write astra_time_array to /tmp/astra_debug_time.txt
     if astra_time is None:
         return
@@ -500,6 +506,12 @@ def compare_astropy_with_kosma(
     apply_refraction=False,
 ):
     logger = logging.getLogger("tests_with_astra")
+
+    # Convert Series to dict if needed for consistent access
+    if isinstance(obs2tel, pd.Series):
+        obs2tel = obs2tel.to_dict()
+    if isinstance(tel2obs, pd.Series):
+        tel2obs = tel2obs.to_dict()
     #
     # run obs2tel though astropy for testing
     frame = coord_sys_map[obs2tel["obs_coord_sys_on"]]
@@ -545,12 +557,14 @@ def compare_astropy_with_kosma(
         )
     except:
         observer_location = EarthLocation(
-            lon=-1 * tel2obs.tel_longitude * u.deg,
-            lat=tel2obs.tel_latitude * u.deg,
-            height=tel2obs.tel_altitude * u.m,
+            lon=-1 * tel2obs["tel_longitude"] * u.deg,
+            lat=tel2obs["tel_latitude"] * u.deg,
+            height=tel2obs["tel_altitude"] * u.m,
         )
     # set timezone to UTC
-    observation_time = Time(obs2tel.astra_time, scale="utc", location=observer_location)
+    observation_time = Time(
+        obs2tel["astra_time"], scale="utc", location=observer_location
+    )
     #
     offset_time_seconds += args.offset_time_seconds
     # offset by 2 seconds
@@ -619,23 +633,28 @@ def compare_astropy_with_kosma(
     az_astropy = altaz.az.deg
     el_astropy = altaz.alt.deg
     # compare with tel2obs values
-    az_kosma = tel2obs["tel_azm_act"]
-    el_kosma = tel2obs["tel_elv_act"]
-    az_cmd_kosma = tel2obs["tel_azm_cmd"]
-    el_cmd_kosma = tel2obs["tel_elv_cmd"]
+    try:
+        az_kosma = tel2obs["tel_azm_act"].values[0]
+        el_kosma = tel2obs["tel_elv_act"].values[0]
+        az_cmd_kosma = tel2obs["tel_azm_cmd"].values[0]
+        el_cmd_kosma = tel2obs["tel_elv_cmd"].values[0]
+    except:
+        az_kosma = tel2obs["tel_azm_act"]
+        el_kosma = tel2obs["tel_elv_act"]
+        az_cmd_kosma = tel2obs["tel_azm_cmd"]
+        el_cmd_kosma = tel2obs["tel_elv_cmd"]
     # log differences
     az_difference = round(az_astropy - az_kosma, 6)
     el_difference = round(el_astropy - el_kosma, 6)
+    logger.info(f"Test Name: {obs2tel['test_name']}")
+    # print all the values
+
     logger.info(
-        f"Test Name: {obs2tel['test_name']}\n"
         f"astropy Azimuth: {az_astropy:.4f}, KOSMA Azimuth: {az_kosma:.4f}, Difference: {az_difference:.4f} ({az_difference * 3600.0:.4f} arcsec) \n"
         f"astropy Elevation: {el_astropy:.4f}, KOSMA Elevation: {el_kosma:.4f}, Difference: {el_difference:.4f} ({el_difference * 3600.0:.4f} arcsec)\n"
     )
     # from df_log get row with closest time to obs2tel astra_time + offset_time_seconds
     # use the coordinate_time column
-    if df_log is not None:
-        df_log["time_diff"] = abs(df_log["unix_time"] - tel2obs["timestamp"])
-        closest_row = df_log.loc[df_log["time_diff"].idxmin()]
     #
     # results
     results = {
@@ -932,7 +951,7 @@ def run_track_test(source_name, coord, location, obs_time):
     cmd_create_source = (
         f"setsource {source_name} -l {coord.ra.deg} -b {coord.dec.deg} -C J2000"
     )
-    cmd = [cmd_create_source, "KOSMA_setoffset -l 00.0", "setpoint -p L"]
+    cmd = [cmd_create_source]
     # get rise and set times for this source
     try:
         astra_times, rise_time, set_time = get_track_times_from_object(
@@ -1137,7 +1156,7 @@ if args.run_single_ra_dec_test:
     astra_parameters = []
     for astra_time in astra_times:
         print(f"Astra time: {astra_time.iso}")
-        astra_parameter = run_kosma_commands_in_fast_mode(cmd, astra_time=astra_time)
+
         # compare with astropy
         astra_parameter.update({"astra_time": astra_time})
         astra_parameter.update({"source_name": source_name})
@@ -1559,7 +1578,7 @@ if args.test_instrument_offsets:
     dec = -50
     source_name = f"TEST_RA{ra:03.0f}_DEC{dec:03.0f}"
     coord = SkyCoord(ra * u.deg, dec * u.deg, frame="icrs")
-    obs_time_start = Time(
+    obs_time = Time(
         "2026-02-10T16:00:00",
         location=location,
         scale="utc",
@@ -1567,29 +1586,29 @@ if args.test_instrument_offsets:
     #
     cmd_create_j2000_source = f"setsource {source_name} -l {ra} -b {dec} -C J2000"
     # offset a pixel position in instrument coordinates
-    offset_x = 0.1  # mm
-    offset_y = -0.2  # mm
+    offset_x = 10.1  # mm
+    offset_y = -20.0  # mm
     cmd_x_offset = f"Kset_hardware Rx_act_px[0] {offset_x}"
-    cmd_y_offset = f"Kset_hardware Ry_act_px[0] {offset_y}"
+    cmd_y_offset = f"Kset_hardware Rx_act_py[0] {offset_y}"
     #
     cmds = []
-    cmds.append([f"{cmd_x_offset}", cmd_create_j2000_source])
-    cmds.append([f"{cmd_y_offset}", cmd_create_j2000_source])
+    cmds.append(f"{cmd_create_j2000_source}")
+    cmds.append(f"{cmd_x_offset}")
+    cmds.append(f"{cmd_y_offset}")
+    cmds.append("setpoint -p L_PX00 -t")
+    cmds.append(f"KOSMA_track")
+    # run an array of command using subprocess
     for cmd in cmds:
-        obs2tel, tel2obs = run_kosma_commands(
-            cmd, astra_time=obs_time_start.iso.replace(" ", "T")
-        )
-        obs2tel = pd.DataFrame([obs2tel]).loc[0]
-        tel2obs = pd.DataFrame([tel2obs]).loc[0]
         #
-        files = ImportKOSMAReadWriteIntoDictionary(["KOSMA_astra.status"])
-        astra_status = files["KOSMA_astra.status"]
-        df_log = None
-        apply_refraction = False
-        fixed_offset = 0.0
-        compare_astropy_with_kosma(
-            obs2tel, tel2obs, df_log, astra_status, fixed_offset, apply_refraction
-        )
+        run_system_command(cmd)
+    #
+    results_df = run_track_test(source_name, coord, location, obs_time)
+    #
+    fixed_offset = 0.0
+    figure_tag = f"RA{coord.ra.deg:03.0f}_DEC{coord.dec.deg:03.0f}_inst_offset"
+    results_df = compare_kosma_tests_with_astropy(
+        make_plots=True, figure_tag=figure_tag
+    )
     #
 
 # TODO check a track and monitor offsets
