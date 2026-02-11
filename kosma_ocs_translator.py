@@ -4,11 +4,19 @@ import random
 import logging
 import os, glob, re
 from ocs import observatory_control_system
-from astropy.coordinates import SkyCoord
+from astropy.coordinates import SkyCoord, EarthLocation, AltAz
 from astropy import units as u
+from astropy.time import Time
+import numpy as np
 import argparse
 import threading
 
+coord_sys_map = {
+    "J2000": "icrs",
+    "B1950": "fk4",
+    "GALACTIC": "galactic",
+    "HORIZON": "altaz",
+}
 
 def ImportKOSMAReadWriteIntoDictionary(files=None, variable=None, update_mod_time=True):
     log = logging.getLogger("kosma-ocs-translator")
@@ -125,6 +133,10 @@ class KOSMA_translator:
         self.tel_return_cookie = 0
         self.old_tel_return_cookie = 0
         self.read_obs2tel_file()
+        # get the telescope position from the ocs
+        self.ocs.get_telescope_position()
+        self.location = ocs.earth_location
+        self.log.info(f"Telescope location: {self.location}")
 
     def check_for_obs2tel_update(self):
         # check modification time of obs2tel file and store
@@ -190,13 +202,13 @@ class KOSMA_translator:
         input_dict["tel_elv_act"] = response["Elevation current position"]
         input_dict["tel_azm_cmd"] = response["Azimuth commanded position"]
         input_dict["tel_elv_cmd"] = response["Elevation commanded position"]
-        input_dict["tel_latitude"] = -22.7272
-        input_dict["tel_longitude"] = 67.3319
-        input_dict["tel_altitude"] = 37.61978
+        input_dict["tel_latitude"] = self.ocs.earth_location.lat.deg
+        input_dict["tel_longitude"] = self.ocs.earth_location.lon.deg
+        input_dict["tel_altitude"] = self.ocs.earth_location.height.to(u.m).value
         input_dict["tel_telescope"] = "CCAT"
         input_dict["tel_plate_scale"] = "1"
-        input_dict["tel_angle_focal_plane"] = 53.97
-        input_dict["tel_on_track"] = "Y"
+        input_dict["tel_angle_focal_plane"] = 0.0
+        input_dict["tel_on_track"] = "N"
         input_dict["tel_lost_track"] = "N"
         input_dict["tel_return_cookie"] = self.tel_return_cookie
         input_dict["tel_error"] = "0"
@@ -239,10 +251,51 @@ class KOSMA_translator:
         cmd_lam = self.obs2tel["obs_lam_on"]
         cmd_bet = self.obs2tel["obs_bet_on"]
         cmd_coord_sys_on = self.obs2tel["obs_coord_sys_on"]
+        # track details
+        track_duration = 10  # seconds
+        # make into an astropy coordinate object
+        frame = coord_sys_map[cmd_coord_sys_on]
+        coord = SkyCoord(cmd_lam * u.deg, cmd_bet * u.deg, frame=frame)
         #
         self.log.info(f"tracking to {cmd_lam} {cmd_bet} in {cmd_coord_sys_on} frame")
+        # make an array of times from now to now + track_duration, with 1 second steps
+        n_steps = int(track_duration) + 1
+        time_array = Time.now() + np.linspace(0, track_duration, n_steps) * u.second
+        # calculate the altaz coordinates for each time step
+        altaz_frames = AltAz(obstime=time_array, location=self.ocs.earth_location)
+        altaz = coord.transform_to(altaz_frames)
+        # add in focal plane offset from obs2tel file, convert from arcseconds to degrees
+        focal_plane_offset_az = self.obs2tel.get("obs_x_focal_plane") / 3600.0
+        focal_plane_offset_el = self.obs2tel.get("obs_y_focal_plane") / 3600.0
+        # add to altaz coordinates
+        az_with_focal_plane_offset = altaz.az.deg + focal_plane_offset_az
+        el_with_focal_plane_offset = altaz.alt.deg + focal_plane_offset_el
+        # calculate the velocities in azimuth and elevation using np.gradient
+        az_velocities = np.gradient(az_with_focal_plane_offset)  # deg/s
+        el_velocities = np.gradient(el_with_focal_plane_offset)  # deg/s
+        # program track mode, see defintion here ICD-1000000-32000-02-00 VA Webserver - Remote Protocol
+        mode = 0  #
+        mode_arr = np.full_like(az_with_focal_plane_offset, mode)
+        # Assuming all arrays are 1D and of the same length
+        points = np.column_stack(
+            [
+                time_array.unix - time_array.unix[0],  # time in seconds since 1970
+                az_with_focal_plane_offset,
+                el_with_focal_plane_offset,
+                az_velocities,
+                el_velocities,
+                mode_arr,
+            ]
+        )
+        points_list = points.tolist()
+        payload = {
+            "start_time": time_array[0].unix,
+            "coordsys": "Horizon",
+            "points": points_list,
+        }
         #
-        self.ocs.move_to(azimuth=cmd_lam, elevation=cmd_bet)
+        response = self.ocs.scan_pattern(data=payload)
+        self.log.info(f"scan pattern response: {response}")
 
 
 def setup_logging(log_level):
@@ -330,6 +383,8 @@ def main():
     translator.log.info(
         f"obs_tel_info_update_time set to {translator.obs_tel_info_update_time} seconds"
     )
+    # get telescope position
+
     while True:
         obs2tel_updated = translator.check_for_obs2tel_update()
         if not obs2tel_updated:
