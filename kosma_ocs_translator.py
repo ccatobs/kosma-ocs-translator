@@ -252,7 +252,7 @@ class KOSMA_translator:
         cmd_bet = self.obs2tel["obs_bet_on"]
         cmd_coord_sys_on = self.obs2tel["obs_coord_sys_on"]
         # track details
-        track_duration = 10  # seconds
+        track_duration = 10  # seconds, for testing
         # make into an astropy coordinate object
         frame = coord_sys_map[cmd_coord_sys_on]
         coord = SkyCoord(cmd_lam * u.deg, cmd_bet * u.deg, frame=frame)
@@ -284,7 +284,6 @@ class KOSMA_translator:
                 el_with_focal_plane_offset,
                 az_velocities,
                 el_velocities,
-                mode_arr,
             ]
         )
         points_list = points.tolist()
