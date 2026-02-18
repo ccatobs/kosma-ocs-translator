@@ -345,6 +345,8 @@ def parse_arguments():
         default="INFO",
         help="Set the logging level. Choices: DEBUG, INFO, WARNING, ERROR, CRITICAL. Default is INFO.",
     )
+    # add option to toggle between roofmounted and ccat location for testing
+    parser.add_argument("--use-roofmount", action="store_true", help="Use roof")
     return parser.parse_args()
 
 
@@ -367,6 +369,7 @@ def main():
     log_level = getattr(logging, args.log_level)
     logger = setup_logging(log_level)
     print(f"Using certificates path: {certificates_path}")
+
     ocs = observatory_control_system(
         url=f"https://{ocs_host}:{ocs_port}",
         server_cert=f"{certificates_path}/server.cert.pem",
