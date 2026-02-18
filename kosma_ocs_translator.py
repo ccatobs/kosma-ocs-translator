@@ -321,7 +321,6 @@ class KOSMA_translator:
                 el_with_focal_plane_offset,
                 az_velocities,
                 el_velocities,
-                mode_arr,
             ]
         )
         points_list = points.tolist()
