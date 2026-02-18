@@ -8,12 +8,12 @@ import time
 import logging
 import astropy.units as u
 import numpy as np
-from astropy.coordinates import SkyCoord, EarthLocation, AltAz, ICRS
+from astropy.coordinates import SkyCoord, EarthLocation, AltAz, ICRS, FK5, TETE, GCRS
 from astropy.time import Time
 from datetime import timedelta
 from scipy.optimize import minimize_scalar
 import matplotlib.pyplot as plt
-
+from astropy.utils import iers
 
 from astropy.time import Time, TimeDelta
 import astropy.units as u
@@ -88,7 +88,7 @@ def is_astra_running():
         return False
     mod_time = os.path.getmtime(log_file)
     current_time = time.time()
-    if current_time - mod_time > 20:
+    if current_time - mod_time > 10:
         # add the time to the message
         logger.critical(f"Log file last modified at {time.ctime(mod_time)}")
         return False
@@ -153,6 +153,9 @@ def get_track_times_from_object(
 
     # 2. Calculate the duration and number of steps
     print(f"Rise time: {rise_time}, Set time: {set_time}")
+    if rise_time is None or set_time is None:
+        print("Source does not rise or set within the next 36 hours.")
+        return [], rise_time, set_time
     # get time difference in hours
     time_diff = set_time - rise_time  # hours
     print("Time difference (hours):", time_diff)
@@ -166,18 +169,23 @@ def get_track_times_from_object(
         return [], rise_time, set_time
 
     # Calculate steps based on the provided track_step
-    print("Time difference:", time_diff)
-    print("Track step:", track_step)
+    # print("Time difference:", time_diff)
+    # print("Track step:", track_step)
     #
     n_steps = int(np.floor(time_diff.to_value(u.hour) / track_step.to_value(u.hour)))
-    print(n_steps)
+    # print(n_steps)
 
     # 3. Generate the array of times
     # We use TimeDelta to increment the rise_time
-    astra_times = rise_time + (np.arange(n_steps + 1) * track_step)
-    print(astra_times)
+    astra_times = rise_time + np.arange(n_steps + 1) * track_step
+    # round to nearest second for astra compatibility
+    # strip the iso string and make a new time object with a locaiton
+    # make into a single time object with an array of times as the iso string
+    astra_times_rounded = Time(
+        [t.iso.split(".")[0] for t in astra_times], scale="utc", location=location
+    )
     #
-    return astra_times, rise_time, set_time
+    return astra_times_rounded, rise_time, set_time
 
 
 def get_track_times(astra_time_str, source_name):
@@ -230,6 +238,62 @@ def parse_tellmok_line(line: str):
             "vel_el": int(match.group(8)),
         }
     return None
+
+
+def parse_astra_log_for_astra_check(log_file_path="/net/KOSMA_file_io/logs/astra.log"):
+    """
+    Parses Astra log file and organizes data by MJD (Modified Julian Date).
+    Only extracts key-value pairs from lines containing ASTRA_CHECK.
+
+    Parameters:
+        log_file_path (str): Path to the astra.log file.
+
+    Returns:
+        list: A list of dictionaries, each containing data for a unique MJD.
+    """
+    import re
+
+    results = []
+    current_mjd_dict = {}
+    current_mjd = None
+
+    try:
+        with open(log_file_path, "r") as f:
+            lines = f.readlines()
+    except FileNotFoundError:
+        logger = logging.getLogger("tests_with_astra")
+        logger.error(f"Log file {log_file_path} not found.")
+        return results
+    rows = {}
+    for line in lines:
+        # Only process lines containing ASTRA_CHECK
+        if "ASTRA_CHECK" not in line:
+            continue
+
+        # Extract all key-value pairs from the line
+        pattern = r"(\w+)\s*=\s*([^\s\[\]]+)"
+        matches = re.findall(pattern, line)
+
+        if not matches:
+            continue
+
+        # Convert matches to a dictionary
+        line_data = {}
+        for key, value in matches:
+            # strip commas from value and try to convert to float if possible
+            value = value.replace(",", "").replace(":", "").replace(")", "")
+            #
+            try:
+                line_data[key] = float(value)
+            except ValueError:
+                line_data[key] = value
+        # Check for MJD in the line data
+        if line_data["utc"] not in rows.keys():
+            rows[line_data["utc"]] = line_data
+        else:
+            rows[line_data["utc"]].update(line_data)
+
+    return rows.values()
 
 
 def rise_set_times_astropy(
@@ -347,6 +411,29 @@ def run_system_command(cmd):
     else:
         logger.info(f"Command {cmd} ran successfully.")
     return result.stdout
+
+def run_system_command_background(cmd):
+    """
+    Runs a system command in the background and returns the process object.
+
+    Parameters:
+        cmd (str): The command to run.
+
+    Returns:
+        subprocess.Popen: The process object for monitoring/control.
+    """
+    logger = logging.getLogger("tests_with_astra")
+    logger.info(f"Running system command in background: {cmd}")
+    try:
+        process = subprocess.Popen(
+            cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
+        logger.info(f"Command {cmd} started with PID {process.pid}")
+        return process
+    except Exception as e:
+        logger.error(f"Error starting command {cmd}: {e}")
+        raise
+
 
 def run_kosma_commands_in_fast_mode(cmds, astra_time=None):
     #
@@ -1104,6 +1191,21 @@ parser.add_argument(
     action="store_true",
     help="Test instrument offsets application affects results.",
 )
+
+# ra as a float, default as -150
+parser.add_argument(
+    "--ra",
+    help="RA for test",
+    type=float,
+    default=-150.0,
+)
+# dec as a float, default as -50
+parser.add_argument(
+    "--dec",
+    help="Dec for test",
+    type=float,
+    default=-50.0,
+)
 global args
 args = parser.parse_args()
 
@@ -1151,7 +1253,6 @@ if args.run_single_ra_dec_test:
     )
     # get rise and set times for this source
     cmd = [cmd_create_source, "KOSMA_setoffset -l 00.0", "setpoint -p L"]
-    cmd.append("KOSMA_track")
     #
     astra_parameters = []
     for astra_time in astra_times:
@@ -1331,9 +1432,7 @@ if args.run_track_tests_galactic:
     #
     compare_kosma_tests_with_astropy(make_plots=True)
 
-# Check if Astra tests should be run
-if args.run_astra_tests:
-    print("Running Astra tests...")
+
 
 
 # Check if Astra tests should be run
@@ -1588,7 +1687,7 @@ if args.test_instrument_offsets:
     # offset a pixel position in instrument coordinates
     offset_x = 10.1  # mm
     offset_y = -20.0  # mm
-    cmd_x_offset = f"Kset_hardware Rx_act_px[0] {offset_x}"
+    cmd_x_offset = f"q{offset_x}"
     cmd_y_offset = f"Kset_hardware Rx_act_py[0] {offset_y}"
     #
     cmds = []
@@ -1611,6 +1710,292 @@ if args.test_instrument_offsets:
     )
     #
 
+
+# Check if Astra tests should be run
+if args.run_astra_tests:
+    print("Running Astra tests...")
+    ra = args.ra
+    dec = args.dec
+    # ra = 180
+    # dec = -50
+
+    source_name = f"TEST_RA{ra:03.0f}_DEC{dec:03.0f}"
+
+    coord = SkyCoord(ra * u.deg, dec * u.deg, frame="icrs")
+    #
+    # get a track for single data
+    start_time = Time("2026-04-13T10:00:00", scale="utc")
+    # make a range of every week between start and end time
+    time_range = start_time + TimeDelta(np.arange(0, 365, 7) * u.day)
+    # time_range = start_time + TimeDelta(np.arange(0, 30, 7) * u.day)
+    #
+    print("sending ")
+    f = open("/net/KOSMA_file_io/share/astra/astra_debug_time.inp", "w")
+    entries = 0
+    for obs_time in time_range:
+        # astra_times, rise_time, set_time = get_track_times_from_object(
+        #    obs_time, coord, location
+        # )
+        # if set_time is None or rise_time is None:
+        #    continue
+        # make a range of time from 0 to 24 hours in 1 hours around the obs_time
+        astra_times = obs_time + TimeDelta(np.arange(-12, 13) * u.hour)
+        # check is source is above horizon at these times
+        altaz_frame = AltAz(location=location, obstime=astra_times)
+        altaz = coord.transform_to(altaz_frame)
+        astra_times = astra_times[altaz.alt > 10 * u.deg]
+        # write times to /net/KOSMA_file_io/share/astra/astra_debug_time.inp
+        for astra_time in astra_times:
+            entries += 1
+            f.write(astra_time.iso.replace(" ", "T").split(".")[0] + "\n")
+    print(f"sending {entries} to astra")
+    f.close()
+    #
+    cmds = []
+    cmds.append("killall astra")
+    cmds.append("rm -rf /net/KOSMA_file_io/logs/astra.log")
+    cmds.append(f"setsource {source_name} -l {ra} -b {dec} -C J2000")
+    cmds.append(f"astra -t -n -f 4 -r")
+    cmds.append("KOSMA_track")
+    # run an array of command using subprocess
+    for cmd in cmds:
+        if "astra -t" in cmd:
+            process = run_system_command_background(cmd)
+        else:
+            run_system_command(cmd)
+        time.sleep(
+            3
+        )  # add a short sleep between commands to avoid overwhelming the system
+    # wait for astra to finish
+    while is_astra_running():
+        logger.info("Waiting for Astra to finish...")
+        time.sleep(5)
+    logger.info("Astra finished. Proceeding with comparison.")
+    #
+    astra_log_data = parse_astra_log_for_astra_check(
+        log_file_path="/net/KOSMA_file_io/logs/astra.log"
+    )
+    summary_table = pd.DataFrame(astra_log_data)
+    # convert position to altaz
+    # use explicit time used by astra
+    astra_times = Time(summary_table["utc"], format="unix", scale="utc")
+    altaz_frame = AltAz(location=location, obstime=astra_times)
+    #
+    altaz = coord.transform_to(altaz_frame)
+    # add altaz to summary table
+    summary_table["astropy_altitude_deg"] = altaz.alt.deg
+    summary_table["astropy_azimuth_deg"] = altaz.az.deg
+    summary_table["astropy_dut1"] = astra_times.delta_ut1_utc
+    summary_table["astropy_del_tt"] = np.array(
+        [
+            delta.total_seconds()
+            for delta in (astra_times.tt.datetime - astra_times.datetime)
+        ]
+    )
+    summary_table["astropy_del_tdb"] = np.array(
+        [
+            delta.total_seconds()
+            for delta in (astra_times.tdb.datetime - astra_times.datetime)
+        ]
+    )
+    # polar data
+    # Load Earth orientation data
+    iers_a = iers.IERS_Auto.open()
+    xp, yp = iers_a.pm_xy(astra_times)
+    xp_rad = xp.to(u.rad).value
+    yp_rad = yp.to(u.rad).value
+    summary_table["astropy_polmo_x"] = xp_rad
+    summary_table["astropy_polmo_y"] = yp_rad
+    # residual between az and el
+    summary_table["az_residual_arc_sec"] = (
+        summary_table["astropy_azimuth_deg"] - summary_table["Az"]
+    ) * 3600
+    summary_table["el_residual_arc_sec"] = (
+        summary_table["astropy_altitude_deg"] - summary_table["El"]
+    ) * 3600
+    #
+    summary_table["polmo_x_residual"] = (
+        summary_table["astropy_polmo_x"] - summary_table["polmo_x"]
+    ) * (u.rad).to(u.arcsec)
+    summary_table["polmo_y_residual"] = (
+        summary_table["astropy_polmo_y"] - summary_table["polmo_y"]
+    ) * (u.rad).to(u.arcsec)
+    # dut residual
+    summary_table["dut_residual"] = (
+        summary_table["astropy_dut1"] - summary_table["del_ut1"]
+    )
+    # del_tt
+
+    summary_table["del_tt_residual"] = (
+        summary_table["astropy_del_tt"] - summary_table["del_tt"]
+    )
+    # del tdb
+    summary_table["del_tdb_residual"] = (
+        summary_table["astropy_del_tdb"] - summary_table["del_tdb"]
+    )
+    # convert utc unix time to datetime
+    summary_table["obs_time"] = pd.to_datetime(summary_table["utc"], unit="s")
+    # add in
+    # 3. Level 1: Precession ONLY (FK5 Mean) - Long-term axial wobble
+    fk5_coord = coord.transform_to(FK5(equinox=astra_times))
+    summary_table["astropy_fk5_pre_ra_deg"] = fk5_coord.ra.deg
+    summary_table["astropy_fk5_pre_dec_deg"] = fk5_coord.dec.deg
+    # slaMapqk_RA, slaMapqk_Dec
+    summary_table["astropy_pre_minus_slaMapqk_ra_deg"] = (
+        fk5_coord.ra.deg - summary_table["slaMapqk_RA"]
+    )
+    summary_table["astropy_pre_minus_slaMapqk_dec_deg"] = (
+        fk5_coord.dec.deg - summary_table["slaMapqk_Dec"]
+    )
+    # 4. Level 2: Precession + Nutation (TETE) - Includes short-term axial "shaking"
+    tete_coord = coord.transform_to(TETE(obstime=astra_times))
+    summary_table["astropy_tete_pre_nut_ra_deg"] = tete_coord.ra.deg
+    summary_table["astropy_tete_pre_nut_dec_deg"] = tete_coord.dec.deg
+    summary_table["astropy_tete_pre_nut_minus_slaMapqk_ra_deg"] = (
+        tete_coord.ra.deg - summary_table["slaMapqk_RA"]
+    )
+    summary_table["astropy_tete_pre_nut_minus_slaMapqk_dec_deg"] = (
+        tete_coord.dec.deg - summary_table["slaMapqk_Dec"]
+    )
+    #
+    # make a plot of the residuals
+    plt.figure(figsize=(10, 6))
+    plt.scatter(
+        summary_table["obs_time"],
+        summary_table["az_residual_arc_sec"],
+        label="Azimuth Residual (arcsec)",
+    )
+    plt.scatter(
+        summary_table["obs_time"],
+        summary_table["el_residual_arc_sec"],
+        label="Elevation Residual (arcsec)",
+    )
+    plt.xlabel("Astra Time")
+    plt.ylabel("Residual (arcsec)")
+    plt.title("Residuals between Astra Log and Astropy Calculations")
+    plt.legend()
+    plt.grid()
+    png_filename = f"astra_log_data_{source_name}.png"
+    plt.savefig(png_filename)
+    plt.show()
+    filename = f"astra_log_data_az_el_residual_{source_name}.xlsx"
+    print(f"saving excel data to {filename}")
+    summary_table.to_excel(filename, index=False)
+    # plot residuals as a function of time
+    fig, axes = plt.subplots(4, 1, figsize=(12, 10), sharex=True)
+    #
+    df = summary_table
+    # plot az, ele residuals as well
+    axes[0].scatter(
+        df["obs_time"], df["az_residual_arc_sec"], label="Azimuth Residual", marker="o"
+    )
+    axes[0].scatter(
+        df["obs_time"],
+        df["el_residual_arc_sec"],
+        label="Elevation Residual",
+        marker="o",
+    )
+    axes[0].set_ylabel("Pointing Residual\n(arcsec)")
+    axes[0].legend()
+    axes[0].grid(True)
+
+    axes[1].scatter(df["obs_time"], df["polmo_x_residual"], label="Polmo X Residual")
+    axes[1].scatter(df["obs_time"], df["polmo_y_residual"], label="Polmo Y Residual")
+    axes[1].set_ylabel("Polar Motion\nResidual (arcsec)")
+    axes[1].legend()
+    axes[1].grid(True)
+
+    # dut
+    axes[2].scatter(
+        df["obs_time"], df["dut_residual"], label="DUT1 Residual", marker="o"
+    )
+    axes[2].set_ylabel("DUT1 Residual\n(seconds)")
+    axes[2].legend()
+    axes[2].grid(True)
+    # tdb
+    axes[3].scatter(
+        df["obs_time"], df["del_tdb_residual"], label="DEL TDB Residual", marker="o"
+    )
+    axes[3].set_ylabel("DEL TDB Residual\n(seconds)")
+    axes[3].set_xlabel("Time")
+    axes[3].legend()
+    axes[3].grid(True)
+    png_filename = filename.replace(".xlsx", "_parameter_comparison.png")
+    fig.savefig(
+        png_filename,
+        dpi=150,
+        bbox_inches="tight",
+    )
+    print(f"saving png data to {png_filename}")
+
+    # plot of astropy_tete_pre_nut_ra_deg, astropy_tete_pre_nut_dec_deg, astropy_gcrs_ra_deg, astropy_gcrs_dec_deg as a function of time
+    # plot az and el on different subplots
+    fig, axes = plt.subplots(2, 2, figsize=(20, 10), sharex=True)
+    axes = axes.flatten()
+    axes[0].scatter(
+        df["obs_time"], df["slaMapqk_RA"], label="SLALIB slaMapqk RA (deg)", marker="o"
+    )
+    axes[0].scatter(
+        df["obs_time"],
+        df["astropy_tete_pre_nut_ra_deg"],
+        label="Astropy TETE Pre-Nut RA (deg)",
+        marker="o",
+    )
+    # Ra axis
+    axes[0].set_ylabel("Right Ascension (deg)")
+    axes[0].set_xlabel("Time")
+    axes[0].legend()
+    axes[0].grid(True)
+    # Dec axis
+    axes[1].scatter(
+        df["obs_time"],
+        df["slaMapqk_Dec"],
+        label="SLALIB slaMapqk Dec (deg)",
+        marker="o",
+    )
+    axes[1].scatter(
+        df["obs_time"],
+        df["astropy_tete_pre_nut_dec_deg"],
+        label="Astropy TETE Pre-Nut Dec (deg)",
+        marker="o",
+    )
+    axes[1].set_ylabel("Declination (deg)")
+    axes[1].set_xlabel("Time")
+    axes[1].legend()
+    axes[1].grid(True)
+    # plot residuals
+    axes[2].scatter(
+        df["obs_time"],
+        df["astropy_tete_pre_nut_minus_slaMapqk_ra_deg"] * 3600.0,
+        label="Astropy . RA Residual (SLALIB - Astropy) (arcsec)",
+        marker="o",
+    )
+    axes[2].set_ylabel("Residual (arcsec)")
+    axes[2].set_xlabel("Time")
+    axes[2].legend()
+    axes[2].grid(True)
+    # residual between astropy_gcrs_ra_deg and slaMapqk_Lam
+    axes[3].scatter(
+        df["obs_time"],
+        df["astropy_tete_pre_nut_minus_slaMapqk_dec_deg"] * 3600.0,
+        label="Astropy . DEC Residual (SLALIB - Astropy) (arcsec)",
+        marker="o",
+    )
+    axes[3].set_ylabel("Residual (arcsec)")
+    axes[3].set_xlabel("Time")
+    axes[3].legend()
+    axes[3].grid(True)
+    png_filename = filename.replace(
+        ".xlsx", "_ra_dec_comparison_with_precession_applied.png"
+    )
+    print(f"saving png data to {png_filename}")
+    fig.savefig(
+        png_filename,
+        dpi=150,
+        bbox_inches="tight",
+    )
+
+
 # TODO check a track and monitor offsets
 # TODO introduce coord offsets
 # TODO introduce instrument/pixel offsets
@@ -1618,4 +2003,4 @@ if args.test_instrument_offsets:
 # TODO check OTF implemnentation
 
 # 294.52101   obs_lam_on   ! first coordinate axis of spherical coordinate system obs_coord_sys_on [degree]
-# 12.029845   obs_bet_on   ! second coordinate axis of spherical coordinate system obs_coord_sys_on [degree]
+# 12.029845   obs_bet_on   ! second coordinate axis of spherical coordinate system obs_coord_sys_on [degree]ß
