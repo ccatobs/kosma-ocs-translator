@@ -10,6 +10,14 @@ from astropy.time import Time
 import numpy as np
 import argparse
 import threading
+import signal,sys
+# PH1 root mount
+try:
+    from roof_mount import RoofMount
+except:
+    print("roof_mount package not found, make sure it is installed and in the PYTHONPATH")
+    print("install from git@git.ph1.uni-koeln.de:receiver/pointing-camera-rpi.git")
+    
 
 coord_sys_map = {
     "J2000": "icrs",
@@ -137,6 +145,9 @@ class KOSMA_translator:
         self.ocs.get_telescope_position()
         self.location = ocs.earth_location
         self.log.info(f"Telescope location: {self.location}")
+        # Add tracking thread management
+        self._track_thread = None
+        self._track_stop_event = threading.Event()
 
     def check_for_obs2tel_update(self):
         # check modification time of obs2tel file and store
@@ -160,6 +171,7 @@ class KOSMA_translator:
             files=["KOSMA_obs2tel.set"], variable=None, update_mod_time=True
         )
         self.obs_tolerance = self.kio_files["KOSMA_obs2tel.set"]["obs_tolerance"]
+        self.log.info(f"obs_tolerance set to {self.obs_tolerance} arcseconds")
         self.old_tel_return_cookie = self.tel_return_cookie
         self.tel_return_cookie = self.kio_files["KOSMA_obs2tel.set"]["obs_cookie"]
         self.obs_tel_info_update_time = self.kio_files["KOSMA_obs2tel.set"][
@@ -227,8 +239,10 @@ class KOSMA_translator:
         else:
             input_dict["tel_pos_in_range"] = "Y"
             input_dict["tel_on_track"] = "N"
-        input_dict["tel_lost_track"] = "N"
+            input_dict["tel_lost_track"] = "N"
+    
         #
+        self.log.info(f"on track: {input_dict['tel_on_track']} az:{response['Azimuth current position']:3.2f} ele:{response['Elevation current position']:3.2f} cmd_az:{response['Azimuth commanded position']:3.2f} cmd_ele:{response['Elevation commanded position']:3.2f} obs_tolerance: {self.obs_tolerance/3600.0:3.2f} deg ")        
         fmt = "%d-%b-%Y  %H:%I:%S"
         current = time.localtime()
         input_dict["timestamp"] = time.time()
@@ -245,19 +259,41 @@ class KOSMA_translator:
         tel2obs_handle = open("/net/KOSMA_file_io/ReadWrite/KOSMA_tel2obs.set", "w")
         tel2obs_handle.write(self.tel2obs.format(input_dict))
         tel2obs_handle.close()
+        
 
     def track(self):
+
+        # 1. If a track is already running → stop it
+        if self._track_thread and self._track_thread.is_alive():
+            self.log.info("Stopping previous track before starting new one")
+            self.stop_track()
+
+        # 2. Reset stop event
+        self._track_stop_event.clear()
+
+        # 3. Start new thread
+        self._track_thread = threading.Thread(
+            target=self._track_loop,
+            daemon=True
+        )
+        self._track_thread.start()
+
+    def _track_loop(self):
         # commanded position
         cmd_lam = self.obs2tel["obs_lam_on"]
         cmd_bet = self.obs2tel["obs_bet_on"]
         cmd_coord_sys_on = self.obs2tel["obs_coord_sys_on"]
         # track details
-        track_duration = 10  # seconds, for testing
+        track_duration = 600  # seconds
         # make into an astropy coordinate object
         frame = coord_sys_map[cmd_coord_sys_on]
         coord = SkyCoord(cmd_lam * u.deg, cmd_bet * u.deg, frame=frame)
         #
         self.log.info(f"tracking to {cmd_lam} {cmd_bet} in {cmd_coord_sys_on} frame")
+        # 
+        if frame.lower() == "altaz":
+            self.ocs.move_to(cmd_lam, cmd_bet)
+            return
         # make an array of times from now to now + track_duration, with 1 second steps
         n_steps = int(track_duration) + 1
         time_array = Time.now() + np.linspace(0, track_duration, n_steps) * u.second
@@ -271,8 +307,9 @@ class KOSMA_translator:
         az_with_focal_plane_offset = altaz.az.deg + focal_plane_offset_az
         el_with_focal_plane_offset = altaz.alt.deg + focal_plane_offset_el
         # calculate the velocities in azimuth and elevation using np.gradient
-        az_velocities = np.gradient(az_with_focal_plane_offset)  # deg/s
-        el_velocities = np.gradient(el_with_focal_plane_offset)  # deg/s
+        dt = np.gradient(time_array.unix)
+        az_velocities = np.gradient(az_with_focal_plane_offset) / dt
+        el_velocities = np.gradient(el_with_focal_plane_offset) / dt
         # program track mode, see defintion here ICD-1000000-32000-02-00 VA Webserver - Remote Protocol
         mode = 0  #
         mode_arr = np.full_like(az_with_focal_plane_offset, mode)
@@ -293,9 +330,24 @@ class KOSMA_translator:
             "points": points_list,
         }
         #
-        response = self.ocs.scan_pattern(data=payload)
-        self.log.info(f"scan pattern response: {response}")
+        try:
+            response = self.ocs.scan_pattern(data=payload, stop_event=self._track_stop_event)
+            self.log.info(f"scan pattern response: {response}")
+        except Exception as e:
+            self.log.error(f"Track error: {e}")
 
+
+    def stop_track(self):
+        if self._track_thread and self._track_thread.is_alive():
+            self.log.info("Signaling track thread to stop")
+
+            self._track_stop_event.set()   # signal thread
+
+            self._track_thread.join()      # WAIT until thread exits
+
+            self.log.info("Track thread stopped")
+
+            self._track_thread = None
 
 def setup_logging(log_level):
     # setup logging to file and to screen
@@ -345,8 +397,13 @@ def parse_arguments():
         default="INFO",
         help="Set the logging level. Choices: DEBUG, INFO, WARNING, ERROR, CRITICAL. Default is INFO.",
     )
-    # add option to toggle between roofmounted and ccat location for testing
-    parser.add_argument("--use-roofmount", action="store_true", help="Use roof")
+    # OCS or roof mount connection
+    # add a true false flag for roof mount connection, if true, use roof mount connection, if false, use OCS connection
+    parser.add_argument(
+        "--use-roof-mount",
+        action="store_true",
+        help="Use roof mount connection instead of OCS connection. Default is False.",
+    )
     return parser.parse_args()
 
 
@@ -368,14 +425,26 @@ def main():
     certificates_path = args.certificates_path
     log_level = getattr(logging, args.log_level)
     logger = setup_logging(log_level)
-    print(f"Using certificates path: {certificates_path}")
-
-    ocs = observatory_control_system(
-        url=f"https://{ocs_host}:{ocs_port}",
-        server_cert=f"{certificates_path}/server.cert.pem",
-        client_cert=f"{certificates_path}/client.cert.pem",
-        client_key=f"{certificates_path}/client.key.pem",
-    )
+    if args.use_roof_mount:
+        logger.info("Using roof mount connection")
+        roof_mount_host = "134.95.46.51"
+        roof_mount_port = 2000
+        ocs = RoofMount(host=roof_mount_host, port=roof_mount_port)
+        ocs.connect()
+        # set master_obs_tolerance to 1 arcminute
+        obs_tolerance = 8*u.arcminute.to(u.arcsecond)
+        logger.info(f"Setting master_obs_tolerance to {obs_tolerance} arcseconds")
+        os.system(f"Kset_master master_obs_tolerance {obs_tolerance}")
+        os.system(f"KOSMA_track")
+    else:
+        logger.info("Using OCS connection")    
+        print(f"Using certificates path: {certificates_path}")
+        ocs = observatory_control_system(
+            url=f"https://{ocs_host}:{ocs_port}",
+            server_cert=f"{certificates_path}/server.cert.pem",
+            client_cert=f"{certificates_path}/client.cert.pem",
+            client_key=f"{certificates_path}/client.key.pem",
+        )
     translator = KOSMA_translator(ocs)
     background_thread = threading.Thread(
         target=run_write_tel2obs_file_in_background, args=(translator,)
@@ -385,15 +454,28 @@ def main():
     translator.log.info(
         f"obs_tel_info_update_time set to {translator.obs_tel_info_update_time} seconds"
     )
+    
+    # Define signal handler with closure
+    def signal_handler(signum, frame):
+        translator.log.info("Ctrl+C received, shutting down...")
+        translator.stop_track()
+        if hasattr(ocs, 'close'):
+            ocs.close()
+        translator.log.info("All threads closed, exiting.")
+        sys.exit(0)
+    
+    # Register signal handler for Ctrl+C
+    signal.signal(signal.SIGINT, signal_handler)
+    
     # get telescope position
 
     while True:
         obs2tel_updated = translator.check_for_obs2tel_update()
         if not obs2tel_updated:
             time.sleep(translator.obs_tel_info_update_time)
-            translator.log.debug(
-                f"obs2tel file has not changed, waiting {translator.obs_tel_info_update_time} seconds"
-            )
+            #translator.log.debug(
+            #    f"obs2tel file has not changed, waiting {translator.obs_tel_info_update_time} seconds"
+            #)
             continue
         translator.read_obs2tel_file()
         if translator.tel_return_cookie == translator.old_tel_return_cookie:
