@@ -194,7 +194,7 @@ class KOSMA_translator:
             {0[tel_plate_scale]}  tel_plate_scale   ! plate scale of focal plane [arcsec/mm]
             {0[tel_latitude]}   tel_latitude   ! latitude of observatory (needed for Doppler correction) [degree]
             {0[tel_longitude]}  tel_longitude   ! longitude of observatory (needed for Doppler correction) [degree, +west (astronomical notation)]
-            {0[tel_altitude]} 3141   tel_altitude   ! height above sea level (needed for Doppler correction) [meter]
+            {0[tel_altitude]}  tel_altitude   ! height above sea level (needed for Doppler correction) [meter]
             {0[tel_angle_focal_plane]}   tel_angle_focal_plane   ! ccw angle from second coordinate of the telescope reference coordinate system (TARF,HORIZON) to second coordinate of obs_coord_sys_del [degree]
         #           0   tel_los_act   ! actual los-angle [degree]
         #    1557237163.99149   tel_time_act   ! time when status data were valid [seconds since 1970 UTC]
