@@ -17,7 +17,11 @@ try:
 except:
     print("roof_mount package not found, make sure it is installed and in the PYTHONPATH")
     print("install from git@git.ph1.uni-koeln.de:receiver/pointing-camera-rpi.git")
-    
+# sun avoidance
+try:
+    from sun_avoidance.telescope import get_overtop_altaz_from_nominal
+except:
+    print("sun-avoidance not found. Install from git@github.com:ccatobs/sun-avoidance.git")
 
 coord_sys_map = {
     "J2000": "icrs",
@@ -208,12 +212,17 @@ class KOSMA_translator:
         # read all variables from obs2tel file into the object
         self.obs2tel = self.kio_files["KOSMA_obs2tel.set"]
 
-        # check all keys exist (TODO: populate it correctly)
+        # check all keys exist
         required_keys = [
+            "obs_lam_on", "obs_bet_on",
+            "obs_pm_lam", "obs_pm_bet", "obs_paralx",
+            "obs_extended_elevation_range",
             "obs_lam_del", "obs_bet_del", "obs_coord_sys_del", "obs_true_angle_del",
+            "obs_lam_vel", "obs_bet_vel", "obs_otf_mode",
             "obs_lam_off", "obs_bet_off", "obs_coord_sys_off", "obs_true_angle_off",
             "obs_x_focal_plane", "obs_y_focal_plane",
-            "obs_pm_lam", "obs_pm_bet", "obs_paralx",
+            "obs_wavelength",
+            "obs_track_duration",
         ]
         missing = [k for k in required_keys if k not in self.obs2tel]
         if missing:
@@ -328,7 +337,7 @@ class KOSMA_translator:
         elevation and changes over time: once the value changes more than a tolerance,
         a new track is triggered with updated obs_x/y_focal_plane values.
         """
-        
+
         # commanded position
         cmd_lam = self.obs2tel["obs_lam_on"]
         cmd_bet = self.obs2tel["obs_bet_on"]
@@ -344,6 +353,7 @@ class KOSMA_translator:
         coord_sys_off = self.obs2tel["obs_coord_sys_off"]
         true_angle_off = self.obs2tel["obs_true_angle_off"]  # 'Y'=MODE_TRUE, else MODE_NONE
         # focal plane offsets (arcsec, always applied after AltAz transform, MODE_TRUE)
+        # for CCAT obs_coord_sys_focal_plane is always set to HORIZON
         focal_plane_az = self.obs2tel["obs_x_focal_plane"]
         focal_plane_el = self.obs2tel["obs_y_focal_plane"]
         # proper motion (arcsec/yr) and parallax (arcsec) of the source
@@ -352,6 +362,11 @@ class KOSMA_translator:
         pm_lam = self.obs2tel["obs_pm_lam"]
         pm_bet = self.obs2tel["obs_pm_bet"]
         paralx = self.obs2tel["obs_paralx"]
+        # extended elevation range
+        if self.obs2tel["obs_extended_elevation_range"] == "Y":
+            if_extended = True
+        else:
+            if_extended = False
         # validate coordinate systems
         for label, csys in [
             ("obs_coord_sys_on", cmd_coord_sys_on),
@@ -395,7 +410,12 @@ class KOSMA_translator:
             if focal_plane_az != 0.0 or focal_plane_el != 0.0:
                 coord = coord.spherical_offsets_by(focal_plane_az * u.arcsec, focal_plane_el * u.arcsec)
             # command move-to
-            self.ocs.move_to(coord.az.deg, coord.alt.deg)
+            if if_extended:
+                cmd_az, cmd_el = get_overtop_altaz_from_nominal(coord.az.deg, coord.alt.deg)
+            else:
+                cmd_az = coord.az.deg
+                cmd_el = coord.alt.deg
+            self.ocs.move_to(cmd_az, cmd_el)
             return
 
         # non-HORIZON source: make into an astropy coordinate object,
@@ -461,8 +481,11 @@ class KOSMA_translator:
         if focal_plane_az != 0.0 or focal_plane_el != 0.0:
             altaz = altaz.spherical_offsets_by(focal_plane_az * u.arcsec, focal_plane_el * u.arcsec)
 
-        az_array = altaz.az.deg
-        el_array = altaz.alt.deg
+        if if_extended:
+            az_array, el_array = get_overtop_altaz_from_nominal(altaz.az.deg, altaz.alt.deg)
+        else:
+            az_array = altaz.az.deg
+            el_array = altaz.alt.deg
         # calculate the velocities in azimuth and elevation using np.gradient
         dt = np.gradient(time_array.unix)
         az_velocities = np.gradient(az_array) / dt
