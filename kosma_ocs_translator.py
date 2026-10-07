@@ -4,7 +4,7 @@ import random
 import logging
 import os, glob, re
 from ocs import observatory_control_system
-from astropy.coordinates import SkyCoord, EarthLocation, AltAz
+from astropy.coordinates import SkyCoord, EarthLocation, AltAz, Distance
 from astropy import units as u
 from astropy.time import Time
 import numpy as np
@@ -24,6 +24,21 @@ coord_sys_map = {
     "B1950": "fk4",
     "GALACTIC": "galactic",
     "HORIZON": "altaz",
+}
+
+# Proper-motion keyword names in astropy SkyCoord differ by frame
+_frame_pm_keys = {
+    "icrs":     ("pm_ra_cosdec", "pm_dec"),
+    "fk4":      ("pm_ra_cosdec", "pm_dec"),
+    "galactic": ("pm_l_cosb",    "pm_b"),
+}
+
+# Reference epoch for catalogue coordinates by frame
+# only matters for proper motion correction
+_frame_epochs = {
+    "icrs":     Time("J2000"),
+    "fk4":      Time(1950.0, format="byear"),
+    "galactic": Time("J2000"),
 }
 
 def _apply_offset(coord, d_lam_arcsec, d_bet_arcsec, true_angle):
@@ -198,6 +213,7 @@ class KOSMA_translator:
             "obs_lam_del", "obs_bet_del", "obs_coord_sys_del", "obs_true_angle_del",
             "obs_lam_off", "obs_bet_off", "obs_coord_sys_off", "obs_true_angle_off",
             "obs_x_focal_plane", "obs_y_focal_plane",
+            "obs_pm_lam", "obs_pm_bet", "obs_paralx",
         ]
         missing = [k for k in required_keys if k not in self.obs2tel]
         if missing:
@@ -330,6 +346,12 @@ class KOSMA_translator:
         # focal plane offsets (arcsec, always applied after AltAz transform, MODE_TRUE)
         focal_plane_az = self.obs2tel["obs_x_focal_plane"]
         focal_plane_el = self.obs2tel["obs_y_focal_plane"]
+        # proper motion (arcsec/yr) and parallax (arcsec) of the source
+        # obs_pm_lam/obs_pm_bet are raw coordinate rates dlam/dt, not cos(bet)*dlam/dt;
+        # slalib h2fk5.c note 1: "proper motions in RA are dRA/dt rather than cos(Dec)*dRA/dt"
+        pm_lam = self.obs2tel["obs_pm_lam"]
+        pm_bet = self.obs2tel["obs_pm_bet"]
+        paralx = self.obs2tel["obs_paralx"]
         # validate coordinate systems
         for label, csys in [
             ("obs_coord_sys_on", cmd_coord_sys_on),
@@ -372,11 +394,30 @@ class KOSMA_translator:
             # Apply focal plane offsets
             if focal_plane_az != 0.0 or focal_plane_el != 0.0:
                 coord = coord.spherical_offsets_by(focal_plane_az * u.arcsec, focal_plane_el * u.arcsec)
+            # command move-to
             self.ocs.move_to(coord.az.deg, coord.alt.deg)
             return
 
-        # non-HORIZON source: make into an astropy coordinate object
-        coord = SkyCoord(cmd_lam * u.deg, cmd_bet * u.deg, frame=frame)
+        # non-HORIZON source: make into an astropy coordinate object,
+        # applying proper motion and parallax propagation when non-zero.
+        if pm_lam != 0.0 or pm_bet != 0.0 or paralx != 0.0:
+            # Convert raw coordinate rate to true angular rate for astropy (multiply by cos(beta))
+            cos_bet = np.cos(np.deg2rad(cmd_bet))
+            pm_lon_key, pm_lat_key = _frame_pm_keys[frame]
+            pm_kwargs = {
+                pm_lon_key: pm_lam * cos_bet * u.arcsec/u.yr,
+                pm_lat_key: pm_bet * u.arcsec/u.yr,
+                "obstime": _frame_epochs[frame],
+            }
+            if paralx != 0.0:
+                pm_kwargs["distance"] = Distance(parallax=paralx * u.arcsec)
+            coord_with_pm = SkyCoord(cmd_lam * u.deg, cmd_bet * u.deg, frame=frame, **pm_kwargs)
+            # Propagate to current epoch; proper motion over the 600 s track window is
+            # negligible so one propagation at the start of the window suffices
+            propagated = coord_with_pm.apply_space_motion(new_obstime=Time.now())
+            coord = SkyCoord(propagated.data.lon, propagated.data.lat, frame=frame)
+        else:
+            coord = SkyCoord(cmd_lam * u.deg, cmd_bet * u.deg, frame=frame)
 
         # Apply (non-Horizon) sky/map offsets in obs_coord_sys_del frame before AltAz transform
         if coord_sys_del != "HORIZON" and (lam_del != 0.0 or bet_del != 0.0):
