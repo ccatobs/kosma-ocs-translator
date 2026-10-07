@@ -26,6 +26,19 @@ coord_sys_map = {
     "HORIZON": "altaz",
 }
 
+def _apply_offset(coord, d_lam_arcsec, d_bet_arcsec, true_angle):
+    """Apply a sky offset to a SkyCoord.
+    true_angle='Y': spherical_offsets_by (MODE_TRUE, cos(lat) correction applied to lon).
+    Anything else: direct coordinate addition (MODE_NONE).
+    """
+    if true_angle == "Y":
+        return coord.spherical_offsets_by(d_lam_arcsec * u.arcsec, d_bet_arcsec * u.arcsec)
+    return SkyCoord(
+        coord.data.lon + d_lam_arcsec * u.arcsec,
+        coord.data.lat + d_bet_arcsec * u.arcsec,
+        frame=coord.frame,
+    )
+
 def ImportKOSMAReadWriteIntoDictionary(files=None, variable=None, update_mod_time=True):
     log = logging.getLogger("kosma-ocs-translator")
     readwrite_dict = {}
@@ -180,6 +193,17 @@ class KOSMA_translator:
         # read all variables from obs2tel file into the object
         self.obs2tel = self.kio_files["KOSMA_obs2tel.set"]
 
+        # check all keys exist (TODO: populate it correctly)
+        required_keys = [
+            "obs_lam_del", "obs_bet_del", "obs_coord_sys_del", "obs_true_angle_del",
+            "obs_lam_off", "obs_bet_off", "obs_coord_sys_off", "obs_true_angle_off",
+            "obs_x_focal_plane", "obs_y_focal_plane",
+        ]
+        missing = [k for k in required_keys if k not in self.obs2tel]
+        if missing:
+            self.log.error(f"Missing required obs2tel keys: {missing}")
+            raise KeyError(f"Missing required obs2tel keys: {missing}")
+
     def load_tel2obs_template(self):
         self.tel2obs = """
         {0[timestring]}  {0[timestamp]}   File update time stamp   ! ccat_translator (test_computer:1000)
@@ -279,46 +303,138 @@ class KOSMA_translator:
         self._track_thread.start()
 
     def _track_loop(self):
+        """
+        This routine is called every time when KOSMA_obs2tel.set is updated. If a 
+        track is already running, the previous one is stopped and the new one starts.
+        Therefore practically the duration of the track in this routine is overwritten
+        by a new track triggered by the KOSMA_obs2tel update.
+        This justifies to use the fixed obs_x/y_focal_plane, which is a function of
+        elevation and changes over time: once the value changes more than a tolerance,
+        a new track is triggered with updated obs_x/y_focal_plane values.
+        """
+        
         # commanded position
         cmd_lam = self.obs2tel["obs_lam_on"]
         cmd_bet = self.obs2tel["obs_bet_on"]
         cmd_coord_sys_on = self.obs2tel["obs_coord_sys_on"]
+        # sky/map offsets (arcsec, applied before AltAz transform unless HORIZON frame)
+        lam_del = self.obs2tel["obs_lam_del"]
+        bet_del = self.obs2tel["obs_bet_del"]
+        coord_sys_del = self.obs2tel["obs_coord_sys_del"]
+        true_angle_del = self.obs2tel["obs_true_angle_del"]  # 'Y'=MODE_TRUE, else MODE_NONE
+        # off-position offsets (arcsec, applied before AltAz transform unless HORIZON frame)
+        lam_off = self.obs2tel["obs_lam_off"]
+        bet_off = self.obs2tel["obs_bet_off"]
+        coord_sys_off = self.obs2tel["obs_coord_sys_off"]
+        true_angle_off = self.obs2tel["obs_true_angle_off"]  # 'Y'=MODE_TRUE, else MODE_NONE
+        # focal plane offsets (arcsec, always applied after AltAz transform, MODE_TRUE)
+        focal_plane_az = self.obs2tel["obs_x_focal_plane"]
+        focal_plane_el = self.obs2tel["obs_y_focal_plane"]
+        # validate coordinate systems
+        for label, csys in [
+            ("obs_coord_sys_on", cmd_coord_sys_on),
+            ("obs_coord_sys_del", coord_sys_del),
+            ("obs_coord_sys_off", coord_sys_off),
+        ]:
+            if csys not in coord_sys_map:
+                msg = f"Unknown coordinate system {label}={csys!r}, must be one of {list(coord_sys_map)}"
+                self.log.error(msg)
+                raise ValueError(msg)
         # track details
         track_duration = 600  # seconds
-        # make into an astropy coordinate object
         frame = coord_sys_map[cmd_coord_sys_on]
-        coord = SkyCoord(cmd_lam * u.deg, cmd_bet * u.deg, frame=frame)
-        #
-        self.log.info(f"tracking to {cmd_lam} {cmd_bet} in {cmd_coord_sys_on} frame")
-        # 
+
+        # If coordinate system of ON is Horizon, use move-to.
+        # For this case, it does not make much sense if map or off offset is given
+        # by other coordinate system but such a case is also covered below.
         if frame.lower() == "altaz":
-            self.ocs.move_to(cmd_lam, cmd_bet)
+            now_frame = AltAz(obstime=Time.now(), location=self.ocs.earth_location)
+            coord = SkyCoord(cmd_lam * u.deg, cmd_bet * u.deg, frame=now_frame)
+            if lam_del != 0.0 or bet_del != 0.0:
+                if coord_sys_del == "HORIZON":
+                    coord = _apply_offset(coord, lam_del, bet_del, true_angle_del)
+                else:
+                    coord = _apply_offset(
+                        coord.transform_to(coord_sys_map[coord_sys_del]),
+                        lam_del, bet_del, true_angle_del,
+                    ).transform_to(now_frame)
+            if lam_off != 0.0 or bet_off != 0.0:
+                if coord_sys_off == "HORIZON":
+                    coord = _apply_offset(coord, lam_off, bet_off, true_angle_off)
+                else:
+                    coord = _apply_offset(
+                        coord.transform_to(coord_sys_map[coord_sys_off]),
+                        lam_off, bet_off, true_angle_off,
+                    ).transform_to(now_frame)
+            #
+            self.log.info(f"tracking to {coord.az.deg} {coord.alt.deg} in {cmd_coord_sys_on} frame")
+
+            # Apply focal plane offsets
+            if focal_plane_az != 0.0 or focal_plane_el != 0.0:
+                coord = coord.spherical_offsets_by(focal_plane_az * u.arcsec, focal_plane_el * u.arcsec)
+            self.ocs.move_to(coord.az.deg, coord.alt.deg)
             return
-        # make an array of times from now to now + track_duration, with 1 second steps
+
+        # non-HORIZON source: make into an astropy coordinate object
+        coord = SkyCoord(cmd_lam * u.deg, cmd_bet * u.deg, frame=frame)
+
+        # Apply (non-Horizon) sky/map offsets in obs_coord_sys_del frame before AltAz transform
+        if coord_sys_del != "HORIZON" and (lam_del != 0.0 or bet_del != 0.0):
+            if coord_sys_del == cmd_coord_sys_on:
+                coord = _apply_offset(coord, lam_del, bet_del, true_angle_del)
+            else:
+                coord = _apply_offset(
+                    coord.transform_to(coord_sys_map[coord_sys_del]),
+                    lam_del, bet_del, true_angle_del,
+                ).transform_to(frame)
+
+        # Apply (non-Horizon) off-position offsets in obs_coord_sys_off frame before AltAz transform
+        if coord_sys_off != "HORIZON" and (lam_off != 0.0 or bet_off != 0.0):
+            if coord_sys_off == cmd_coord_sys_on:
+                coord = _apply_offset(coord, lam_off, bet_off, true_angle_off)
+            else:
+                coord = _apply_offset(
+                    coord.transform_to(coord_sys_map[coord_sys_off]),
+                    lam_off, bet_off, true_angle_off,
+                ).transform_to(frame)
+
+        #
+        self.log.info(f"tracking to {coord.data.lon.deg} {coord.data.lat.deg} in {cmd_coord_sys_on} frame")
+        # make an array of times from now + overhead to now + overhead + track_duration, with 1 second steps
+        track_overhead = 3  # seconds, to account for computation and communication delay
         n_steps = int(track_duration) + 1
-        time_array = Time.now() + np.linspace(0, track_duration, n_steps) * u.second
+        time_array = Time.now() + track_overhead * u.second + np.linspace(0, track_duration, n_steps) * u.second
         # calculate the altaz coordinates for each time step
         altaz_frames = AltAz(obstime=time_array, location=self.ocs.earth_location)
         altaz = coord.transform_to(altaz_frames)
-        # add in focal plane offset from obs2tel file, convert from arcseconds to degrees
-        focal_plane_offset_az = self.obs2tel.get("obs_x_focal_plane") / 3600.0
-        focal_plane_offset_el = self.obs2tel.get("obs_y_focal_plane") / 3600.0
-        # add to altaz coordinates
-        az_with_focal_plane_offset = altaz.az.deg + focal_plane_offset_az
-        el_with_focal_plane_offset = altaz.alt.deg + focal_plane_offset_el
+
+        # Apply HORIZON-frame sky/map offsets after AltAz transform
+        if coord_sys_del == "HORIZON" and (lam_del != 0.0 or bet_del != 0.0):
+            altaz = _apply_offset(altaz, lam_del, bet_del, true_angle_del)
+
+        # Apply HORIZON-frame off-position offsets after AltAz transform
+        if coord_sys_off == "HORIZON" and (lam_off != 0.0 or bet_off != 0.0):
+            altaz = _apply_offset(altaz, lam_off, bet_off, true_angle_off)
+
+        # Apply focal plane offsets
+        if focal_plane_az != 0.0 or focal_plane_el != 0.0:
+            altaz = altaz.spherical_offsets_by(focal_plane_az * u.arcsec, focal_plane_el * u.arcsec)
+
+        az_array = altaz.az.deg
+        el_array = altaz.alt.deg
         # calculate the velocities in azimuth and elevation using np.gradient
         dt = np.gradient(time_array.unix)
-        az_velocities = np.gradient(az_with_focal_plane_offset) / dt
-        el_velocities = np.gradient(el_with_focal_plane_offset) / dt
+        az_velocities = np.gradient(az_array) / dt
+        el_velocities = np.gradient(el_array) / dt
         # program track mode, see defintion here ICD-1000000-32000-02-00 VA Webserver - Remote Protocol
         mode = 0  #
-        mode_arr = np.full_like(az_with_focal_plane_offset, mode)
+        mode_arr = np.full_like(az_array, mode)
         # Assuming all arrays are 1D and of the same length
         points = np.column_stack(
             [
                 time_array.unix - time_array.unix[0],  # time in seconds since 1970
-                az_with_focal_plane_offset,
-                el_with_focal_plane_offset,
+                az_array,
+                el_array,
                 az_velocities,
                 el_velocities,
             ]
