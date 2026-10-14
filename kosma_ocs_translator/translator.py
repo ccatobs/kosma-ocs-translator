@@ -403,6 +403,8 @@ class Translator:
             note = "on track inferred: the TCS reports no command id (development only)"
         elif running != window["id"]:
             return False, None
+        if self.scan and now >= sum(self.scan):
+            return False, note  # after S + D, as OBSERVATORY.acfg says; the window keeps tracking
         if self.duration > 0 and self.otf_start is not None and now < self.otf_start:
             return False, note  # an OTF line is on track from S, a pre-OTF command at once
         if _valid(acu.azimuth_commanded) and _valid(acu.elevation_commanded):

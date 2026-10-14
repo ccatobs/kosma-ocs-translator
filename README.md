@@ -47,6 +47,9 @@ kosma_ocs_translator     # as kosma_bridge starts it (server registry: kosma_ocs
   after the window start shows the tracking error within `obs_tolerance`
   (hypot((az - az_cmd) cos el, el - el_cmd), raw coordinates), and an OTF line has
   reached its start S.
+- After the scan window, at S + D, `tel_on_track` is N, as `OBSERVATORY.acfg` says
+  for `obs_start_time`. The translator keeps tracking: the source in mode N, the end
+  point of an OTF line. A pre-OTF command and a track with duration 0 have no end.
 - `tel_lost_track` latches inside the scan window [S, S + D) and resets with the
   next command. An OTF line has S = `obs_start_time`; a track in mode N starts its
   scan window when it is first on track.

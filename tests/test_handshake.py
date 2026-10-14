@@ -19,11 +19,13 @@ from kosma_ocs_translator import geometry, kio
 from kosma_ocs_translator.translator import Translator
 
 FIXTURES = Path(__file__).parent / "fixtures"
+# a permanent track (obs_track_duration 0), as KOSMA_track sends it
 STAR = {
     "obs_source_name": "STAR",
     "obs_coord_sys_on": "J2000",
     "obs_lam_on": 46.0,
     "obs_bet_on": -30.0,
+    "obs_track_duration": 0,
 }
 
 
@@ -759,3 +761,37 @@ def test_a_window_compute_that_eats_the_lead_is_built_again(seat, monkeypatch):
     assert len(calls) == 2
     assert path["start"] - calls[1] == pytest.approx(10.3)
     assert (seat.tel2obs["tel_error"], seat.tel2obs["tel_on_track"]) == ("0", "Y")
+
+
+def test_after_the_otf_line_the_translator_reports_off_track_but_keeps_the_end_point(seat):
+    start, cookie = pretp_then_otftp(seat, lead=15.0, duration=20.0)
+    seat.run(45.0)  # S + D is 15 s + 20 s after the OTFTP
+
+    paths, aborts = len(seat.acu.paths), seat.acu.aborts
+    during = [v["tel_on_track"] for t, v, _ in seat.history if start + 2 < t < start + 19]
+    after = [(t, v) for t, v, _ in seat.history if t > start + 20.5]
+    assert set(during) == {"Y"}
+    assert {v["tel_on_track"] for _, v in after} == {"N"}
+    assert {(v["tel_error"], v["tel_lost_track"]) for _, v in after} == {("0", "N")}
+    translator = seat.translator
+    for _, v in after[-2:]:  # still on the end point of the line
+        t = float(v["tel_time_act"])
+        az, el = geometry.target(translator.track, t, 20.0, translator.site, translator.eop)
+        assert separation(float(v["tel_azm_cmd"]), float(v["tel_elv_cmd"]), az[0], el[0]) < 0.05
+    seat.run(5.0)
+    assert (len(seat.acu.paths), seat.acu.aborts) == (paths, aborts)  # the window keeps running
+    assert seat.tel2obs["tel_return_cookie"] == str(cookie)
+
+
+def test_after_a_track_with_a_duration_the_translator_reports_off_track(seat):
+    seat.send(obs_track_duration=5)
+    seat.run(14.0)
+    on = seat.first(lambda v: v["tel_on_track"] == "Y")
+    assert on is not None
+
+    seat.run(10.0)
+
+    after = [v for t, v, _ in seat.history if t > on + 5.5]
+    assert after and {v["tel_on_track"] for v in after} == {"N"}
+    assert {(v["tel_error"], v["tel_lost_track"]) for v in after} == {("0", "N")}
+    assert (len(seat.acu.paths), seat.acu.aborts) == (1, 0)
