@@ -1,0 +1,8 @@
+20-Jun-2001  22:49:57   993070197.115235   File update time stamp   !
+ -22.9856389    a_latitude  ! Latitude of telescope site +north [deg] (from CCAT webpage)
+  67.7402778    a_longitude ! Longitude of telescope site +west [deg] (from CCAT webpage)
+  5611.8        a_altitude ! Altitude over N.N. [meter]               (from CCAT webpage)
+CCAT         a_sitename ! Name of telescope/site
+0		a_leapsec ! differs from 0 for new leap seconds slalib(2001) does not know already [sec]
+0		a_timeoffset ! Relative offset for other time than now [days]
+13.89           a_platescale ! telescope platescale [arcsec/mm] (=1/f)

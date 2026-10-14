@@ -1,0 +1,672 @@
+{
+ "provenance": {
+  "astra": "kosma_software feat/ocs-translator-support @ 3b06b8dd4, built with OBS_CCAT",
+  "command": "astra -t -f 4 -n -r",
+  "made": "2026-10-14T14:50:35Z",
+  "iers": "astra/share/bulletinA of the same commit (tests/fixtures/bulletinA)",
+  "site": "KOSMA_astra.in of ccat_chai: -22.9856389 deg, 67.7402778 deg W, 5611.8 m",
+  "target": "ASTRA_POINT Az,El: after focal-plane and pointing offsets, before the pointing model",
+  "utc": "ASTRA_STEER time: the fixed time of astra_debug_time.inp + 2 s",
+  "tau": "OTF line time astra applied: map offset = del + v * tau"
+ },
+ "fixtures": [
+  {
+   "name": "j2000",
+   "command": {
+    "obs_coord_sys_on": "J2000",
+    "obs_lam_on": 15.88334951722527,
+    "obs_bet_on": -30.0
+   },
+   "track_point": [
+    0,
+    0
+   ],
+   "samples": [
+    {
+     "utc": 1792029602.0,
+     "tau": 0.0,
+     "az": 110.745156,
+     "el": 62.080662
+    },
+    {
+     "utc": 1792030202.0,
+     "tau": 0.0,
+     "az": 111.406394,
+     "el": 64.234194
+    },
+    {
+     "utc": 1792030802.0,
+     "tau": 0.0,
+     "az": 112.295795,
+     "el": 66.376351
+    }
+   ],
+   "tel_angle_focal_plane": {
+    "utc": 1792030802.0,
+    "deg": -79.164865
+   }
+  },
+  {
+   "name": "b1950_pm",
+   "command": {
+    "obs_coord_sys_on": "B1950",
+    "obs_lam_on": 345.2005646491701,
+    "obs_bet_on": -50.269684769653715,
+    "obs_pm_lam": 0.8,
+    "obs_pm_bet": -0.4
+   },
+   "track_point": [
+    0,
+    0
+   ],
+   "samples": [
+    {
+     "utc": 1792033202.0,
+     "tau": 0.0,
+     "az": 199.432534,
+     "el": 60.7848
+    },
+    {
+     "utc": 1792034102.0,
+     "tau": 0.0,
+     "az": 203.580077,
+     "el": 59.51344
+    }
+   ],
+   "tel_angle_focal_plane": {
+    "utc": 1792034102.0,
+    "deg": 34.973172
+   }
+  },
+  {
+   "name": "galactic",
+   "command": {
+    "obs_coord_sys_on": "GALACTIC",
+    "obs_lam_on": 314.45509097104457,
+    "obs_bet_on": -76.8216759628358,
+    "obs_coord_sys_del": "GALACTIC",
+    "obs_coord_sys_off": "GALACTIC"
+   },
+   "track_point": [
+    0,
+    0
+   ],
+   "samples": [
+    {
+     "utc": 1792123202.0,
+     "tau": 0.0,
+     "az": 198.144531,
+     "el": 72.071066
+    },
+    {
+     "utc": 1792124102.0,
+     "tau": 0.0,
+     "az": 206.223485,
+     "el": 70.758419
+    }
+   ],
+   "tel_angle_focal_plane": {
+    "utc": 1792124102.0,
+    "deg": -161.43312
+   }
+  },
+  {
+   "name": "hipparcos_pm_parallax",
+   "command": {
+    "obs_coord_sys_on": "HIPPARCOS",
+    "obs_lam_on": 46.992200082923745,
+    "obs_bet_on": 0.5,
+    "obs_pm_lam": 0.5,
+    "obs_pm_bet": -0.25,
+    "obs_paralx": 0.4
+   },
+   "track_point": [
+    0,
+    0
+   ],
+   "samples": [
+    {
+     "utc": 1792126802.0,
+     "tau": 0.0,
+     "az": 34.405053,
+     "el": 62.080169
+    },
+    {
+     "utc": 1792127702.0,
+     "tau": 0.0,
+     "az": 27.101322,
+     "el": 63.853388
+    }
+   ],
+   "tel_angle_focal_plane": {
+    "utc": 1792127702.0,
+    "deg": -155.30253
+   }
+  },
+  {
+   "name": "j2000_proper_motion",
+   "command": {
+    "obs_coord_sys_on": "J2000",
+    "obs_lam_on": 25.51891339374069,
+    "obs_bet_on": -60.0,
+    "obs_pm_lam": -0.75,
+    "obs_pm_bet": 10.3
+   },
+   "track_point": [
+    0,
+    0
+   ],
+   "samples": [
+    {
+     "utc": 1792216802.0,
+     "tau": 0.0,
+     "az": 197.255709,
+     "el": 50.009458
+    },
+    {
+     "utc": 1792217702.0,
+     "tau": 0.0,
+     "az": 199.628678,
+     "el": 48.913108
+    }
+   ],
+   "tel_angle_focal_plane": {
+    "utc": 1792217702.0,
+    "deg": 37.815466
+   }
+  },
+  {
+   "name": "horizon_offsets",
+   "command": {
+    "obs_coord_sys_on": "HORIZON",
+    "obs_lam_on": 200.0,
+    "obs_bet_on": 45.0,
+    "obs_coord_sys_del": "HORIZON",
+    "obs_lam_del": 30.0,
+    "obs_bet_del": 20.0,
+    "obs_coord_sys_off": "HORIZON",
+    "obs_lam_off": -600.0,
+    "obs_true_angle_off": "N"
+   },
+   "track_point": [
+    0,
+    0
+   ],
+   "samples": [
+    {
+     "utc": 1792220402.0,
+     "tau": 0.0,
+     "az": 199.839464,
+     "el": 45.003484
+    },
+    {
+     "utc": 1792221302.0,
+     "tau": 0.0,
+     "az": 199.839464,
+     "el": 45.003484
+    }
+   ],
+   "tel_angle_focal_plane": {
+    "utc": 1792221302.0,
+    "deg": 0.0
+   }
+  },
+  {
+   "name": "map_and_off_j2000",
+   "command": {
+    "obs_coord_sys_on": "J2000",
+    "obs_lam_on": 18.860817956849417,
+    "obs_bet_on": -25.0,
+    "obs_lam_del": 120.0,
+    "obs_bet_del": -60.0,
+    "obs_lam_off": -1800.0,
+    "obs_bet_off": 300.0,
+    "obs_true_angle_off": "N"
+   },
+   "track_point": [
+    0,
+    0
+   ],
+   "samples": [
+    {
+     "utc": 1792290602.0,
+     "tau": 0.0,
+     "az": 99.541598,
+     "el": 69.499825
+    },
+    {
+     "utc": 1792291502.0,
+     "tau": 0.0,
+     "az": 99.780646,
+     "el": 72.912631
+    }
+   ],
+   "tel_angle_focal_plane": {
+    "utc": 1792291502.0,
+    "deg": -87.824983
+   }
+  },
+  {
+   "name": "map_galactic_off_horizon",
+   "command": {
+    "obs_coord_sys_on": "J2000",
+    "obs_lam_on": 341.4018864456497,
+    "obs_bet_on": -10.0,
+    "obs_coord_sys_del": "GALACTIC",
+    "obs_lam_del": 300.0,
+    "obs_bet_del": 100.0,
+    "obs_coord_sys_off": "HORIZON",
+    "obs_lam_off": 600.0,
+    "obs_bet_off": -30.0
+   },
+   "track_point": [
+    0,
+    0
+   ],
+   "samples": [
+    {
+     "utc": 1792294202.0,
+     "tau": 0.0,
+     "az": 290.410222,
+     "el": 58.739029
+    },
+    {
+     "utc": 1792295102.0,
+     "tau": 0.0,
+     "az": 287.214761,
+     "el": 55.456065
+    }
+   ],
+   "tel_angle_focal_plane": {
+    "utc": 1792295102.0,
+    "deg": 144.50515
+   }
+  },
+  {
+   "name": "map_b1950",
+   "command": {
+    "obs_coord_sys_on": "J2000",
+    "obs_lam_on": 41.44295493444844,
+    "obs_bet_on": 20.0,
+    "obs_coord_sys_del": "B1950",
+    "obs_lam_del": -200.0,
+    "obs_bet_del": 150.0
+   },
+   "track_point": [
+    0,
+    0
+   ],
+   "samples": [
+    {
+     "utc": 1792297802.0,
+     "tau": 0.0,
+     "az": 20.283274,
+     "el": 44.341117
+    },
+    {
+     "utc": 1792298702.0,
+     "tau": 0.0,
+     "az": 15.533333,
+     "el": 45.406598
+    }
+   ],
+   "tel_angle_focal_plane": {
+    "utc": 1792298702.0,
+    "deg": -164.95201
+   }
+  },
+  {
+   "name": "focal_plane_near_80_deg",
+   "command": {
+    "obs_coord_sys_on": "J2000",
+    "obs_lam_on": 36.20255510037591,
+    "obs_bet_on": -13.0,
+    "obs_x_focal_plane": 150.0,
+    "obs_y_focal_plane": -80.0
+   },
+   "track_point": [
+    12.5,
+    -7.3
+   ],
+   "samples": [
+    {
+     "utc": 1792386002.0,
+     "tau": 0.0,
+     "az": 8.933627,
+     "el": 79.755964
+    },
+    {
+     "utc": 1792386302.0,
+     "tau": 0.0,
+     "az": 2.035682,
+     "el": 79.861306
+    },
+    {
+     "utc": 1792386602.0,
+     "tau": 0.0,
+     "az": -4.912838,
+     "el": 79.827127
+    }
+   ],
+   "tel_angle_focal_plane": {
+    "utc": 1792386602.0,
+    "deg": 175.03164
+   }
+  },
+  {
+   "name": "extended_range",
+   "command": {
+    "obs_coord_sys_on": "J2000",
+    "obs_lam_on": 34.9902011819798,
+    "obs_bet_on": -45.0,
+    "obs_extended_elevation_range": "Y",
+    "obs_x_focal_plane": 40.0,
+    "obs_y_focal_plane": 25.0
+   },
+   "track_point": [
+    9.0,
+    -4.0
+   ],
+   "samples": [
+    {
+     "utc": 1792389602.0,
+     "tau": 0.0,
+     "az": 25.295682,
+     "el": 114.974622
+    },
+    {
+     "utc": 1792390502.0,
+     "tau": 0.0,
+     "az": 30.173158,
+     "el": 116.587371
+    }
+   ],
+   "tel_angle_focal_plane": {
+    "utc": 1792390502.0,
+    "deg": 40.620771
+   }
+  },
+  {
+   "name": "north_transit",
+   "command": {
+    "obs_coord_sys_on": "J2000",
+    "obs_lam_on": 66.51828116035608,
+    "obs_bet_on": 5.0
+   },
+   "track_point": [
+    0,
+    0
+   ],
+   "samples": [
+    {
+     "utc": 1792479602.0,
+     "tau": 0.0,
+     "az": 1.797596,
+     "el": 61.936867
+    },
+    {
+     "utc": 1792479662.0,
+     "tau": 0.0,
+     "az": 1.266878,
+     "el": 61.943072
+    },
+    {
+     "utc": 1792479722.0,
+     "tau": 0.0,
+     "az": 0.735978,
+     "el": 61.94714
+    },
+    {
+     "utc": 1792479782.0,
+     "tau": 0.0,
+     "az": 0.204973,
+     "el": 61.949069
+    },
+    {
+     "utc": 1792479842.0,
+     "tau": 0.0,
+     "az": -0.326063,
+     "el": 61.948859
+    }
+   ],
+   "tel_angle_focal_plane": {
+    "utc": 1792479842.0,
+    "deg": 179.5686
+   }
+  },
+  {
+   "name": "otf_line_standby",
+   "command": {
+    "obs_coord_sys_on": "J2000",
+    "obs_lam_on": 88.55798062521446,
+    "obs_bet_on": -35.0,
+    "obs_otf_mode": "C",
+    "obs_lam_del": -300.0,
+    "obs_bet_del": 60.0,
+    "obs_lam_vel": 30.0,
+    "obs_bet_vel": -5.0,
+    "obs_track_duration": 60.0
+   },
+   "track_point": [
+    0,
+    0
+   ],
+   "samples": [
+    {
+     "utc": 1792483202.0,
+     "tau": -8.0,
+     "az": 152.865564,
+     "el": 76.332539
+    },
+    {
+     "utc": 1792483262.0,
+     "tau": -8.0,
+     "az": 153.618589,
+     "el": 76.436383
+    }
+   ],
+   "tel_angle_focal_plane": {
+    "utc": 1792483262.0,
+    "deg": -30.209548
+   }
+  },
+  {
+   "name": "otf_line_end",
+   "command": {
+    "obs_coord_sys_on": "J2000",
+    "obs_lam_on": 88.55798062521446,
+    "obs_bet_on": -35.0,
+    "obs_otf_mode": "C",
+    "obs_lam_del": -300.0,
+    "obs_bet_del": 60.0,
+    "obs_lam_vel": 30.0,
+    "obs_bet_vel": -5.0,
+    "obs_track_duration": 60.0
+   },
+   "track_point": [
+    0,
+    0
+   ],
+   "samples": [
+    {
+     "utc": 1792483202.0,
+     "tau": 62.0,
+     "az": 151.017612,
+     "el": 75.940164
+    },
+    {
+     "utc": 1792483262.0,
+     "tau": 62.0,
+     "az": 151.732053,
+     "el": 76.05067
+    }
+   ],
+   "tel_angle_focal_plane": {
+    "utc": 1792483262.0,
+    "deg": -32.041961
+   }
+  },
+  {
+   "name": "otf_line_running",
+   "command": {
+    "obs_coord_sys_on": "J2000",
+    "obs_lam_on": 88.55798062521446,
+    "obs_bet_on": -35.0,
+    "obs_otf_mode": "C",
+    "obs_lam_del": -300.0,
+    "obs_bet_del": 60.0,
+    "obs_lam_vel": 30.0,
+    "obs_bet_vel": -5.0,
+    "obs_track_duration": 60.0
+   },
+   "track_point": [
+    0,
+    0
+   ],
+   "samples": [
+    {
+     "utc": 1792483202.0,
+     "tau": -3.0,
+     "az": 152.729838,
+     "el": 76.305095
+    },
+    {
+     "utc": 1792483202.0,
+     "tau": -2.0,
+     "az": 152.702763,
+     "el": 76.299596
+    },
+    {
+     "utc": 1792483202.0,
+     "tau": -1.0,
+     "az": 152.67571,
+     "el": 76.294092
+    },
+    {
+     "utc": 1792483202.0,
+     "tau": 0.0,
+     "az": 152.648681,
+     "el": 76.288585
+    },
+    {
+     "utc": 1792483202.0,
+     "tau": 1.0,
+     "az": 152.621675,
+     "el": 76.283075
+    },
+    {
+     "utc": 1792483202.0,
+     "tau": 2.0,
+     "az": 152.594692,
+     "el": 76.27756
+    },
+    {
+     "utc": 1792483202.0,
+     "tau": 3.0,
+     "az": 152.567733,
+     "el": 76.272042
+    },
+    {
+     "utc": 1792483202.0,
+     "tau": 4.0,
+     "az": 152.540796,
+     "el": 76.266521
+    },
+    {
+     "utc": 1792483202.0,
+     "tau": 5.0,
+     "az": 152.513883,
+     "el": 76.260995
+    },
+    {
+     "utc": 1792483232.0,
+     "tau": 6.0,
+     "az": 152.858062,
+     "el": 76.308409
+    },
+    {
+     "utc": 1792483262.0,
+     "tau": 7.0,
+     "az": 153.204797,
+     "el": 76.355249
+    },
+    {
+     "utc": 1792483292.0,
+     "tau": 8.0,
+     "az": 153.554083,
+     "el": 76.401509
+    },
+    {
+     "utc": 1792483322.0,
+     "tau": 9.0,
+     "az": 153.905913,
+     "el": 76.447182
+    },
+    {
+     "utc": 1792483352.0,
+     "tau": 10.0,
+     "az": 154.260282,
+     "el": 76.492263
+    },
+    {
+     "utc": 1792483382.0,
+     "tau": 11.0,
+     "az": 154.617179,
+     "el": 76.536746
+    },
+    {
+     "utc": 1792483412.0,
+     "tau": 12.0,
+     "az": 154.976596,
+     "el": 76.580625
+    },
+    {
+     "utc": 1792483442.0,
+     "tau": 13.0,
+     "az": 155.338523,
+     "el": 76.623894
+    },
+    {
+     "utc": 1792483472.0,
+     "tau": 14.0,
+     "az": 155.702948,
+     "el": 76.666547
+    },
+    {
+     "utc": 1792483502.0,
+     "tau": 15.0,
+     "az": 156.069858,
+     "el": 76.708579
+    },
+    {
+     "utc": 1792483532.0,
+     "tau": 16.0,
+     "az": 156.439242,
+     "el": 76.749982
+    },
+    {
+     "utc": 1792483532.0,
+     "tau": 17.0,
+     "az": 156.409548,
+     "el": 76.744976
+    },
+    {
+     "utc": 1792483532.0,
+     "tau": 18.0,
+     "az": 156.379877,
+     "el": 76.739965
+    },
+    {
+     "utc": 1792483532.0,
+     "tau": 19.0,
+     "az": 156.350231,
+     "el": 76.734951
+    }
+   ],
+   "tel_angle_focal_plane": {
+    "utc": 1792483532.0,
+    "deg": -26.905194
+   }
+  }
+ ]
+}

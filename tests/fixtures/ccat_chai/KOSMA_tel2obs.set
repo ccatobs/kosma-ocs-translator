@@ -1,0 +1,23 @@
+09-Aug-2024  17:37:29  1723217849.152943   File update time stamp   ! astra_dummy (bessel:1116223)
+                         EMU_TEL   tel_telescope   ! Telescope Identifier (for display and backend_name in FITS header)
+N   tel_on_track   ! Y if tracking on commanded position/track within tolerance [Y/N]
+Y   tel_lost_track   ! Y if tracking got beyond tolerance since start of track [Y/N]
+Y   tel_pos_in_range   ! Y if commanded position is within telescope range [Y/N]
+           0   tel_error   ! flags telescope command syntax/consistency and functional errors (=0: ok)
+NONE   tel_error_string   ! Error message associated with telescope command (=NONE: OK)
+           5   tel_error_level   ! Error level for message in tel_error_string [1: trace, 2: debug, 4: info, 5: message, 7: warn, 8: error, 9: fatal]
+     2177073   tel_return_cookie   ! return cookie to identify proper observation 
+       13.89   tel_plate_scale   ! plate scale of focal plane [arcsec/mm]
+-22.98563890   tel_latitude   ! latitude of observatory (needed for Doppler correction) [degree]
+ 67.74027780   tel_longitude   ! longitude of observatory (needed for Doppler correction) [degree, +west (astronomical notation)]
+      5611.8   tel_altitude   ! height above sea level (needed for Doppler correction) [meter]
+   40.158577   tel_angle_focal_plane   ! ccw angle from second coordinate of the telescope reference coordinate system (TARF,HORIZON) to second coordinate of obs_coord_sys_del [degree]
+           0   tel_los_act   ! actual los-angle [degree]
+    1723217849.15293   tel_time_act   ! time when status data were valid [seconds since 1970 UTC]
+   141.06987   tel_time_del   ! time since start of track (may be negative, if start in the future) [seconds]
+   16.935555   tel_azm_cmd   ! commanded azimuth (for tracking display) [degree,cw toward east]
+   40.158011   tel_elv_cmd   ! commanded elevation (for tracking display and for atmospheric calibration) [degree]
+   16.936224   tel_azm_act   ! actual azimuth (for tracking display) [degree,cw toward east]
+   40.158577   tel_elv_act   ! actual elevation (for tracking display) [degree]
+N   tel_supports_ephemeris   ! Y if telescope can calculate ephemeris, N if telescope expects observing task to do this for non-inertial objects [Y/N]
+-100.00 tel_mjd1 ! modified Julian Date UT1 [days]

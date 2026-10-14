@@ -1,0 +1,8 @@
+{
+ "provenance": "JPL Horizons API, queried 2026-10-14: COMMAND=499 (Mars, mar099), CENTER=coord@399 at -67.740278 E, -22.985639, 5.6118 km, QUANTITIES=1,4 (astrometric RA/Dec ICRF; apparent az/el), APPARENT=AIRLESS, EOP file eop.261013.p270109",
+ "samples": [
+  {"utc": 1792062410.4, "ra": 132.314559796, "dec": 19.096487841, "az": 13.535839701, "el": 46.956208435},
+  {"utc": 1792063010.4, "ra": 132.318424998, "dec": 19.095592760, "az": 10.123160297, "el": 47.429626182},
+  {"utc": 1792063610.4, "ra": 132.322289668, "dec": 19.094696750, "az": 6.648961627, "el": 47.766697832}
+ ]
+}
