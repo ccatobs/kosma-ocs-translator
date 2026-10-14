@@ -658,3 +658,24 @@ def test_after_a_refused_command_the_old_track_is_not_renewed(tmp_path):
 
     assert (seat.tel2obs["tel_return_cookie"], seat.tel2obs["tel_error"]) == (str(cookie), "1")
     assert len(seat.acu.paths) == 1
+
+
+@pytest.mark.parametrize("commanded", [(180.01, 45.02), (-1e9, -1e9)], ids=["valid", "nan"])
+def test_before_the_first_command_tel2obs_reports_the_acu_positions(seat, commanded):
+    raw = {
+        "Azimuth current position": 180.0,
+        "Elevation current position": 45.0,
+        "Azimuth commanded position": commanded[0],
+        "Elevation commanded position": commanded[1],
+        "Azimuth Mode": "Stop",
+        "Elevation Mode": "Stop",
+        "Azimuth summary fault": "No Fault",
+        "Elevation summary fault": "No Fault",
+    }
+    seat.acu.get_status = lambda: ocs.TelescopeStatus.from_raw(raw)
+    seat.run(2.0)
+
+    v = seat.tel2obs
+    reported = commanded if commanded[0] > -1e8 else (180.0, 45.0)
+    assert (float(v["tel_azm_cmd"]), float(v["tel_elv_cmd"])) == reported
+    assert (float(v["tel_azm_act"]), float(v["tel_elv_act"])) == (180.0, 45.0)

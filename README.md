@@ -89,7 +89,7 @@ simulator `antenna-control-unit:v0.6.0`), on one host.
 | Translator clock to TCS start of a path | median 0.041 s, max 0.095 s (n = 22, 1500 points) | |
 | `path` request, 1500 points (52.7 KB) | median 0.044 s, max 0.095 s | |
 | ACU - host clock | -0.7 ms (same host); TCS calibration -0.13 ms | |
-| Lead | | 10.3 s = 9.8 s + 0.5 s margin |
+| Lead | | 10.3 s = 9.8 s + 0.5 s margin; the worker takes the start after its queue wait, builds the window (17-41 ms for 1500 points) and sends it only while 0.25 s of margin is left, else it builds the window again |
 | Point spacing: tracking error, curved test track | 2 s: median 0.19", max 85" (spline overshoot); 1 s: median 0.16", max 0.75"; 0.5 s: 0.19"/0.51"; 0.2 s: 0.23"/0.52" | 1 s |
 | Settle after the window start, jumps of 1', 1 deg, 10 deg | on target before the start (the simulator moves during the lead and has no drive limits) | 3 s (starting value; the simulator cannot measure it) |
 

@@ -425,6 +425,8 @@ class Translator:
             target = geometry.target(self.track, time_act, tau, self.site, self.eop)
             az, el = (float(x[0]) for x in target)
             angle = geometry.focal_plane_angle(self.track, time_act, tau, self.site, self.eop)
+        elif acu and _valid(acu.azimuth_commanded) and _valid(acu.elevation_commanded):
+            az, el, angle = acu.azimuth_commanded, acu.elevation_commanded, 0.0  # no command yet
         else:
             az, el = (acu.azimuth, acu.elevation) if acu else (0.0, 0.0)
             angle = 0.0
