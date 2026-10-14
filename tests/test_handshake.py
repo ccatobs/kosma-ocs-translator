@@ -553,3 +553,51 @@ def test_a_path_stopped_by_someone_else_is_error_211_and_not_sent_again(seat):
 
     assert len(seat.acu.paths) == 1
     assert (seat.tel2obs["tel_error"], seat.tel2obs["tel_on_track"]) == ("211", "N")
+
+
+def test_on_the_real_clock_compute_and_request_time_leave_the_tcs_lead_intact(tmp_path):
+    """@MARS (the slowest window), 40 ms per request and a 1 s status read in the queue."""
+    for name in ("KOSMA_obs2tel.set", "KOSMA_astra.in", "KOSMA_track_point.set"):
+        shutil.copy(FIXTURES / "ccat_chai" / name, tmp_path)
+    acu = AcuStub(time.time)
+    acu.latency, acu.status_latency = 0.04, 1.0
+    translator = Translator(acu, tmp_path, tmp_path, FIXTURES / "bulletinA")
+    translator.start()
+    seat = Seat.__new__(Seat)  # only its command writer, on the real clock
+    seat.dir, seat.clock, seat.cookie = tmp_path, time.time, 1000
+    errors = set()
+    for _ in range(3):
+        cookie = seat.send(obs_source_name="@MARS", obs_lam_on=0.0, obs_bet_on=0.0)
+        sent, echoed = time.time(), None
+        while time.time() - sent < 3.0:
+            translator.step()
+            _, values = kio.read_set(tmp_path / "KOSMA_tel2obs.set")
+            if values["tel_return_cookie"] == str(cookie):
+                echoed = echoed or time.time() - sent
+                errors.add(values["tel_error"])
+            time.sleep(0.05)
+        assert echoed is not None and echoed < 0.5
+
+    translator.worker.join()
+    translator.step()
+    assert errors | {kio.read_set(tmp_path / "KOSMA_tel2obs.set")[1]["tel_error"]} == {"0"}
+    assert len(acu.paths) == 3  # the stub refuses a path that starts less than 9.8 s ahead
+
+
+def test_a_busy_tcs_gets_a_new_window_not_a_stale_one(seat):
+    path, busy = seat.acu.path, []
+
+    def busy_once(start, points, coordsys):
+        if not busy:
+            busy.append(start)
+            seat.clock.now += 0.5  # the TCS answered busy after a while
+            raise ocs.OCSBusy("busy", 503)
+        return path(start, points, coordsys)
+
+    seat.acu.path = busy_once
+    seat.send()
+    seat.run(14.0)
+
+    [window] = seat.acu.paths
+    assert window["start"] > busy[0]
+    assert (seat.tel2obs["tel_error"], seat.tel2obs["tel_on_track"]) == ("0", "Y")

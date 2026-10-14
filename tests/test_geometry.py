@@ -1,6 +1,7 @@
 """Geometry golden tests: the target matches astra (astra -t -f 4 -n -r) within 0.1 arcsec."""
 
 import json
+import time
 from pathlib import Path
 
 import numpy as np
@@ -73,3 +74,20 @@ def test_a_1500_point_window_fits_the_ocs_body_limit():
 
     body = ocs.check_path(15.0, points, "Horizon")  # relative start: the lead is 15 s
     assert len(ocs._encode(body)) < ocs.MAX_BODY_BYTES
+
+
+@pytest.mark.parametrize("name", ["STAR", "@MARS", "@MOON"])
+def test_a_1500_point_window_is_cheap_and_agrees_with_exact_targets(name):
+    command = {**TEMPLATE, "obs_source_name": name, "obs_lam_on": 132.3, "obs_bet_on": 19.1}
+    track = geometry.Track.from_command(command)
+    t = 1792062410.4 + np.arange(1500.0)
+    geometry.window(track, t, 0 * t, SITE, EOP)  # warm caches
+
+    start = time.perf_counter()
+    points = np.array(geometry.window(track, t, 0 * t, SITE, EOP))
+    elapsed = time.perf_counter() - start
+
+    assert elapsed < 0.05
+    for k in range(0, 1500, 97):  # one sample at a time is exact
+        az, el = geometry.target(track, t[k : k + 1], 0.0, SITE, EOP)
+        assert separation_arcsec(points[k, 1], points[k, 2], az, el)[0] < 0.001

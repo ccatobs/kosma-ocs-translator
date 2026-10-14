@@ -4,10 +4,12 @@ It answers the OCS client calls the translator makes. A path runs from its start
 time to its last point; the ACU follows it after `settle` seconds. Switches:
 down (OCS unreachable), fault (ACU summary fault), track_error (arcsec added to the
 actual elevation), command_ids (False: the TCS reports no command id), drop_paths
-(accept that many paths but never run them, as the TCS does when Ready() fails).
+(accept that many paths but never run them, as the TCS does when Ready() fails),
+latency and status_latency (real seconds per request, for tests on the real clock).
 """
 
 import math
+import time
 
 import erfa
 import numpy as np
@@ -33,13 +35,16 @@ class AcuStub:
         self.track_error = 0.0
         self.command_ids = True
         self.commanded = True  # False: NaN commanded positions (ACU simulator v0.6.0)
-        self.drop_paths = 0  # accept this many paths without running them (TCS Ready() refusal)
+        self.drop_paths = 0
+        self.latency = 0.0  # real seconds every request takes (with a real clock)
+        self.status_latency = 0.0  # real seconds a status read takes  # accept this many paths without running them (TCS Ready() refusal)
         self.paths = []  # every accepted path: {"id", "start", "points"}
         self.aborts = 0
         self.running = None
         self.az, self.el = 180.0, 45.0  # where the ACU stands when no path moves it
 
     def _reach(self):
+        time.sleep(self.latency)
         if self.down:
             raise ocs.OCSConnectionError("OCS unreachable (ACU stub)")
 
@@ -97,6 +102,7 @@ class AcuStub:
 
     def get_status(self):
         self._reach()
+        time.sleep(self.status_latency)
         self._update()
         now = self.clock()
         az = az_cmd = self.az

@@ -21,6 +21,7 @@ log = logging.getLogger("kosma_ocs_translator")
 
 POLL = 0.1  # s between looks at the obs2tel header stamp
 LEAD = 10.3  # s from now to the window start: the TCS minimum of 9.8 s plus 0.5 s margin
+REQUEST_MARGIN = 0.25  # s of the lead kept for the path request (measured: at most 0.1 s)
 SPACING = 1.0  # s between path points
 WINDOW_POINTS = 1500  # points per window: 1499 s, about 82 KB of request body
 STATUS_PERIOD = 0.5  # s between ACU status reads
@@ -259,28 +260,18 @@ class Translator:
                 raise CommandError(
                     200, f"OTF start {otf_start - now:.1f} s ahead, needs {LEAD + SETTLE:.1f} s"
                 )
-        try:
-            window, points = self.make_window(track, otf_start, duration, now)
-        except ValueError as error:
-            raise CommandError(198, str(error)) from None
         self.track, self.otf_start, self.duration = track, otf_start, duration
         self.tolerance = command["obs_tolerance"]
         if mode == "C" and duration > 0:
             self.scan = (otf_start, duration)
-        self.send_window(window, points)
+        self.send_window()
 
-    def make_window(self, track, otf_start, duration, now):
-        """The next window of track, starting LEAD seconds from now; raises ValueError."""
-        start = now + LEAD
-        t = start + SPACING * np.arange(self.window_points)
+    def send_window(self):
+        """Hand the next window of the current track to the worker (the loop does not wait)."""
+        self.window = {"start": None, "end": None, "id": None}
         az_ref = self.status[1].azimuth if self.status else 180.0
-        tau = _line_time(t, otf_start, duration)
-        points = geometry.window(track, t, tau, self.site, self.eop, az_ref)
-        return {"start": start, "end": t[-1], "id": None}, points
-
-    def send_window(self, window, points):
-        self.window = window
-        self.worker.submit("upload", self._upload, window, points)
+        job = (self.window, self.track, self.otf_start, self.duration, az_ref)
+        self.worker.submit("upload", self._upload, *job)
 
     def check_window(self, now):
         """Renew a window that ran out or that the TCS does not run (TCS Ready() refusal)."""
@@ -308,11 +299,7 @@ class Translator:
 
     def renew(self, now):
         """A renewal: the window of the current command from now on."""
-        try:
-            self.send_window(*self.make_window(self.track, self.otf_start, self.duration, now))
-        except ValueError as error:
-            self.window = None
-            self.error = (198, str(error), 8)
+        self.send_window()
 
     def pointing_offsets(self):
         """Observer pointing offsets (arcsec) from KOSMA_track_point.set, read per command."""
@@ -331,25 +318,48 @@ class Translator:
     def line_time(self, t):
         return _line_time(t, self.otf_start, self.duration)
 
-    def _upload(self, window, points):
-        """Worker: abort what the TCS runs, then send the window; return the command id."""
+    def _upload(self, window, track, otf_start, duration, az_ref):
+        """Worker: abort what the TCS runs, then send a window starting LEAD s from now.
+
+        The start is taken here, after the wait in the queue. The window is built again
+        when its compute ate into the lead or the TCS answered busy.
+        Returns (command id, start, end); raises ValueError when the target leaves the
+        TCS limits.
+        """
         if self.ocs.get_running_command() is not None:
             try:
                 self.ocs.abort()
             except ocs_client.OCSRejected as error:
                 if error.status_code != 409:  # 409: nothing left to abort
                     raise
-        return self.ocs.path(window["start"], points, "Horizon").get("id", UNKNOWN)
+        for _ in range(3):
+            start = self.clock() + LEAD
+            t = start + SPACING * np.arange(self.window_points)
+            tau = _line_time(t, otf_start, duration)
+            points = geometry.window(track, t, tau, self.site, self.eop, az_ref)
+            if start - self.clock() < ocs_client.MIN_START_LEAD + REQUEST_MARGIN:
+                log.warning("window compute took the lead, building it again")
+                continue
+            try:
+                reply = self.ocs.path(start, points, "Horizon")
+            except ocs_client.OCSBusy:
+                log.warning("the TCS is busy, building the window again")
+                continue
+            return reply.get("id", UNKNOWN), start, t[-1]
+        raise ocs_client.OCSRejected("no window sent in time after 3 tries")
 
-    def _upload_done(self, window, points, command_id, error):
+    def _upload_done(self, window, track, otf_start, duration, az_ref, result, error):
         if window is not self.window:
             return  # the window of an earlier command
         if error is None:
-            window["id"], window["sent"] = command_id, self.clock()
+            window["id"], window["start"], window["end"] = result
+            window["sent"] = self.clock()
             return
         log.error("upload for cookie %s failed: %s", self.cookie, error)
         self.window = None
-        if isinstance(error, ocs_client.OCSConnectionError):
+        if isinstance(error, ValueError):
+            self.error = (198, str(error), 8)
+        elif isinstance(error, ocs_client.OCSConnectionError):
             self.error = (210, f"OCS unreachable: {error}", 8)
         else:
             self.error = (211, f"OCS or TCS rejected the path: {error}", 8)
@@ -530,6 +540,7 @@ def main(argv=None):
         client_cert=str(tls / "client.cert.pem") if tls else "",
         client_key=str(tls / "client.key.pem") if tls else "",
         insecure=args.insecure,
+        busy_retries=0,  # the worker builds a new window instead of resending a stale one
     )
     translator = Translator(
         ocs,

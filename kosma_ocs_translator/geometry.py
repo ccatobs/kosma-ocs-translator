@@ -161,15 +161,35 @@ def _apply(offset, lam, bet, tau, nudge=0.0):
     return lam, bet
 
 
-def _body(name, t, observer):
-    """Astrometric ICRS (ra, dec) of a body seen from observer (barycentric, au),
-    corrected for light time; kephem sends the same as J2000 coordinates."""
+def _retarded(name, t, observer):
+    """Barycentric position (au) of a body when its light left for observer (au) at t."""
     tt = Time(*erfa.taitt(*erfa.utctai(2440587.5, t / 86400)), format="jd", scale="tt")
     delay = 0.0
     for _ in range(3):
-        d = get_body_barycentric(name, tt - delay * u.s).xyz.to_value(u.au).T - observer
-        delay = np.linalg.norm(d, axis=-1) * AU_LIGHT_TIME
-    return erfa.c2s(d)
+        p = get_body_barycentric(name, tt - delay * u.s).xyz.to_value(u.au).T
+        delay = np.linalg.norm(p - observer, axis=-1) * AU_LIGHT_TIME
+    return p
+
+
+# apco13 and the ephemeris are exact every SLOW_STEP seconds and linear in between:
+# under 1 mas for the Moon, and a 1500-point window in a few milliseconds
+SLOW_STEP = 20.0
+
+
+def _grid(t):
+    """Sample times for the slow parts, or None when t is short enough to take as is."""
+    span = t.max() - t.min()
+    if t.size <= 2 or span <= SLOW_STEP:
+        return None
+    return np.linspace(t.min(), t.max(), int(np.ceil(span / SLOW_STEP)) + 1)
+
+
+def _interp(grid, values, t):
+    """Values sampled on grid, linear at t; any trailing shape."""
+    columns = values.reshape(len(grid), -1).T
+    return np.stack([np.interp(t, grid, c) for c in columns], axis=-1).reshape(
+        t.shape + values.shape[1:]
+    )
 
 
 def _mean(track, tau, nudge, body=None):
@@ -206,10 +226,12 @@ def _observed(track, t, tau, site, eop, nudge=0.0):
     t = np.atleast_1d(np.asarray(t, dtype=float))
     if track.frame == "HORIZON":  # astra skips the sky stages and offsets in other frames
         return np.full(t.shape, track.lam), np.full(t.shape, track.bet)
-    xp, yp, dut1 = eop.at(t / 86400 + 40587)
-    astrom, _ = erfa.apco13(
+    grid = _grid(t)
+    at = t if grid is None else grid
+    xp, yp, dut1 = eop.at(at / 86400 + 40587)
+    slow, _ = erfa.apco13(
         2440587.5,
-        t / 86400,
+        at / 86400,
         dut1,
         np.radians(site.longitude),
         np.radians(site.latitude),
@@ -221,7 +243,16 @@ def _observed(track, t, tau, site, eop, nudge=0.0):
         0.0,
         0.0,
     )
-    body = _body(track.body, t, astrom["eb"]) if track.body else None
+    astrom = slow
+    if grid is not None:
+        astrom = np.empty(t.shape, slow.dtype)
+        for name in slow.dtype.names:
+            values = np.unwrap(slow[name]) if name == "eral" else slow[name]
+            astrom[name] = _interp(grid, values, t)
+    body = None
+    if track.body:
+        p = _retarded(track.body, at, slow["eb"])
+        body = erfa.c2s((p if grid is None else _interp(grid, p, t)) - astrom["eb"])
     ri, di = erfa.atciq(*_mean(track, tau, nudge, body), astrom)
     az, zd, *_ = erfa.atioq(ri, di, astrom)
     return az, np.pi / 2 - zd
