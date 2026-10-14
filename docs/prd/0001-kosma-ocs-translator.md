@@ -54,9 +54,12 @@ repos:
   - source frame to mean J2000 (J2000, B1950, GALACTIC, HIPPARCOS; HORIZON skips ahead), with proper motion and parallax;
   - map offset in `obs_coord_sys_del` and OFF offset in `obs_coord_sys_off`, with their true-angle flags;
   - mean to apparent to topocentric with ERFA, including DUT1 and polar motion;
-  - HORIZON-frame offsets, then focal-plane offsets, then observer pointing offsets from `KOSMA_track_point.set`, each as a true-angle az/el offset;
-  - extended range, then one azimuth branch for the whole window inside −180…360°.
+  - HORIZON-frame offsets, then focal-plane offsets, each as a true-angle az/el offset;
+  - extended range;
+  - observer pointing offsets from `KOSMA_track_point.set`, as a true-angle az/el offset. astra applies them after the extended-range flip (`astra_track.c:911-960`), and the translator does the same;
+  - one azimuth branch for the whole window inside −180…360°.
 - Continuous OTF follows astra: map offset = del + v · clamp(t − S, −10 s, D). A pre-OTF command has no start yet, so the translator sets S to infinity. The clamp then parks the telescope on the standby point.
+- astra starts each OTF line 2 s later than this formula (`astra_time.c:188`), 24″ at 12″/s. The translator follows the formula. Seat-parity runs show the difference until the KOSMA team says whether the lag is intentional.
 - Solar-system bodies: with `tel_supports_ephemeris` = Y, the translator resolves `@NAME` itself. A configuration flag switches to N, and kephem then sends J2000 coordinates.
 - Site constants come from the OCS. The translator refuses to start when `KOSMA_astra.in` disagrees.
 - IERS (International Earth Rotation and Reference Systems Service) data come from a local file that a cron job refreshes every day.
@@ -79,6 +82,7 @@ repos:
 - Without a command id, the translator infers on-track and says so in `tel_error_string`. This mode is for development only.
 - `tel_lost_track` latches inside [S, S + D) and resets with the next command.
 - After D, the translator keeps tracking: on the source in mode N, on the end point in OTF.
+- After S + D, `tel_on_track` is N, as `OBSERVATORY.acfg` states for `obs_start_time`.
 - `tel_azm_act` and `tel_elv_act` report target + (ACU actual − ACU commanded).
 - At start, the translator does not act on the command already in `KOSMA_obs2tel.set`. It reports cookie 0 and waits for a new cookie.
 

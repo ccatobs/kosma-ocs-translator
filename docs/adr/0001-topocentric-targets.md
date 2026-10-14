@@ -49,4 +49,4 @@ Accepted on 2026-10-14.
 
 ## Amendments
 
-None.
+- 2026-10-14: On TCS master (commit 8359639), `NewPointing()` returns `Pointing{}` (`pointing.go:14-16`). Its refraction constants and az/el offsets are zero, and `NewRefraction` has no caller. Issue ccatobs/telescope-control-system#23 (where refraction and the pointing model apply) asks the TCS team which component applies them. The decision holds until the TCS team answers.
