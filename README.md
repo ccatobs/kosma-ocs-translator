@@ -101,7 +101,9 @@ ACU simulator v0.6.0 that a test on it must allow for:
   translator falls back to target vs actual (development only, flagged);
 - `Clear Stack` keeps the last point of the previous path, and points earlier
   than that point are dropped: a new path is ignored until the previous window
-  would have ended. Use short windows there (`--window-points 60`).
+  would have ended. Use short windows there (`--window-points 30`). Even then an
+  OTFTP right after a PRETP loses the first points of its window, and the line
+  starts late: run OTF lines end to end against a real ACU or the ACU stub.
 
 The TCS refuses an accepted path now and then with "ACU & TCS clock mismatch"
 when two commands arrive within its 1 s status cycle (2 of 25 abort + path
