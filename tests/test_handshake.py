@@ -338,11 +338,12 @@ def test_boresight_update_replaces_the_window_with_the_new_focal_plane_offsets(s
 
 
 def test_the_result_of_an_old_upload_does_not_touch_the_next_command(seat):
-    gate = threading.Event()
+    gate, inside = threading.Event(), threading.Event()
     path = seat.acu.path
 
     def first_path_fails_late(*args):
         if not gate.is_set():
+            inside.set()
             gate.wait(5)
             raise ocs.OCSRejected("rejected late", 400)
         return path(*args)
@@ -350,7 +351,8 @@ def test_the_result_of_an_old_upload_does_not_touch_the_next_command(seat):
     seat.acu.path = first_path_fails_late
     seat.send()
     seat.clock.now += 0.1
-    seat.translator.step()  # the worker now hangs in the first upload
+    seat.translator.step()
+    assert inside.wait(5)  # the worker now hangs in the first upload
     cookie = seat.send(obs_y_focal_plane=30.0)
     seat.clock.now += 0.1
     seat.translator.step()  # the second command arrives meanwhile
@@ -679,3 +681,62 @@ def test_before_the_first_command_tel2obs_reports_the_acu_positions(seat, comman
     reported = commanded if commanded[0] > -1e8 else (180.0, 45.0)
     assert (float(v["tel_azm_cmd"]), float(v["tel_elv_cmd"])) == reported
     assert (float(v["tel_azm_act"]), float(v["tel_elv_act"])) == (180.0, 45.0)
+
+
+def test_a_refused_command_keeps_its_error_when_the_previous_upload_fails_later(seat):
+    gate, inside = threading.Event(), threading.Event()
+    path = seat.acu.path
+
+    def first_path_fails_late(*args):
+        if not gate.is_set():
+            inside.set()
+            gate.wait(5)
+            raise ocs.OCSRejected("rejected late", 400)
+        return path(*args)
+
+    seat.acu.path = first_path_fails_late
+    seat.send()
+    seat.clock.now += 0.1
+    seat.translator.step()
+    assert inside.wait(5)  # the worker now hangs in the first upload
+    cookie = seat.send(obs_chop_beam=1, obs_amp_chop=60.0)
+    seat.clock.now += 0.1
+    seat.translator.step()  # refused at once
+    gate.set()
+    seat.translator.worker.join()
+    seat.run(2.0)
+
+    assert (seat.tel2obs["tel_return_cookie"], seat.tel2obs["tel_error"]) == (str(cookie), "1")
+
+
+def test_an_out_of_range_otf_line_is_198_and_opens_no_scan_window(seat):
+    start = seat.clock() + 15.0
+    cookie = seat.send(
+        obs_lam_on=33.51,
+        obs_bet_on=-23.11,
+        obs_track_duration=30.0,  # through the zenith
+        obs_start_time=f"{start:.5f}",
+        **OTF,
+    )
+    seat.run(25.0)  # past S
+
+    v = seat.tel2obs
+    assert (v["tel_return_cookie"], v["tel_error"], v["tel_pos_in_range"]) == (
+        str(cookie),
+        "198",
+        "N",
+    )
+    assert v["tel_lost_track"] == "N"
+    assert seat.acu.paths == []
+
+
+def test_an_unreadable_command_after_an_otf_line_reports_nothing_of_the_line(seat):
+    pretp_then_otftp(seat, lead=15.0)
+    seat.run(20.0)  # 5 s into the line
+    assert float(seat.tel2obs["tel_time_del"]) > 0
+    seat.send(obs_tolerance="ten")
+    seat.run(2.0)
+
+    v = seat.tel2obs
+    assert (v["tel_error"], v["tel_time_del"]) == ("202", "0")
+    assert (v["tel_azm_cmd"], v["tel_elv_cmd"]) == (v["tel_azm_act"], v["tel_elv_act"])

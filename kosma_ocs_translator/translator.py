@@ -201,9 +201,7 @@ class Translator:
         self.last_cookie = self.cookie = command["obs_cookie"]
         self.update_time = _update_time(command)
         self.reload_eop()
-        self.on = self.lost = False
-        self.scan = None
-        self.refusals = 0
+        self.detach()
         try:
             self.accept(command, now)
             self.error = (0, "NONE", 5)
@@ -211,6 +209,14 @@ class Translator:
             log.warning("cookie %s refused: %s", self.cookie, refused)
             self.error = (refused.code, str(refused), 8)
         self.write(now)
+
+    def detach(self):
+        """Forget the previous command. Its path keeps running on the TCS until the new
+        command sends one; a late result of its upload no longer matches self.window."""
+        self.window = self.track = self.otf_start = self.scan = None
+        self.duration = 0.0
+        self.on = self.lost = False
+        self.refusals = 0
 
     def reload_eop(self):
         """Read the IERS file again when the daily job has replaced it."""
@@ -231,9 +237,7 @@ class Translator:
             return
         if cookie != self.last_cookie:
             self.last_cookie = self.cookie = cookie
-            self.on = self.lost = False
-            self.scan = None
-            self.refusals = 0
+            self.detach()
             self.error = (202, f"invalid command: {error}", 8)
             self.write(now)
 
@@ -360,7 +364,7 @@ class Translator:
             window["sent"] = self.clock()
             return
         log.error("upload for cookie %s failed: %s", self.cookie, error)
-        self.window = None
+        self.window = self.scan = None  # a window that never ran opens no scan window
         if isinstance(error, ValueError):
             self.error = (198, str(error), 8)
         elif isinstance(error, ocs_client.OCSConnectionError):
