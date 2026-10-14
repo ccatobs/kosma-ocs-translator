@@ -322,6 +322,12 @@ class Translator:
         except (OSError, KeyError, ValueError):
             return 0.0, 0.0
 
+    def time_since_start(self, t):
+        """tel_time_del: the line time of an OTF line, else the time since the scan began."""
+        if self.otf_start is not None and self.duration > 0:
+            return float(self.line_time(t))
+        return t - self.scan[0] if self.scan else 0.0
+
     def line_time(self, t):
         return _line_time(t, self.otf_start, self.duration)
 
@@ -399,12 +405,12 @@ class Translator:
 
     def values(self, now):
         acu = self.status[1] if self.status else None
+        time_act = self.status[0] if self.status else now  # every position refers to it
         if self.track:
-            tau = self.line_time(now)
-            az, el = (
-                float(x[0]) for x in geometry.target(self.track, now, tau, self.site, self.eop)
-            )
-            angle = geometry.focal_plane_angle(self.track, now, tau, self.site, self.eop)
+            tau = self.line_time(time_act)
+            target = geometry.target(self.track, time_act, tau, self.site, self.eop)
+            az, el = (float(x[0]) for x in target)
+            angle = geometry.focal_plane_angle(self.track, time_act, tau, self.site, self.eop)
         else:
             az, el = (acu.azimuth, acu.elevation) if acu else (0.0, 0.0)
             angle = 0.0
@@ -412,7 +418,6 @@ class Translator:
         if acu and _valid(acu.azimuth_commanded) and _valid(acu.elevation_commanded):
             az_act += (acu.azimuth - acu.azimuth_commanded + 180) % 360 - 180
             el_act += acu.elevation - acu.elevation_commanded
-        time_act = self.status[0] if self.status else now
         dut1 = self.eop.at(time_act / 86400 + 40587)[2]
         return {
             "tel_telescope": self.telescope,
@@ -430,7 +435,7 @@ class Translator:
             "tel_angle_focal_plane": angle,
             "tel_los_act": 0.0,
             "tel_time_act": time_act,
-            "tel_time_del": 0.0,
+            "tel_time_del": self.time_since_start(time_act),
             "tel_azm_cmd": az,
             "tel_elv_cmd": el,
             "tel_azm_act": az_act,

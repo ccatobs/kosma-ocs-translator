@@ -135,10 +135,11 @@ def test_reports_target_actual_site_and_ut1_date(seat):
     seat.run(20.0)
 
     v = seat.tel2obs
-    now = seat.history[-1][0]
+    now = float(v["tel_time_act"])  # every position refers to the time of the ACU status
+    assert seat.history[-1][0] - 1.0 < now <= seat.history[-1][0]
     track = seat.translator.track
     az, el = geometry.target(track, now, 0.0, seat.translator.site, seat.translator.eop)
-    assert separation(float(v["tel_azm_cmd"]), float(v["tel_elv_cmd"]), az[0], el[0]) < 0.5
+    assert separation(float(v["tel_azm_cmd"]), float(v["tel_elv_cmd"]), az[0], el[0]) < 0.05
     assert float(v["tel_elv_act"]) - float(v["tel_elv_cmd"]) == pytest.approx(0.001, abs=1e-5)
     assert float(v["tel_azm_act"]) == pytest.approx(float(v["tel_azm_cmd"]), abs=1e-5)
     assert (v["tel_latitude"], v["tel_longitude"], v["tel_altitude"]) == (
@@ -216,6 +217,12 @@ def test_pretp_parks_on_the_standby_point_and_otftp_with_15_s_of_lead_runs_the_l
     assert on is not None and on >= start
     assert {v["tel_error"] for _, v, _ in seat.history} == {"0"}
     assert seat.tel2obs["tel_lost_track"] == "N"
+    # tel_time_del: the line time, -10 s before S up to D after
+    v = next(
+        v for t, v, _ in seat.history if v["tel_return_cookie"] == str(cookie) and t > start + 5
+    )
+    assert float(v["tel_time_del"]) == pytest.approx(float(v["tel_time_act"]) - start, abs=1e-3)
+    assert float(seat.tel2obs["tel_time_del"]) == 60.0
 
 
 def test_otf_start_closer_than_lead_plus_settle_is_error_200(seat):
