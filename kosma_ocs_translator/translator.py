@@ -92,6 +92,8 @@ class Translator:
         self.window_points = window_points
         self.read_dir = Path(read_dir)
         self.clock = clock
+        self.eop_path = Path(eop_path)
+        self.eop_mtime = self.eop_path.stat().st_mtime
         self.eop = geometry.read_bulletin_a(eop_path)
         self.worker = Worker()
         self.tel2obs = kio.Tel2obsWriter(Path(write_dir) / "KOSMA_tel2obs.set")
@@ -126,9 +128,8 @@ class Translator:
             -float(astra["a_longitude"]),
             float(astra["a_altitude"]),
         )
-        if not np.allclose(
-            kosma, (site["latitude"], site["longitude"], site["height"]), atol=1e-5, rtol=0
-        ):
+        ocs_site = (site["latitude"], site["longitude"], site["height"])
+        if not np.all(np.isclose(kosma, ocs_site, atol=(1e-5, 1e-5, 1.0), rtol=0)):
             raise ValueError(
                 f"site of the OCS {site} disagrees with KOSMA_astra.in {kosma} (+east)"
             )
@@ -149,9 +150,13 @@ class Translator:
         stamp = kio.read_stamp(self.obs2tel)
         if stamp is not None and stamp != self.stamp:
             self.stamp = stamp
-            _, command = kio.read_obs2tel(self.obs2tel)
-            if command["obs_cookie"] != self.last_cookie:
-                self.new_command(command, now)
+            try:
+                _, command = kio.read_obs2tel(self.obs2tel)
+            except (OSError, ValueError) as error:
+                self.unreadable_command(error, now)
+            else:
+                if command["obs_cookie"] != self.last_cookie:
+                    self.new_command(command, now)
         if not self.status_pending and (
             self.status is None or now - self.status[0] >= STATUS_PERIOD
         ):
@@ -192,6 +197,7 @@ class Translator:
         """Validate a command with a new cookie, echo the cookie, send its window."""
         self.last_cookie = self.cookie = command["obs_cookie"]
         self.update_time = _update_time(command)
+        self.reload_eop()
         self.on = self.lost = False
         self.scan = None
         self.refusals = 0
@@ -202,6 +208,29 @@ class Translator:
             log.warning("cookie %s refused: %s", self.cookie, refused)
             self.error = (refused.code, str(refused), 8)
         self.write(now)
+
+    def reload_eop(self):
+        """Read the IERS file again when the daily job has replaced it."""
+        try:
+            mtime = self.eop_path.stat().st_mtime
+            if mtime != self.eop_mtime:
+                self.eop, self.eop_mtime = geometry.read_bulletin_a(self.eop_path), mtime
+                log.info("read %s again", self.eop_path)
+        except (OSError, ValueError) as error:
+            log.error("keeping the IERS data read before: %s", error)
+
+    def unreadable_command(self, error, now):
+        """A command with an unreadable variable: error 202, if its cookie is readable."""
+        try:
+            cookie = int(kio.read_set(self.obs2tel)[1]["obs_cookie"])
+        except (OSError, KeyError, ValueError):
+            log.error("KOSMA_obs2tel.set unreadable: %s", error)
+            return
+        if cookie != self.last_cookie:
+            self.last_cookie = self.cookie = cookie
+            self.on = self.lost = False
+            self.error = (202, f"invalid command: {error}", 8)
+            self.write(now)
 
     def accept(self, command, now):
         if command["obs_chop_beam"] != 0 or command["obs_amp_chop"] != 0:
@@ -265,10 +294,10 @@ class Translator:
             return
         running = self.status[2]
         if running in (window["id"], UNKNOWN):
-            self.refusals = 0
-        elif running is not None:
+            window["seen"] = True
+        elif running is not None or window.get("seen"):
             self.window = None
-            self.error = (211, f"the TCS runs command {running}, not path {window['id']}", 8)
+            self.error = (211, f"the TCS stopped path {window['id']}, it runs {running}", 8)
         elif self.refusals < 2:
             self.refusals += 1
             log.warning("the TCS does not run path %s, sending it again", window["id"])
@@ -425,3 +454,95 @@ def _update_time(command):
 def _valid(position):
     """An ACU position, not the TCS NaN placeholder (-1e9)."""
     return position is not None and math.isfinite(position) and position > -1e8
+
+
+def run(translator):
+    while True:
+        translator.step()
+        time.sleep(POLL)
+
+
+def parse_arguments(argv=None):
+    import argparse
+    import os
+
+    rw = Path(os.environ.get("WRITE_DIR", "/net/KOSMA_file_io/ReadWrite"))
+    ap = argparse.ArgumentParser(
+        prog="kosma_ocs_translator",
+        description="Fill the KOSMA telescope seat at FYST through the OCS.",
+    )
+    ap.add_argument("--read-dir", type=Path, default=Path(os.environ.get("READ_DIR", rw)))
+    ap.add_argument("--write-dir", type=Path, default=rw)
+    ap.add_argument("--ocs-url", default=os.environ.get("OCS_URL", "https://127.0.0.1:5600"))
+    ap.add_argument(
+        "--tls-dir",
+        type=Path,
+        default=Path(os.environ["OCS_TLS_DIR"]) if "OCS_TLS_DIR" in os.environ else None,
+        help="directory with server.cert.pem, client.cert.pem, client.key.pem (env OCS_TLS_DIR)",
+    )
+    ap.add_argument("--insecure", action="store_true", help="no TLS verification (development)")
+    ap.add_argument(
+        "--iers",
+        type=Path,
+        default=rw.parent / "share" / "astra" / "bulletinA",
+        help="IERS Bulletin A (ser7.dat), the file astra reads; a cron job refreshes it",
+    )
+    ap.add_argument(
+        "--no-ephemeris",
+        action="store_true",
+        help="tel_supports_ephemeris N: kephem resolves @ sources into # sources",
+    )
+    ap.add_argument(
+        "--window-points",
+        type=int,
+        default=WINDOW_POINTS,
+        help=f"points per window at {SPACING:g} s (default {WINDOW_POINTS})",
+    )
+    ap.add_argument(
+        "--log-file", type=Path, default=rw.parent / "logs" / "kosma_ocs_translator.log"
+    )
+    ap.add_argument("--log-level", default="INFO")
+    return ap.parse_args(argv)
+
+
+def main(argv=None):
+    from astropy.utils import iers
+
+    args = parse_arguments(argv)
+    handlers = [logging.StreamHandler()]
+    if args.log_file.parent.is_dir():
+        handlers.append(logging.FileHandler(args.log_file))
+    logging.basicConfig(
+        level=args.log_level,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        handlers=handlers,
+    )
+    iers.conf.auto_download = False  # Earth orientation comes from args.iers only
+    tls = args.tls_dir
+    ocs = ocs_client.observatory_control_system(
+        args.ocs_url,
+        server_cert=str(tls / "server.cert.pem") if tls else "",
+        client_cert=str(tls / "client.cert.pem") if tls else "",
+        client_key=str(tls / "client.key.pem") if tls else "",
+        insecure=args.insecure,
+    )
+    translator = Translator(
+        ocs,
+        args.read_dir,
+        args.write_dir,
+        args.iers,
+        supports_ephemeris=not args.no_ephemeris,
+        window_points=args.window_points,
+    )
+    try:
+        translator.start()
+    except (OSError, ValueError, ocs_client.OCSError) as error:
+        log.critical("not starting: %s", error)
+        return 1
+    log.info(
+        "filling the telescope seat: %s -> %s, OCS %s", args.read_dir, args.write_dir, args.ocs_url
+    )
+    try:
+        run(translator)
+    except KeyboardInterrupt:
+        return 0

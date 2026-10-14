@@ -4,6 +4,7 @@ The tests write KOSMA_obs2tel.set as control_tel does and read every
 KOSMA_tel2obs.set the translator writes, under KOSMA rules (kio).
 """
 
+import itertools
 import json
 import shutil
 import threading
@@ -41,9 +42,8 @@ class Seat:
             self.acu,
             read_dir=tmp_path,
             write_dir=tmp_path,
-            eop_path=FIXTURES / "bulletinA",
             clock=self.clock,
-            **options,
+            **{"eop_path": FIXTURES / "bulletinA", **options},
         )
         self.translator.start()
         self._collect()
@@ -452,7 +452,7 @@ def test_writes_tel2obs_at_least_every_obs_tel_info_update_time(seat):
     seat.run(20.0)
 
     times = [t for t, _, _ in seat.history if t > seat.history[1][0]]
-    gaps = [b - a for a, b in zip(times, times[1:], strict=False)]
+    gaps = [b - a for a, b in itertools.pairwise(times)]
     assert max(gaps) <= 0.5 + 1e-6
 
 
@@ -506,3 +506,43 @@ def test_without_fresh_acu_status_the_translator_reports_off_track(seat):
     seat.acu.down = False
     seat.run(2.0)
     assert (seat.tel2obs["tel_on_track"], seat.tel2obs["tel_error_string"]) == ("Y", "NONE")
+
+
+def test_a_command_with_an_unreadable_variable_is_invalid(seat):
+    cookie = seat.send(obs_tolerance="ten")
+    seat.run(0.5)
+
+    v = seat.tel2obs
+    assert (v["tel_return_cookie"], v["tel_error"]) == (str(cookie), "202")
+    assert "obs_tolerance" in v["tel_error_string"]
+
+
+def test_reads_the_iers_file_again_when_the_daily_job_replaced_it(tmp_path):
+    bulletin = tmp_path / "bulletinA"
+    shutil.copy(FIXTURES / "bulletinA", bulletin)
+    seat = Seat(tmp_path, eop_path=bulletin)
+    first = seat.translator.eop
+    text = bulletin.read_text().replace(
+        "2026 10 15  61328       0.1614", "2026 10 15  61328       0.1714"
+    )
+    bulletin.write_text(text)
+    seat.send()
+    seat.run(0.5)
+
+    assert seat.translator.eop is not first
+    assert seat.translator.eop.x[seat.translator.eop.mjd == 61328] == pytest.approx(0.1714)
+
+
+def test_refuses_to_start_when_the_iers_file_does_not_cover_today(tmp_path):
+    with pytest.raises(ValueError, match="IERS"):
+        Seat(tmp_path, now=1830000000.0)  # 2027-12-28, beyond the bulletin
+
+
+def test_a_path_stopped_by_someone_else_is_error_211_and_not_sent_again(seat):
+    seat.send()
+    seat.run(14.0)
+    seat.acu.abort()  # e.g. an operator in the OCS web interface
+    seat.run(2.0)
+
+    assert len(seat.acu.paths) == 1
+    assert (seat.tel2obs["tel_error"], seat.tel2obs["tel_on_track"]) == ("211", "N")

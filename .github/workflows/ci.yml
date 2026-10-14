@@ -1,0 +1,39 @@
+name: tests
+
+# Contract, geometry golden and handshake tests on every PR. CI never runs KOSMA,
+# astra or the OCS: the tests use committed fixtures and an in-process ACU stub.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # the OCS client lives in the private ccatobs/observatory-control-system;
+      # pip clones it over ssh with the org read key, as telescope-control-system builds do
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.GH_READ_ACCESS_SSH_KEY_ED25519 }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install
+        run: pip install ".[test]" ruff
+
+      - name: Lint
+        run: |
+          ruff check kosma_ocs_translator tests tools
+          ruff format --check kosma_ocs_translator tests tools
+
+      - name: Contract, geometry golden and handshake tests
+        run: pytest -v tests/test_kio.py tests/test_geometry.py tests/test_handshake.py

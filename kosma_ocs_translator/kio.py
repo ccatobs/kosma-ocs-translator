@@ -122,10 +122,18 @@ def read_set(path):
 def read_obs2tel(path):
     """Return (stamp, command) with the OBS2TEL variables typed.
 
-    Raises KeyError or ValueError when a variable is missing or unreadable.
+    Raises ValueError, naming the variable, when one is missing or unreadable.
     """
     stamp, values = read_set(path)
-    return stamp, {name: kind(values[name]) for name, kind in OBS2TEL.items()}
+    command = {}
+    for name, kind in OBS2TEL.items():
+        try:
+            command[name] = kind(values[name])
+        except KeyError:
+            raise ValueError(f"{name} missing") from None
+        except ValueError:
+            raise ValueError(f"{name} {values[name]!r} is not {kind.__name__}") from None
+    return stamp, command
 
 
 def header_time(now):
