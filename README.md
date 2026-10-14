@@ -41,8 +41,11 @@ kosma_ocs_translator     # as kosma_bridge starts it (server registry: kosma_ocs
   1 s apart, starting 10.3 s ahead. A window that runs out before the next command,
   or that the TCS accepted but does not run, is sent again (renewal); tel2obs
   reports `tel_on_track` = N during the gap.
-- `tel_return_cookie`: the new cookie, once the command passes validation (also
-  with the error of a refused command), with `tel_on_track` = N.
+- `tel_return_cookie`: the new cookie, once the command passes validation, with
+  `tel_on_track` = N. A command refused by validation echoes its cookie with the
+  error. Error 198 is the exception: the worker finds it while it builds the
+  window, after the echo, and by then it has aborted the running path. control_tel
+  sees it through `tel_pos_in_range` = N.
 - `tel_on_track` = Y when the TCS runs our path (command id), an ACU status read
   after the window start shows the tracking error within `obs_tolerance`
   (hypot((az - az_cmd) cos el, el - el_cmd), raw coordinates), and an OTF line has
@@ -70,7 +73,7 @@ A non-zero `tel_error` means "abort this command". Warnings set only
 | Code | Meaning |
 |---|---|
 | 1 | chopper requested (`obs_chop_beam` or `obs_amp_chop` not 0) |
-| 198 | position out of range: the window leaves the TCS limits (az -180..360 deg, el -90..180 deg, 3 and 1.5 deg/s) |
+| 198 | position out of range: the window leaves the TCS limits (az -180..360 deg, el -90..180 deg, 3 and 1.5 deg/s); comes after the echo, with `tel_pos_in_range` = N |
 | 199 | lost track during the scan window |
 | 200 | OTF start unreachable: S is closer than lead (10.3 s) plus settle time (3 s) |
 | 201 | mode not supported (pattern OTF, mode P) |
