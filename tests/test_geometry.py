@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import ocs
 import pytest
 
 from kosma_ocs_translator import geometry, kio
@@ -46,3 +47,29 @@ def test_focal_plane_angle_matches_astra(fixture):
     angle = geometry.focal_plane_angle(track_of(fixture), golden["utc"], tau, SITE, EOP)
 
     assert angle == pytest.approx(golden["deg"], abs=1e-4)
+
+
+def test_a_window_through_north_keeps_one_azimuth_branch_near_the_acu():
+    fixture = next(f for f in GOLDEN["fixtures"] if f["name"] == "north_transit")
+    t0 = fixture["samples"][0]["utc"] - 600
+    t = t0 + np.arange(1500.0)
+
+    for az_ref in (350.0, -10.0, 5.0):
+        points = np.array(geometry.window(track_of(fixture), t, 0 * t, SITE, EOP, az_ref))
+        az = points[:, 1]
+        assert np.abs(np.diff(az)).max() < 0.1  # no jump of 360 deg inside the window
+        assert -180 <= az.min() and az.max() <= 360
+        # the other branches leave the TCS range or start farther from the ACU
+        for other in (az - 360, az + 360):
+            inside = -180 <= other.min() and other.max() <= 360
+            assert not inside or abs(other[0] - az_ref) >= abs(az[0] - az_ref)
+
+
+def test_a_1500_point_window_fits_the_ocs_body_limit():
+    fixture = next(f for f in GOLDEN["fixtures"] if f["name"] == "otf_line_running")
+    t = fixture["samples"][0]["utc"] + np.arange(1500.0)
+
+    points = geometry.window(track_of(fixture), t, np.clip(t - t[0], -10, 1500), SITE, EOP)
+
+    body = ocs.check_path(15.0, points, "Horizon")  # relative start: the lead is 15 s
+    assert len(ocs._encode(body)) < ocs.MAX_BODY_BYTES
