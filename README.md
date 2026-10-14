@@ -131,4 +131,16 @@ pytest                     # contract (kio), geometry golden, handshake (ACU stu
 
 `tests/fixtures/golden.json` comes from astra on a KOSMA host
 (`tools/make_golden.py`, provenance in the file and in `tests/fixtures/PROVENANCE`).
-The seat-parity tests run on a KOSMA host: `tools/seat_parity.py`.
+
+The seat-parity tests run on a KOSMA host with the local KOSMA simulation and the OCS
+stack of `run.bash`:
+
+```sh
+python tools/seat_parity.py --astra ASTRA --astra-io ASTRA_IOPATH \
+    --tls-dir OCS_TLS_DIR --report seat_parity_report.md
+```
+
+The command stops `astra_dummy`, runs the same scenarios (KOSMA_track ON, OFF, a map
+offset, an OTF line) with astra and then with the translator, restores the
+measurement setup and `astra_dummy`, and writes the report. It compares each
+reported target with the translator geometry at `tel_time_act`.
