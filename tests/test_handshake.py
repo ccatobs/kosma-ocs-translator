@@ -740,3 +740,22 @@ def test_an_unreadable_command_after_an_otf_line_reports_nothing_of_the_line(sea
     v = seat.tel2obs
     assert (v["tel_error"], v["tel_time_del"]) == ("202", "0")
     assert (v["tel_azm_cmd"], v["tel_elv_cmd"]) == (v["tel_azm_act"], v["tel_elv_act"])
+
+
+def test_a_window_compute_that_eats_the_lead_is_built_again(seat, monkeypatch):
+    window, calls = geometry.window, []
+
+    def slow_first_window(*args, **kwargs):
+        calls.append(seat.clock())
+        if len(calls) == 1:
+            seat.clock.now += 0.6  # a slow host: 10.3 s - 0.6 s leaves less than 9.8 s + 0.25 s
+        return window(*args, **kwargs)
+
+    monkeypatch.setattr(geometry, "window", slow_first_window)
+    seat.send()
+    seat.run(14.0)
+
+    [path] = seat.acu.paths
+    assert len(calls) == 2
+    assert path["start"] - calls[1] == pytest.approx(10.3)
+    assert (seat.tel2obs["tel_error"], seat.tel2obs["tel_on_track"]) == ("0", "Y")
