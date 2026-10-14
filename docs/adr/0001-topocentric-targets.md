@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-14
 - **Deciders:** Christof Buchbender
-- **Relates to:** PRD 0001 (KOSMA OCS translator), epic EPIC_REF (KOSMA OCS translator)
+- **Relates to:** PRD 0001 (KOSMA OCS translator), epic ccatobs/kosma-ocs-translator#5 (KOSMA OCS translator)
 
 ## Holds
 

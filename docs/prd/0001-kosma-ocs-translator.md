@@ -1,7 +1,7 @@
 ---
 title: KOSMA OCS translator
 status: draft
-epic: https://github.com/ccatobs/kosma-ocs-translator/issues/EPIC
+epic: https://github.com/ccatobs/kosma-ocs-translator/issues/5
 repos:
   - ccatobs/kosma-ocs-translator
   - ccatobs/observatory-control-system
@@ -10,7 +10,7 @@ repos:
 
 # PRD 0001: KOSMA OCS translator
 
-> Source of truth for this epic. Tracker: [epic issue](https://github.com/ccatobs/kosma-ocs-translator/issues/EPIC).
+> Source of truth for this epic. Tracker: [epic issue](https://github.com/ccatobs/kosma-ocs-translator/issues/5).
 > The epic links here; this file is not embedded in the issue body.
 > The KOSMA changes go to `kosma_software/kosma_software` on GitLab (git.ph1.uni-koeln.de) as a reviewed merge request.
 > ADR 0001 (topocentric targets) records the split of geometry between the translator and the OCS.
