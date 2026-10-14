@@ -601,3 +601,60 @@ def test_a_busy_tcs_gets_a_new_window_not_a_stale_one(seat):
     [window] = seat.acu.paths
     assert window["start"] > busy[0]
     assert (seat.tel2obs["tel_error"], seat.tel2obs["tel_on_track"]) == ("0", "Y")
+
+
+def test_an_unreadable_command_inside_the_old_scan_window_is_202_not_lost_track(seat):
+    seat.send(obs_track_duration=30)
+    seat.run(15.0)
+    assert seat.tel2obs["tel_on_track"] == "Y"
+    cookie = seat.send(obs_tolerance="ten")
+    seat.run(2.0)
+
+    v = seat.tel2obs
+    assert (v["tel_return_cookie"], v["tel_error"], v["tel_lost_track"]) == (
+        str(cookie),
+        "202",
+        "N",
+    )
+
+
+def test_a_path_stopped_inside_the_scan_window_stays_211(seat):
+    seat.send(obs_track_duration=30)
+    seat.run(15.0)
+    seat.acu.abort()
+    seat.run(2.0)
+
+    assert seat.tel2obs["tel_error"] == "211"
+
+
+def test_ocs_down_for_an_otf_line_stays_210_after_s(seat):
+    pretp_then_otftp_down = OTF | {"obs_track_duration": 0}
+    seat.send(**pretp_then_otftp_down)
+    seat.run(15.0)
+    seat.acu.down = True
+    start = seat.clock() + 15.0
+    seat.send(**OTF, obs_track_duration=20.0, obs_start_time=f"{start:.5f}")
+    seat.run(20.0)
+
+    assert seat.tel2obs["tel_error"] == "210"
+
+
+def test_an_acu_fault_inside_the_scan_window_stays_212(seat):
+    seat.send(obs_track_duration=30)
+    seat.run(15.0)
+    seat.acu.fault = True
+    fault = seat.clock()
+    seat.run(2.0)
+
+    assert {v["tel_error"] for t, v, _ in seat.history if t > fault} == {"212"}  # no 199 first
+
+
+def test_after_a_refused_command_the_old_track_is_not_renewed(tmp_path):
+    seat = Seat(tmp_path, window_points=60)
+    seat.send()
+    seat.run(15.0)
+    cookie = seat.send(obs_chop_beam=1, obs_amp_chop=60.0)
+    seat.run(70.0)  # past the end of the old window
+
+    assert (seat.tel2obs["tel_return_cookie"], seat.tel2obs["tel_error"]) == (str(cookie), "1")
+    assert len(seat.acu.paths) == 1

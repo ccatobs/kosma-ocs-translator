@@ -163,7 +163,8 @@ class Translator:
         ):
             self.status_pending = True
             self.worker.submit("status", self._read_status)
-        self.check_window(now)
+        if self.error[0] in (0, 199):  # a refused or failed command keeps its error: no renewal
+            self.check_window(now)
         self.update(now)
         if now - self.alive.last_stamp >= 1.0:
             kio.write_alive(self.alive, now)
@@ -189,7 +190,8 @@ class Translator:
             self.scan = (now, self.duration)  # mode N: the scan starts on track
         if self.scan and self.scan[0] <= now < sum(self.scan) and not self.on and not self.lost:
             self.lost = True
-            self.error = (199, f"lost track {now - self.scan[0]:.1f} s into the scan window", 8)
+            if self.error[0] == 0:  # 199 never hides an earlier error of the command
+                self.error = (199, f"lost track {now - self.scan[0]:.1f} s into the scan window", 8)
 
     def state(self):
         return self.cookie, self.on, self.lost, self.error
@@ -230,6 +232,8 @@ class Translator:
         if cookie != self.last_cookie:
             self.last_cookie = self.cookie = cookie
             self.on = self.lost = False
+            self.scan = None
+            self.refusals = 0
             self.error = (202, f"invalid command: {error}", 8)
             self.write(now)
 
