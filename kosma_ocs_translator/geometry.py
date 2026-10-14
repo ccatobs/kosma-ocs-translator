@@ -10,9 +10,15 @@ from dataclasses import dataclass
 
 import erfa
 import numpy as np
+from astropy import units as u
+from astropy.coordinates import get_body_barycentric
+from astropy.time import Time
 
 ARCSEC = np.pi / 180 / 3600
 FRAMES = ("J2000", "B1950", "GALACTIC", "HIPPARCOS", "HORIZON")
+# solar-system bodies of astropy's builtin ephemeris (ERFA epv00, plan94, moon98)
+BODIES = ("sun", "moon", "mercury", "venus", "mars", "jupiter", "saturn", "uranus", "neptune")
+AU_LIGHT_TIME = 499.004783836  # s
 
 # IAU 1958 galactic system: v_gal = GALACTIC_MATRIX @ v_J2000 (slaEqgal, slaGaleq)
 GALACTIC_MATRIX = np.array(
@@ -104,6 +110,7 @@ class Track:
     focal_plane: tuple  # (x, y) az/el offset, true angle
     extended: bool
     pointing: tuple  # (az, el) observer pointing offset, true angle
+    body: str | None = None  # solar-system body of an @NAME source; lam, bet unused
 
     @classmethod
     def from_command(cls, command, pointing_offsets=(0.0, 0.0)):
@@ -136,6 +143,7 @@ class Track:
             focal_plane=(c["obs_x_focal_plane"] * ARCSEC, c["obs_y_focal_plane"] * ARCSEC),
             extended=c["obs_extended_elevation_range"] == "Y",
             pointing=(pointing_offsets[0] * ARCSEC, pointing_offsets[1] * ARCSEC),
+            body=c["obs_source_name"][1:].lower() if c["obs_source_name"].startswith("@") else None,
         )
 
 
@@ -153,12 +161,25 @@ def _apply(offset, lam, bet, tau, nudge=0.0):
     return lam, bet
 
 
-def _mean(track, tau, nudge):
+def _body(name, t, observer):
+    """Astrometric ICRS (ra, dec) of a body seen from observer (barycentric, au),
+    corrected for light time; kephem sends the same as J2000 coordinates."""
+    tt = Time(*erfa.taitt(*erfa.utctai(2440587.5, t / 86400)), format="jd", scale="tt")
+    delay = 0.0
+    for _ in range(3):
+        d = get_body_barycentric(name, tt - delay * u.s).xyz.to_value(u.au).T - observer
+        delay = np.linalg.norm(d, axis=-1) * AU_LIGHT_TIME
+    return erfa.c2s(d)
+
+
+def _mean(track, tau, nudge, body=None):
     """Source frame to mean J2000, with the map and the OFF offset in their frames.
 
+    body: (ra, dec) of a solar-system body in place of the source coordinates.
     Returns (ra, dec, pm_ra, pm_dec, parallax, rv) for erfa.atciq.
     """
-    lam, bet = track.lam, track.bet + nudge
+    lam, bet = body if body is not None else (track.lam, track.bet)
+    bet = bet + nudge
     star = (*track.pm, track.parallax, 0.0)
     if track.frame == "B1950":
         lam, bet, *star = erfa.fk425(lam, bet, *star)
@@ -200,7 +221,8 @@ def _observed(track, t, tau, site, eop, nudge=0.0):
         0.0,
         0.0,
     )
-    ri, di = erfa.atciq(*_mean(track, tau, nudge), astrom)
+    body = _body(track.body, t, astrom["eb"]) if track.body else None
+    ri, di = erfa.atciq(*_mean(track, tau, nudge, body), astrom)
     az, zd, *_ = erfa.atioq(ri, di, astrom)
     return az, np.pi / 2 - zd
 

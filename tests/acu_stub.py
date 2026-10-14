@@ -3,11 +3,13 @@
 It answers the OCS client calls the translator makes. A path runs from its start
 time to its last point; the ACU follows it after `settle` seconds. Switches:
 down (OCS unreachable), fault (ACU summary fault), track_error (arcsec added to the
-actual elevation), command_ids (False: the TCS reports no command id).
+actual elevation), command_ids (False: the TCS reports no command id), drop_paths
+(accept that many paths but never run them, as the TCS does when Ready() fails).
 """
 
 import math
 
+import erfa
 import numpy as np
 import ocs
 
@@ -30,6 +32,8 @@ class AcuStub:
         self.fault = False
         self.track_error = 0.0
         self.command_ids = True
+        self.commanded = True  # False: NaN commanded positions (ACU simulator v0.6.0)
+        self.drop_paths = 0  # accept this many paths without running them (TCS Ready() refusal)
         self.paths = []  # every accepted path: {"id", "start", "points"}
         self.aborts = 0
         self.running = None
@@ -85,7 +89,10 @@ class AcuStub:
             raise ocs.OCSBusy("busy", 503)
         path = {"id": len(self.paths) + 1, "start": start_time, "points": np.array(points)}
         self.paths.append(path)
-        self.running = path
+        if self.drop_paths:
+            self.drop_paths -= 1
+        else:
+            self.running = path
         return {"status": "ok", "id": path["id"]}
 
     def get_status(self):
@@ -101,8 +108,8 @@ class AcuStub:
         raw = {
             "Azimuth current position": az,
             "Elevation current position": el,
-            "Azimuth commanded position": az_cmd,
-            "Elevation commanded position": el_cmd,
+            "Azimuth commanded position": az_cmd if self.commanded else -1e9,
+            "Elevation commanded position": el_cmd if self.commanded else -1e9,
             "Azimuth Mode": "ProgramTrack" if self.running else "Stop",
             "Elevation Mode": "ProgramTrack" if self.running else "Stop",
             "Azimuth summary fault": "Fault" if self.fault else "No Fault",
@@ -112,7 +119,5 @@ class AcuStub:
 
 
 def separation(az1, el1, az2, el2):
-    """Angle between two az/el positions in arcsec."""
-    return (
-        math.hypot(((az1 - az2 + 180) % 360 - 180) * math.cos(math.radians(el2)), el1 - el2) * 3600
-    )
+    """Great-circle angle between two az/el positions (deg) in arcsec."""
+    return math.degrees(erfa.seps(*np.radians([az1, el1, az2, el2]))) * 3600
