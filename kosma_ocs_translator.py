@@ -45,18 +45,35 @@ _frame_epochs = {
     "galactic": Time("J2000"),
 }
 
+
 def _apply_offset(coord, d_lam_arcsec, d_bet_arcsec, true_angle):
-    """Apply a sky offset to a SkyCoord.
-    true_angle='Y': spherical_offsets_by (MODE_TRUE, cos(lat) correction applied to lon).
-    Anything else: direct coordinate addition (MODE_NONE).
     """
+    Apply a sky offset to a SkyCoord.
+
+    Parameters
+    ----------
+    coord: astropy.SkyCoord
+        Coordinates of the central position
+    d_lam_arcsec, d_bet_arcsec: float
+        offset to be added in the coordinate system given for coord in unit of arcsec.
+    true_angle : str
+        If 'Y', longitude requires cos(lat) correction. Use spherical_offsets_by
+        If anything else, direct coordinate addition is applied.
+
+    Returns
+    -------
+    The updated position : astropy.SkyCoord
+    """
+
     if true_angle == "Y":
-        return coord.spherical_offsets_by(d_lam_arcsec * u.arcsec, d_bet_arcsec * u.arcsec)
+        return coord.spherical_offsets_by(
+            d_lam_arcsec * u.arcsec, d_bet_arcsec * u.arcsec)
     return SkyCoord(
         coord.data.lon + d_lam_arcsec * u.arcsec,
         coord.data.lat + d_bet_arcsec * u.arcsec,
         frame=coord.frame,
     )
+
 
 def ImportKOSMAReadWriteIntoDictionary(files=None, variable=None, update_mod_time=True):
     log = logging.getLogger("kosma-ocs-translator")
@@ -342,31 +359,42 @@ class KOSMA_translator:
         cmd_lam = self.obs2tel["obs_lam_on"]
         cmd_bet = self.obs2tel["obs_bet_on"]
         cmd_coord_sys_on = self.obs2tel["obs_coord_sys_on"]
+
         # sky/map offsets (arcsec, applied before AltAz transform unless HORIZON frame)
         lam_del = self.obs2tel["obs_lam_del"]
         bet_del = self.obs2tel["obs_bet_del"]
         coord_sys_del = self.obs2tel["obs_coord_sys_del"]
-        true_angle_del = self.obs2tel["obs_true_angle_del"]  # 'Y'=MODE_TRUE, else MODE_NONE
+        true_angle_del = self.obs2tel["obs_true_angle_del"]  # Y/N
+
         # off-position offsets (arcsec, applied before AltAz transform unless HORIZON frame)
         lam_off = self.obs2tel["obs_lam_off"]
         bet_off = self.obs2tel["obs_bet_off"]
         coord_sys_off = self.obs2tel["obs_coord_sys_off"]
-        true_angle_off = self.obs2tel["obs_true_angle_off"]  # 'Y'=MODE_TRUE, else MODE_NONE
-        # focal plane offsets (arcsec, always applied after AltAz transform, MODE_TRUE)
+        true_angle_off = self.obs2tel["obs_true_angle_off"]  # Y/N
+
+        # focal plane offsets (arcsec, always applied after AltAz transform,
+        # and always apply cos-correction (corresponding true_angle=Y).
         # for CCAT obs_coord_sys_focal_plane is always set to HORIZON
         focal_plane_az = self.obs2tel["obs_x_focal_plane"]
         focal_plane_el = self.obs2tel["obs_y_focal_plane"]
+
         # proper motion (arcsec/yr) and parallax (arcsec) of the source
         # obs_pm_lam/obs_pm_bet are raw coordinate rates dlam/dt, not cos(bet)*dlam/dt;
-        # slalib h2fk5.c note 1: "proper motions in RA are dRA/dt rather than cos(Dec)*dRA/dt"
+        # slalib h2fk5.c note 1: "proper motions in RA are dRA/dt 
+        #                         rather than cos(Dec)*dRA/dt"
         pm_lam = self.obs2tel["obs_pm_lam"]
         pm_bet = self.obs2tel["obs_pm_bet"]
         paralx = self.obs2tel["obs_paralx"]
+
         # extended elevation range
         if self.obs2tel["obs_extended_elevation_range"] == "Y":
             if_extended = True
         else:
             if_extended = False
+
+        # obs wavelength (needs to be passed for refraction correction)
+        obs_wavelength = self.obs2tel["obs_wavelength"]
+
         # validate coordinate systems
         for label, csys in [
             ("obs_coord_sys_on", cmd_coord_sys_on),
@@ -377,6 +405,7 @@ class KOSMA_translator:
                 msg = f"Unknown coordinate system {label}={csys!r}, must be one of {list(coord_sys_map)}"
                 self.log.error(msg)
                 raise ValueError(msg)
+
         # track details
         track_duration = 600  # seconds
         frame = coord_sys_map[cmd_coord_sys_on]
@@ -403,15 +432,19 @@ class KOSMA_translator:
                         coord.transform_to(coord_sys_map[coord_sys_off]),
                         lam_off, bet_off, true_angle_off,
                     ).transform_to(now_frame)
-            #
-            self.log.info(f"tracking to {coord.az.deg} {coord.alt.deg} in {cmd_coord_sys_on} frame")
+
+            self.log.info(
+                f"tracking to {coord.az.deg} {coord.alt.deg} in {cmd_coord_sys_on} frame"
+            )
 
             # Apply focal plane offsets
             if focal_plane_az != 0.0 or focal_plane_el != 0.0:
-                coord = coord.spherical_offsets_by(focal_plane_az * u.arcsec, focal_plane_el * u.arcsec)
+                coord = _apply_offset(coord, focal_plane_az, focal_plane_el, "Y")
+
             # command move-to
             if if_extended:
-                cmd_az, cmd_el = get_overtop_altaz_from_nominal(coord.az.deg, coord.alt.deg)
+                cmd_az, cmd_el = get_overtop_altaz_from_nominal(
+                    coord.az.deg, coord.alt.deg)
             else:
                 cmd_az = coord.az.deg
                 cmd_el = coord.alt.deg
@@ -421,7 +454,8 @@ class KOSMA_translator:
         # non-HORIZON source: make into an astropy coordinate object,
         # applying proper motion and parallax propagation when non-zero.
         if pm_lam != 0.0 or pm_bet != 0.0 or paralx != 0.0:
-            # Convert raw coordinate rate to true angular rate for astropy (multiply by cos(beta))
+            # Convert raw coordinate rate to true angular rate for astropy 
+            # (multiply by cos(beta))
             cos_bet = np.cos(np.deg2rad(cmd_bet))
             pm_lon_key, pm_lat_key = _frame_pm_keys[frame]
             pm_kwargs = {
@@ -431,7 +465,8 @@ class KOSMA_translator:
             }
             if paralx != 0.0:
                 pm_kwargs["distance"] = Distance(parallax=paralx * u.arcsec)
-            coord_with_pm = SkyCoord(cmd_lam * u.deg, cmd_bet * u.deg, frame=frame, **pm_kwargs)
+            coord_with_pm = SkyCoord(
+                cmd_lam * u.deg, cmd_bet * u.deg, frame=frame, **pm_kwargs)
             # Propagate to current epoch; proper motion over the 600 s track window is
             # negligible so one propagation at the start of the window suffices
             propagated = coord_with_pm.apply_space_motion(new_obstime=Time.now())
@@ -439,7 +474,8 @@ class KOSMA_translator:
         else:
             coord = SkyCoord(cmd_lam * u.deg, cmd_bet * u.deg, frame=frame)
 
-        # Apply (non-Horizon) sky/map offsets in obs_coord_sys_del frame before AltAz transform
+        # Apply (non-Horizon) sky/map offsets in obs_coord_sys_del frame 
+        # before AltAz transform
         if coord_sys_del != "HORIZON" and (lam_del != 0.0 or bet_del != 0.0):
             if coord_sys_del == cmd_coord_sys_on:
                 coord = _apply_offset(coord, lam_del, bet_del, true_angle_del)
@@ -449,7 +485,8 @@ class KOSMA_translator:
                     lam_del, bet_del, true_angle_del,
                 ).transform_to(frame)
 
-        # Apply (non-Horizon) off-position offsets in obs_coord_sys_off frame before AltAz transform
+        # Apply (non-Horizon) off-position offsets in obs_coord_sys_off frame 
+        # before AltAz transform
         if coord_sys_off != "HORIZON" and (lam_off != 0.0 or bet_off != 0.0):
             if coord_sys_off == cmd_coord_sys_on:
                 coord = _apply_offset(coord, lam_off, bet_off, true_angle_off)
@@ -459,12 +496,17 @@ class KOSMA_translator:
                     lam_off, bet_off, true_angle_off,
                 ).transform_to(frame)
 
-        #
-        self.log.info(f"tracking to {coord.data.lon.deg} {coord.data.lat.deg} in {cmd_coord_sys_on} frame")
-        # make an array of times from now + overhead to now + overhead + track_duration, with 1 second steps
+        self.log.info(
+            f"tracking to {coord.data.lon.deg} {coord.data.lat.deg} in {cmd_coord_sys_on} frame"
+        )
+
+        # make an array of times from now + overhead to now + overhead + track_duration,
+        # with 1 second steps
         track_overhead = 3  # seconds, to account for computation and communication delay
         n_steps = int(track_duration) + 1
-        time_array = Time.now() + track_overhead * u.second + np.linspace(0, track_duration, n_steps) * u.second
+        time_array = Time.now() + track_overhead * u.second + np.linspace(
+            0, track_duration, n_steps) * u.second
+
         # calculate the altaz coordinates for each time step
         altaz_frames = AltAz(obstime=time_array, location=self.ocs.earth_location)
         altaz = coord.transform_to(altaz_frames)
@@ -479,18 +521,22 @@ class KOSMA_translator:
 
         # Apply focal plane offsets
         if focal_plane_az != 0.0 or focal_plane_el != 0.0:
-            altaz = altaz.spherical_offsets_by(focal_plane_az * u.arcsec, focal_plane_el * u.arcsec)
+            altaz = _apply_offset(altaz, focal_plane_az, focal_plane_el, "Y")
 
         if if_extended:
-            az_array, el_array = get_overtop_altaz_from_nominal(altaz.az.deg, altaz.alt.deg)
+            az_array, el_array = get_overtop_altaz_from_nominal(
+                altaz.az.deg, altaz.alt.deg)
         else:
             az_array = altaz.az.deg
             el_array = altaz.alt.deg
+
         # calculate the velocities in azimuth and elevation using np.gradient
         dt = np.gradient(time_array.unix)
         az_velocities = np.gradient(az_array) / dt
         el_velocities = np.gradient(el_array) / dt
-        # program track mode, see defintion here ICD-1000000-32000-02-00 VA Webserver - Remote Protocol
+
+        # program track mode, see defintion here ICD-1000000-32000-02-00 VA Webserver
+        # - Remote Protocol
         mode = 0  #
         mode_arr = np.full_like(az_array, mode)
         # Assuming all arrays are 1D and of the same length
@@ -509,9 +555,11 @@ class KOSMA_translator:
             "coordsys": "Horizon",
             "points": points_list,
         }
-        #
+
         try:
-            response = self.ocs.scan_pattern(data=payload, stop_event=self._track_stop_event)
+            # TODO: find out the way to pass obs_wavelength together with payload
+            response = self.ocs.scan_pattern(
+                data=payload, stop_event=self._track_stop_event)
             self.log.info(f"scan pattern response: {response}")
         except Exception as e:
             self.log.error(f"Track error: {e}")
