@@ -1,0 +1,11 @@
+Fixture provenance. CI never runs KOSMA or astra; these files are copies.
+
+OBSERVATORY.acfg, bulletinA, ccat_chai/*
+    kosma_software, branch feat/ocs-translator-support @ 3b06b8dd4
+    (KOSMA_config_files/OBSERVATORY.acfg, astra/share/bulletinA,
+    kosma_control/source/observatories/ccat_chai/)
+live/KOSMA_obs2tel.set
+    written by KOSMA_track on the local KOSMA simulation (host vegeta), 2026-10-09
+golden.json
+    astra from the same branch and SHA, built with OBS_CCAT, run as
+    "astra -t -f 4 -n -r"; see the "provenance" key in the file and tools/make_golden.py

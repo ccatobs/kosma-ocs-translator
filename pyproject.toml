@@ -1,23 +1,38 @@
 [build-system]
-requires = ["setuptools", "wheel"]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "kosma-ocs-translator"
-version = "0.1.0"
-description = "Python client for CCAT observatory control system"
+version = "0.2.0"
+description = "Fills the KOSMA telescope seat at FYST: KOSMA file io in, OCS program tracks out"
 authors = [
     {name = "Ronan Higgins", email = "higgins@ph1.uni-koeln.de"},
+    {name = "Christof Buchbender", email = "buchbend@ph1.uni-koeln.de"},
 ]
-dependencies = ["astropy","requests"]
+requires-python = ">=3.11"
+dependencies = [
+    "astropy",
+    "numpy",
+    "ocs @ git+ssh://git@github.com/ccatobs/observatory-control-system.git@24c56f6639bfe633d4aef67d069aaa5f42742b63#subdirectory=clients/python",
+]
 
+[project.optional-dependencies]
+test = ["pytest"]
 
 [project.scripts]
-kosma-ocs-translator = "kosma_ocs_translator:main"
+kosma_ocs_translator = "kosma_ocs_translator.translator:main"
+
+[tool.setuptools]
+packages = ["kosma_ocs_translator"]
 
 [tool.pytest.ini_options]
-minversion = "6.0"
-addopts = "--doctest-modules"
 testpaths = ["tests"]
+pythonpath = ["tests"]
 
-[tool.pytest-runner]
-pytest = "^4.4.1"
+[tool.ruff]
+line-length = 100
+extend-exclude = ["utils"]
+
+[tool.ruff.lint]
+extend-select = ["I", "UP", "B"]

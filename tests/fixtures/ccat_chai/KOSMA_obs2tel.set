@@ -1,0 +1,39 @@
+09-Aug-2024  17:35:07  1723217707.338880   File update time stamp   ! KOSMA_track (bessel:1116561)
+                                                         M17_SAO   obs_source_name   ! source name (for display and archiving); leading @/#: tokens for non-siderial object (tel_supports_ephemeris=N: kephem: @->#, # triggers telescope; =Y: kephem inactive, @ triggers telescope, name must match non-sidereal position)
+        3383   obs_scan_num   ! scan number (for display and archiving)
+           7   obs_sub_scan_num   ! subscan number (for display and archiving)
+           1   obs_tel_info_update_time   ! cycle time for updating feedback-file [seconds],  =0.: no continuous update
+     2177073   obs_cookie   ! unique internal identifier for observation
+                           J2000   obs_coord_sys_on   ! coordinate system of source position (eg. J2000, B1950, GALACTIC, HORIZON)
+     275.115   obs_lam_on   ! first coordinate axis of spherical coordinate system obs_coord_sys_on [degree]
+   -16.20025   obs_bet_on   ! second coordinate axis of spherical coordinate system obs_coord_sys_on [degree]
+                           J2000   obs_coord_sys_del   ! coordinate system of map offsets (eg. J2000, B1950, GALACTIC, HORIZON)
+Y   obs_true_angle_del   ! apply cos(beta)-correction for map offsets [Y/N]
+           0   obs_lam_del   ! map offset, first coord. (defined in obs_coord_sys_on) [arcsec]
+           0   obs_bet_del   ! map offset, second coord. (defined in obs_coord_sys_on) [arcsec]
+           0   obs_lam_vel   ! scan speed, first coord. (angular velocity on the sky, no cosine correction) [arcsec/sec]
+           0   obs_bet_vel   ! scan speed, second coord. (scanning starts at full velocity at obs_time_start) [arcsec/sec]
+N   obs_otf_mode   ! flag for OTF mode [N/C/P]; N: non-otf; C: continuos otf (old-mode); P: pattern otf
+                           J2000   obs_coord_sys_off   ! coordinate system for OFF position (e.g. J2000, B1950, GALACTIC, HORIZON)
+Y   obs_true_angle_off   ! apply cos(beta)-correction for OFF position [Y/N]
+           0   obs_lam_off   ! relative OFF position, first coord. [arcsec]
+           0   obs_bet_off   ! relative OFF position, second coord. [arcsec]
+                         HORIZON   obs_coord_sys_focal_plane   ! coordinate system for focal plane [TELESCOPE/HORIZON]
+    -14.3939   obs_x_focal_plane   ! reference position in telescope focalplane [arcsec]/instrument mount reference frame [mm], first coord 
+     -7.4562   obs_y_focal_plane   ! reference position in telescope focalplane [arcsec]/instrument mount reference  frame [mm], second coord 
+           0   obs_los_angle_focal_plane   ! los rotation angle for focal plane (within +/- 3 degree on SOFIA, 0 everywhere else) [degree]
+0   obs_los_trigger_rewind   ! trigger flag for los rewind: 1: do rewind to specified los angle, 0: do not, -1: rewind to TO-specified margin
+  SET   obs_los_mode   ! modus for los-tracking [SET/TRACK]
+         500   obs_wavelength   ! rough value for observing wavelength used to correct pointing for atmospheric refraction [micron]
+           1   obs_track_duration   ! duration of scan (duration of tracking, =0 permanent tracking, OTF-mode: 0 to >0 triggers otf-scan) [seconds]
+             0.00000   obs_start_time   ! start time of scan (before and after the scan tel_on_track will be N) [seconds since 1970.00 UT]
+          10   obs_tolerance   ! maximum allowed tracking error [arcsec]
+                         HORIZON   obs_coord_sys_chop   ! coordinate system for chopper positioning (e.g. J2000, B1950, GALACTIC, HORIZON)
+           0   obs_amp_chop   ! [arcsec] secondary chopper amplitude (half the throw!)
+           0   obs_angle_chop   ! secondary chopper angle [degree,ccw from pos dir of first coordinate]
+           0   obs_tip_chop   ! fraction of secondary chopper amplitude to tip, may be greater than 1.0 or less than -1.0, =0.0: symmetric chop, =1.0: asymmetric over plus beam, =-1.0 asymmetric over minus beam
+0   obs_chop_beam   ! chop-beam position [+1/-1/0], =0: chopper off resp. old AOSOBS mode
+0.0 obs_pm_lam ! lam proper motion [arcsec/yr]
+0.0 obs_pm_bet ! bet proper motion [arcsec/yr]
+0.0 obs_paralx ! parallax of astronomical object [arcsec]
+N obs_extended_elevation_range ! Y if telescpe is commanded into extended elevation range (beyond 90 deg); N if not (default)

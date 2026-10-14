@@ -1,0 +1,2795 @@
+******************* OBSERVATORY Autoconfig *****************
+* $Id: OBSERVATORY.acfg,v 1.211 2020/01/23 14:25:11 stutzki Exp $
+*************************************************************
+
+#include "KOSMA_ARRAY_DIMENSIONS.h"
+
+*******************************************************************
+* Project names in this file                                      *
+*                                                                 *
+* KOSMA_CONTROL kosma_control (KOSMA/NANTEN2 telescope control)   *
+* AOSOBS        aosobs (dummy for AOSOBS standalone/test version) *
+* SOFIA         sofia (SOFIA telescope control)                   *
+* KOSMA_ASTRA   astra package, i.e. KOSMA-3m telescope/observatory*
+* KOSMA_GREAT   GREAT_SOFIA receiver/load/if-server               *
+*                                                                 *
+* default value:  old configuration                               *
+*******************************************************************
+
+
+#if defined(AOSOBS)  ||  defined(HIFI_SIMULATOR)
+**********
+* AOSOBS *
+**********
+
+** definitions for variables read only by specific routines:
+#define READ_IF_INTENSITY if_intensity
+#define READ_FOCALPLANE   focalplane_dummy
+#define READ_BEAMROT      
+#define READ_OBSDOP       
+#define READ_WRITEHEADER  
+
+** definition for K_set support
+#define K_SET_OBSERVATORY  Kset_aosobs
+
+** definition of files and write read programs: 
+#define OBS2TEL_FILE       KOSMA_obs2tel.set
+#define OBS2TEL_WRITE	   astra_set_KOSMA
+#define OBS2TEL_READ	   astra_dummy 
+
+#define TEL2OBS_FILE       KOSMA_tel2obs.set
+#define TEL2OBS_WRITE      astra_dummy
+#define TEL2OBS_READ       astra_set_KOSMA
+
+#define OBS2CHOP_FILE      KOSMA_obs2chop.set
+#define OBS2CHOP_WRITE     skychop_set_KOSMA
+#define OBS2CHOP_READ      skychop_dummy
+
+#define CHOP2OBS_FILE      KOSMA_chop2obs.set
+#define CHOP2OBS_WRITE     skychop_dummy
+#define CHOP2OBS_READ      skychop_set_KOSMA
+
+#define OBS2LOAD_FILE      KOSMA_obs2load.set
+#define OBS2LOAD_WRITE     load_set_KOSMA
+#define OBS2LOAD_READ      load_dummy 
+
+#define LOAD2OBS_FILE      KOSMA_load2obs.set
+#define LOAD2OBS_WRITE     load_dummy
+#define LOAD2OBS_READ      load_set_KOSMA
+
+#define LOADTEMP2OBS_FILE      KOSMA_loadtemp2obs.set
+#define LOADTEMP2OBS_WRITE     
+#define LOADTEMP2OBS_READ      load_set_KOSMA
+
+#define OBS2IF_FILE        KOSMA_obs2if.set
+#define OBS2IF_WRITE       if_set_KOSMA
+#define OBS2IF_READ        if_dummy
+
+#define IF2OBS_FILE        KOSMA_if2obs.set
+#define IF2OBS_WRITE       if_dummy
+#define RX2IF_READ	   if_dummy
+#define IF2OBS_READ        if_set_KOSMA 
+
+#define OBS2FP_FILE	   KOSMA_angle_fp.set
+#define OBS2FP_WRITE	   astra_set_KOSMA
+#define OBS2FP_READ        focalplane_dummy
+
+#define FP2OBS_FILE        KOSMA_track_fp.set 
+#define FP2OBS_WRITE       focalplane_dummy
+#define FP2OBS_READ        astra_set_KOSMA 
+
+#elif defined KOSMA_CONTROL
+*****************
+* KOSMA_CONTROL *
+*****************
+
+** definitions for variables read only by specific routines:
+#define READ_IF_INTENSITY if_intensity
+#define READ_FOCALPLANE   focalplane
+#define READ_BEAMROT      rotator_server 
+#define WRITE_BEAMROT     rotator_server
+#define READ_OBSDOP       obsdop Kset_obsdop
+#define READ_WRITEHEADER  writeheader
+#define READ_SOFIA_TIMING sofia_MD_TO_SI_monitor
+#define K_SET_OBSERVATORY
+
+** definition of files and write read programs: 
+#define OBS2TEL_FILE    KOSMA_obs2tel.set
+#define OBS2TEL_WRITE	control_tel
+#define OBS2TEL_READ	astra_dummy writeheader
+#if defined (OBS_SOFIA)
+#undef  OBS2TEL_READ
+#define OBS2TEL_READ	astra_dummy writeheader los_focus_monitor
+#endif
+
+#define TEL2OBS_FILE    KOSMA_tel2obs.set
+#define TEL2OBS_WRITE   astra_dummy
+#define TEL2OBS_READ    control_tel setsource kephem
+#if defined (OBS_SOFIA)
+#undef  TEL2OBS_READ
+#define TEL2OBS_READ    control_tel setsource kephem los_focus_monitor
+#endif
+
+#define OBS2CHOP_FILE   KOSMA_obs2chop.set
+#define OBS2CHOP_WRITE  control_skychop
+#define OBS2CHOP_READ   skychop_dummy
+
+#define CHOP2OBS_FILE   KOSMA_chop2obs.set
+#define CHOP2OBS_WRITE  skychop_dummy
+#define CHOP2OBS_READ   control_skychop
+
+#define FOCALPLANE2SOFIA_FILE  KOSMA_focalplane2sofia.set
+#define FOCALPLANE2SOFIA_WRITE focalplane KOSMA_setPixelDisplay
+#define FOCALPLANE2SOFIA_READ  focalplane KOSMA_setPixelDisplay
+
+#define OBS2SOFIA_FILE  KOSMA_obs2sofia.set
+#define OBS2SOFIA_WRITE	control_tel
+#define OBS2SOFIA_READ	control_tel 
+
+#define SOFIA2OBS_FILE  KOSMA_sofia2obs.set
+#define SOFIA2OBS_WRITE astra_dummy
+#define SOFIA2OBS_READ  writeheader los_focus_monitor astra_dummy
+
+#if defined (OBS_CCAT)
+#define OBS2LOAD_FILE      KOSMA_obs2load.set
+#define OBS2LOAD_WRITE     control_load
+#define OBS2LOAD_READ      load_hw_server
+
+#define LOAD2OBS_FILE      KOSMA_load2obs.set
+#define LOAD2OBS_WRITE     load_hw_server
+#define LOAD2OBS_READ      control_load
+
+#define LOADTEMP2OBS_FILE      KOSMA_loadtemp2obs.set
+#define LOADTEMP2OBS_WRITE     load_hw_server
+#define LOADTEMP2OBS_READ      rx_to_dumsys writeheader
+#else
+#define OBS2LOAD_FILE   KOSMA_obs2load.set
+#define OBS2LOAD_WRITE  control_load
+#define OBS2LOAD_READ   load_dummy
+
+#define LOAD2OBS_FILE   KOSMA_load2obs.set
+#define LOAD2OBS_WRITE  load_dummy
+#define LOAD2OBS_READ   control_load
+
+#define LOADTEMP2OBS_FILE      KOSMA_loadtemp2obs.set
+#define LOADTEMP2OBS_WRITE     loadtemp_server
+#define LOADTEMP2OBS_READ      rx_to_dumsys writeheader
+#endif
+
+#define OBS2LOADBLADE_FILE	KOSMA_obs2loadblade.set
+#define OBS2LOADBLADE_WRITE	control_load
+#define OBS2LOADBLADE_READ	load_dummy loadblade_server
+
+#define LOADBLADE2OBS_FILE	KOSMA_loadblade2obs.set
+#define LOADBLADE2OBS_WRITE	load_dummy loadblade_server
+#define LOADBLADE2OBS_READ	load_dummy control_load
+
+#define OBS2IF_FILE     KOSMA_obs2if.set
+#define OBS2IF_WRITE    control_if
+#define OBS2IF_READ     if_hw_server dualsis_if_server
+
+#define IF2OBS_FILE     KOSMA_if2obs.set
+#define IF2OBS_WRITE    if_hw_server dualsis_if_server
+#define RX2IF_READ	if_hw_server dualsis_if_server
+#define IF2OBS_READ     control_if
+
+#define OBS2FP_FILE	KOSMA_angle_fp.set
+#define OBS2FP_WRITE	control_tel
+#define OBS2FP_READ     control_tel focalplane
+#define FP2OBS_FILE     KOSMA_track_fp.set 
+#define FP2OBS_WRITE    focalplane
+#define FP2OBS_READ     control_tel
+
+#elif defined SOFIA
+*****************
+* SOFIA *
+*****************
+
+** definitions for variables read only by specific routines:
+#define READ_IF_INTENSITY if_intensity
+#define READ_FOCALPLANE   focalplane
+#define READ_BEAMROT      rotator_server 
+#define WRITE_BEAMROT     rotator_server
+#define READ_OBSDOP       obsdop Kset_obsdop
+#define READ_WRITEHEADER  writeheader
+#define K_SET_OBSERVATORY
+
+** definition of files and write read programs: 
+#define OBS2TEL_FILE    KOSMA_obs2tel.set
+#define OBS2TEL_WRITE	control_tel
+#define OBS2TEL_READ	astra_dummy writeheader
+#if defined (OBS_SOFIA)
+#undef  OBS2TEL_READ
+#define OBS2TEL_READ    readobs2tel readotfpattern2tel astra_dummy writeheader los_focus_monitor
+#endif
+
+#define TEL2OBS_FILE    KOSMA_tel2obs.set
+#define TEL2OBS_WRITE   writetel2obs astra_dummy
+#define TEL2OBS_READ    control_tel setsource
+#if defined (OBS_SOFIA)
+#undef  TEL2OBS_READ
+#define TEL2OBS_READ control_tel setsource los_focus_monitor
+#endif
+ 
+
+#define OBS2CHOP_FILE   KOSMA_obs2chop.set
+#define OBS2CHOP_WRITE  control_skychop
+#define OBS2CHOP_READ   readobs2chop skychop_dummy
+#define CHOP2OBS_FILE   KOSMA_chop2obs.set
+#define CHOP2OBS_WRITE  writechop2obs skychop_dummy
+#define CHOP2OBS_READ   control_skychop
+
+#define FOCALPLANE2SOFIA_FILE  KOSMA_focalplane2sofia.set
+#define FOCALPLANE2SOFIA_WRITE focalplane
+#define FOCALPLANE2SOFIA_READ  readfocalplane2sofia 
+
+#define OBS2SOFIA_FILE  KOSMA_obs2sofia.set
+#define OBS2SOFIA_WRITE	control_tel
+#define OBS2SOFIA_READ	readobs2sofia
+
+#define SOFIA2OBS_FILE  KOSMA_sofia2obs.set
+#define SOFIA2OBS_WRITE writesofia2obs astra_dummy
+#define SOFIA2OBS_READ  writeheader los_focus_monitor astra_dummy
+
+#define OBS2LOAD_FILE   KOSMA_obs2load.set
+#define OBS2LOAD_WRITE  control_load
+#define OBS2LOAD_READ   load_dummy
+
+#define LOAD2OBS_FILE   KOSMA_load2obs.set
+#define LOAD2OBS_WRITE  load_dummy
+#define LOAD2OBS_READ   
+
+#define LOADTEMP2OBS_FILE      KOSMA_loadtemp2obs.set
+#define LOADTEMP2OBS_WRITE     
+#define LOADTEMP2OBS_READ      rx_to_dumsys writeheader
+
+#define OBS2IF_FILE     KOSMA_obs2if.set
+#define OBS2IF_WRITE    control_if
+#define OBS2IF_READ     if_hw_server dualsis_if_server
+
+#define IF2OBS_FILE     KOSMA_if2obs.set
+#define IF2OBS_WRITE    if_hw_server dualsis_if_server
+#define RX2IF_READ	if_hw_server dualsis_if_server
+#define IF2OBS_READ     control_if
+
+#define OBS2FP_FILE	KOSMA_angle_fp.set
+#define OBS2FP_WRITE	control_tel
+#define OBS2FP_READ     focalplane
+#define FP2OBS_FILE     KOSMA_track_fp.set 
+#define FP2OBS_WRITE    focalplane
+#define FP2OBS_READ     control_tel 
+
+#elif defined KOSMA_ASTRA
+**********
+* ASTRA: *
+**********
+
+** definitions for variables read only by specific routines:
+#define READ_IF_INTENSITY
+#define READ_FOCALPLANE   focalplane
+#define READ_BEAMROT      
+#define WRITE_BEAMROT     
+#define READ_OBSDOP       obsdop Kset_obsdop
+#define READ_WRITEHEADER  
+
+** definition for K_set support
+#define K_SET_OBSERVATORY  Kset_obs
+
+** define files 
+#define OBS2TEL_FILE       KOSMA_obs2tel.set
+#define TEL2OBS_FILE       KOSMA_tel2obs.set
+#define OBS2CHOP_FILE      KOSMA_obs2chop.set
+#define CHOP2OBS_FILE      KOSMA_chop2obs.set
+#define OBS2LOAD_FILE      KOSMA_obs2load.set
+#define LOAD2OBS_FILE      KOSMA_load2obs.set
+#define LOADTEMP2OBS_FILE      KOSMA_loadtemp2obs.set
+
+#define OBS2IF_FILE        
+#define IF2OBS_FILE        
+#define OBS2FP_FILE	   KOSMA_angle_fp.set
+#define FP2OBS_FILE        KOSMA_track_fp.set 
+
+#define OBS2SOFIA_FILE  
+#define SOFIA2OBS_FILE  
+
+#define OBS2TEL_WRITE	linescan
+#define OBS2TEL_READ	astra_obs linescan starpoint
+#define TEL2OBS_WRITE	astra_obs
+#define TEL2OBS_READ	kephem linescan
+#define OBS2CHOP_WRITE	
+#define OBS2CHOP_READ	subref
+#define CHOP2OBS_WRITE	subref
+#define CHOP2OBS_READ	
+#define OBS2LOAD_WRITE	
+#define OBS2LOAD_READ	dome
+#define LOAD2OBS_WRITE	dome
+#define LOAD2OBS_READ	
+#define LOADTEMP2OBS_WRITE
+#define LOADTEMP2OBS_READ
+#define OBS2IF_WRITE	
+#define OBS2IF_READ	
+#define IF2OBS_WRITE	
+#define RX2IF_READ	
+#define IF2OBS_READ	
+#define OBS2FP_WRITE	
+#define OBS2FP_READ     focalplane
+#define FP2OBS_WRITE    focalplane
+#define FP2OBS_READ     
+#define OBS2SOFIA_WRITE	
+#define OBS2SOFIA_READ	
+#define SOFIA2OBS_WRITE 
+#define SOFIA2OBS_READ  
+
+#define OBS2LOADBLADE_FILE	KOSMA_obs2loadblade.set
+#define OBS2LOADBLADE_WRITE	control_load
+#define OBS2LOADBLADE_READ	load_dummy loadblade_server
+
+#define LOADBLADE2OBS_FILE	KOSMA_loadblade2obs.set
+#define LOADBLADE2OBS_WRITE	load_dummy loadblade_server
+#define LOADBLADE2OBS_READ	load_dummy control_load
+
+#if defined (OBS_CCAT)
+#undef  TEL2OBS_READ
+#define   TEL2OBS_READ   starpoint kephem linescan
+#endif
+
+#else
+************
+* default: *
+************
+
+** definitions for variables read only by specific routines:
+#define READ_IF_INTENSITY if_intensity
+#define READ_FOCALPLANE   focalplane
+#define READ_BEAMROT      rotator_server 
+#define WRITE_BEAMROT     rotator_server
+#define READ_OBSDOP       obsdop Kset_obsdop
+#define READ_WRITEHEADER  writeheader
+
+** definition for K_set support
+#define K_SET_OBSERVATORY  Kset_obs
+
+** define files 
+#define OBS2TEL_FILE       KOSMA_obs2tel.set
+#define TEL2OBS_FILE       KOSMA_tel2obs.set
+#define OBS2CHOP_FILE      KOSMA_obs2chop.set
+#define CHOP2OBS_FILE      KOSMA_chop2obs.set
+#define OBS2LOAD_FILE      KOSMA_obs2load.set
+#define LOAD2OBS_FILE      KOSMA_load2obs.set
+#define LOADTEMP2OBS_FILE      KOSMA_loadtemp2obs.set
+#define OBS2IF_FILE        KOSMA_obs2if.set
+#define IF2OBS_FILE        KOSMA_if2obs.set
+#define OBS2FP_FILE	   KOSMA_angle_fp.set
+#define FP2OBS_FILE        KOSMA_track_fp.set 
+
+#define OBS2TEL_WRITE	astra_set_KOSMA linescan control_tel
+#define OBS2TEL_READ	astra_dummy astra_obs linescan writeheader starpoint
+#define TEL2OBS_WRITE	astra_dummy astra_obs
+#define TEL2OBS_READ	astra_set_KOSMA linescan control_tel
+#define OBS2CHOP_WRITE	skychop_set_KOSMA control_skychop
+#define OBS2CHOP_READ	skychop_dummy subref
+#define CHOP2OBS_WRITE	skychop_dummy subref
+#define CHOP2OBS_READ	skychop_set_KOSMA control_skychop
+#define OBS2LOAD_WRITE	control_load
+#define OBS2LOAD_READ	load_dummy dome
+#define LOAD2OBS_WRITE	load_dummy dome
+#define LOAD2OBS_READ	control_load 
+#define LOADTEMP2OBS_WRITE 
+#define LOADTEMP2OBS_READ	rx_to_dumsys writeheader
+#define OBS2IF_WRITE	control_if
+#define OBS2IF_READ	if_hw_server dualsis_if_server
+#define IF2OBS_WRITE	if_hw_server dualsis_if_server
+#define RX2IF_READ	if_hw_server dualsis_if_server
+#define IF2OBS_READ	control_if
+#define OBS2FP_WRITE	control_tel
+#define OBS2FP_READ     focalplane
+#define FP2OBS_WRITE    focalplane
+#define FP2OBS_READ     control_tel
+
+#define OBS2LOADBLADE_FILE	KOSMA_obs2loadblade.set
+#define OBS2LOADBLADE_WRITE	control_load
+#define OBS2LOADBLADE_READ	load_dummy loadblade_server
+
+#define LOADBLADE2OBS_FILE	KOSMA_loadblade2obs.set
+#define LOADBLADE2OBS_WRITE	load_dummy loadblade_server
+#define LOADBLADE2OBS_READ	load_dummy control_load
+
+#endif
+
+#if defined(HIFI_SIMULATOR)
+
+******************************************************************************
+HIFI SIMULATOR
+******************************************************************************
+
+*** patch definitions from AOSOBS
+
+#undef IF2OBS_WRITE
+#define IF2OBS_WRITE       	sim_icu
+#undef  RX2IF_READ
+#define RX2IF_READ              sim_icU
+#undef OBS2LOAD_WRITE
+#define OBS2LOAD_WRITE       	sim_icu
+#undef OBS2TEL_WRITE
+#define OBS2TEL_WRITE		sim_icu
+#undef TEL2OBS_WRITE
+#define TEL2OBS_WRITE		sim_icu
+
+#endif
+
+*****************************************************************************
+KOSMA_GREAT for GREAT_obs_server
+*****************************************************************************
+
+#ifdef KOSMA_GREAT
+#undef  IF2OBS_WRITE
+#define IF2OBS_WRITE        GREAT_obs_server
+#undef  RX2IF_READ
+#define RX2IF_READ	    
+#undef  OBS2IF_READ
+#define OBS2IF_READ         GREAT_obs_server
+#undef  LOAD2OBS_WRITE
+#define LOAD2OBS_WRITE      GREAT_obs_server
+#undef  LOADTEMP2OBS_WRITE
+#define LOADTEMP2OBS_WRITE  GREAT_obs_server
+#undef  OBS2LOAD_READ
+#define OBS2LOAD_READ       GREAT_obs_server
+#define OBS2CHPSIGNAL_READ  GREAT_obs_server
+#define CHPSIGNAL2OBS_WRITE GREAT_obs_server
+#undef  READ_BEAMROT
+#define READ_BEAMROT        GREAT_obs_server
+#undef  WRITE_BEAMROT
+#define WRITE_BEAMROT       GREAT_obs_server
+#endif
+
+#ifndef SOFIA_FIFILS
+#define K_SET_OBS_LOAD  Kset_IFandLOAD
+#define K_SET_OBS_IF    Kset_IFandLOAD
+#define LOAD2OBS_K_SET  K_SET_OBSERVATORY
+#else
+#define K_SET_OBS_LOAD 
+#define K_SET_OBS_IF   
+#define LOAD2OBS_K_SET
+#endif
+
+#define CMD2SOFIA_FILE KOSMA_cmd2sofia.set
+#if defined(OBS_NANTEN2)
+#undef  OBS2SOFIA_FILE
+#define OBS2SOFIA_FILE KOSMA_obs2nanten2.set
+#undef  CMD2SOFIA_FILE
+#define CMD2SOFIA_FILE KOSMA_cmd2nanten2.set
+#endif
+#if defined(OBS_CCAT)
+#undef  OBS2SOFIA_FILE
+#define OBS2SOFIA_FILE KOSMA_obs2ccat.set
+#undef  CMD2SOFIA_FILE
+#define CMD2SOFIA_FILE KOSMA_cmd2ccat.set
+#endif
+
+#if defined (OBS_CCAT)
+#undef OBS2CHOP_FILE
+#undef OBS2CHOP_WRITE
+#undef OBS2CHOP_READ
+#endif
+
+AOSOBS
+KOSMA_CONTROL
+SOFIA
+KOSMA_ASTRA
+HIFI_SIMULATOR
+KOSMA_GREAT
+SOFIA_FIFILS
+
+*** definition of variables:
+
+**********************************************
+**************** obs to tel ******************
+**********************************************
+
+STRING_VAR	obs_source_name		%64s
+obs_source_name
+UNKNOWN
+! source name (for display and archiving); leading @/#: tokens for non-siderial object (tel_supports_ephemeris=N: kephem: @->#, # triggers telescope; =Y: kephem inactive, @ triggers telescope, name must match non-sidereal position)
+OBS2TEL_FILE |  OBS2TEL_WRITE | READ_OBSDOP OBS2TEL_READ K_SET_OBSERVATORY \anchor source_name__obs2tel
+/* HouseKeepingDataBase */
+
+INT_VAR		obs_scan_num		%12d
+obs_scan_num
+0
+! scan number (for display and archiving)
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY \anchor obs_scan_num__obs2tel
+/* HouseKeepingDataBase */
+
+INT_VAR		obs_sub_scan_num	%12d
+obs_sub_scan_num
+0
+! subscan number (for display and archiving)
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY \anchor obs_sub_scan_num__obs2tel
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	obs_tel_info_update_time	%12.8g
+obs_tel_info_update_time
+0.0
+! cycle time for updating feedback-file [seconds],  =0.: no continuous update
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY \anchor obs_tel_info_update_time__obs2tel
+/* HouseKeepingDataBase */
+
+INT_VAR		obs_cookie		%12d
+obs_cookie
+0
+! unique internal identifier for observation
+OBS2TEL_FILE | OBS2TEL_WRITE | READ_OBSDOP kephem OBS2TEL_READ K_SET_OBSERVATORY \anchor obs_cookie__obs2tel
+OBS2SOFIA_FILE | OBS2SOFIA_WRITE | OBS2SOFIA_READ \anchor obs_cookie__obs2sofia 
+/* HouseKeepingDataBase */
+
+#if defined (OBS_SOFIA)
+**************************
+*** chop signal stuff ****
+**************************
+
+STRING_VAR obs_chop_signal_source %s
+obs_chop_signal_source
+TELESCOPE
+! chopper TTL-signal source 
+KOSMA_obs2chpsignal.set | OBS2CHOP_WRITE | OBS2CHPSIGNAL_READ control_skychop load_server \anchor obs_chop_signal_source__obs2chpsignal
+/* HouseKeepingDataBase */
+
+INT_VAR		obs_chop_signal_cookie		%12d
+obs_chop_signal_cookie
+0
+! unique internal identifier for observation (to chopper signal)
+KOSMA_obs2chpsignal.set | OBS2CHOP_WRITE | control_skychop OBS2CHPSIGNAL_READ \anchor obs_chop_signal_cookie__obs2chpsignal
+/* HouseKeepingDataBase */
+
+#if defined (INSTR_GREAT) || defined (INSTR_UPGREAT)
+STRING_VAR	obs_loadchop_active		%1s
+obs_loadchop_active
+Nc	
+! switch load chopper on or off [Y/N]
+KOSMA_obs2chpsignal.set | OBS2CHOP_WRITE | control_skychop OBS2CHPSIGNAL_READ \anchor obs_loadchop_active__obs2chpsignal
+/* HouseKeepingDataBase */
+#endif
+
+STRING_VAR chop_signal_ok %s
+chop_signal_ok
+N
+! chopper signal source settings are acknowledged: OK
+KOSMA_chpsignal2obs.set | CHPSIGNAL2OBS_WRITE | control_skychop \anchor chop_signal_ok__chpsignal2obs
+/* HouseKeepingDataBase */
+
+INT_VAR chop_signal_cookie %d
+chop_signal_cookie
+0
+! cookie for chopper signal source settings to chopper box
+KOSMA_chpsignal2obs.set | CHPSIGNAL2OBS_WRITE | control_skychop \anchor chop_signal_cookie__chpsignal2obs
+/* HouseKeepingDataBase */
+#endif
+
+**********************************************
+********** telescope positioning *************
+**********************************************
+
+STRING_VAR	obs_coord_sys_on	%32s
+obs_coord_sys_on
+J2000
+! coordinate system of source position (eg. J2000, B1950, GALACTIC, HORIZON)
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY \anchor obs_coord_sys_on__obs2tel
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	obs_lam_on		%12.8g
+obs_lam_on
+0.0
+! first coordinate axis of spherical coordinate system obs_coord_sys_on [degree]
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY \anchor obs_lam_on__obs2tel
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	obs_bet_on		%12.8g
+obs_bet_on
+0.0
+! second coordinate axis of spherical coordinate system obs_coord_sys_on [degree]
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY \anchor obs_bet_on__obs2tel
+/* HouseKeepingDataBase */
+
+#if defined (OBS_CCAT)
+DOUBLE_VAR	obs_pm_lam		%12.8g
+obs_pm_lam
+0.0
+! lam proper motion [arcsec/yr]
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY \anchor obs_pm_lam__obs2tel
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	obs_pm_bet		%12.8g
+obs_pm_bet
+0.0
+! bet proper motion [arcsec/yr]
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY \anchor obs_pm_bet__obs2tel
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	obs_paralx		%12.8g
+obs_paralx
+0.0
+! parallax of astronomical object [arcsec]
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY \anchor obs_pm_bet__obs2tel
+/* HouseKeepingDataBase */
+
+STRING_VAR      obs_extended_elevation_range  %1s
+obs_extended_elevation_range
+N
+! Y if telescpe is commanded into extended elevation range (beyond 90 deg); N if not (default)
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY \anchor obs_extended_elevation_range__obs2tel
+/* HouseKeepingDataBase */
+
+#endif
+
+STRING_VAR	obs_coord_sys_del	%32s
+obs_coord_sys_del
+J2000
+! coordinate system of map offsets (eg. J2000, B1950, GALACTIC, HORIZON)
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY READ_IF_INTENSITY \anchor obs_coord_sys_del__obs2tel
+/* HouseKeepingDataBase */
+
+STRING_VAR	obs_true_angle_del	%1s
+obs_true_angle_del
+Y
+! apply cos(beta)-correction for map offsets [Y/N]
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY READ_IF_INTENSITY \anchor obs_true_angle_del__obs2tel
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	obs_lam_del		%12.8g
+obs_lam_del
+0.0
+! map offset, first coord. (defined in obs_coord_sys_on) [arcsec]
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY READ_IF_INTENSITY \anchor obs_lam_del__obs2tel
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	obs_bet_del		%12.8g
+obs_bet_del
+0.0
+! map offset, second coord. (defined in obs_coord_sys_on) [arcsec]
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY READ_IF_INTENSITY \anchor obs_bet_del__obs2tel
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	obs_lam_vel		%12.8g
+obs_lam_vel
+0.0
+! scan speed, first coord. (angular velocity on the sky, no cosine correction) [arcsec/sec]
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY READ_IF_INTENSITY \anchor obs_lam_vel__obs2tel
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	obs_bet_vel		%12.8g
+obs_bet_vel
+0.0
+! scan speed, second coord. (scanning starts at full velocity at obs_time_start) [arcsec/sec]
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY READ_IF_INTENSITY \anchor obs_bet_vel__obs2tel
+/* HouseKeepingDataBase */
+
+STRING_VAR	obs_otf_mode		%1s
+obs_otf_mode
+N
+! flag for OTF mode [N/C/P]; N: non-otf; C: continuos otf (old-mode); P: pattern otf
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY \anchor obs_otf_mode__obs2tel
+/* HouseKeepingDataBase */
+
+STRING_VAR	obs_coord_sys_off	%32s
+obs_coord_sys_off
+J2000
+! coordinate system for OFF position (e.g. J2000, B1950, GALACTIC, HORIZON)
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY READ_IF_INTENSITY \anchor obs_coord_sys_off__obs2tel
+/* HouseKeepingDataBase */
+
+STRING_VAR	obs_true_angle_off	%1s
+obs_true_angle_off
+Y
+! apply cos(beta)-correction for OFF position [Y/N]
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY READ_IF_INTENSITY \anchor obs_true_angle_off__obs2tel
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	obs_lam_off		%12.8g
+obs_lam_off
+0.0
+! relative OFF position, first coord. [arcsec]
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY READ_IF_INTENSITY \anchor obs_lam_off__obs2tel
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	obs_bet_off		%12.8g
+obs_bet_off
+0.0
+! relative OFF position, second coord. [arcsec]
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY READ_IF_INTENSITY \anchor obs_bet_off__obs2tel
+/* HouseKeepingDataBase */
+
+STRING_VAR	obs_coord_sys_focal_plane	%32s
+obs_coord_sys_focal_plane
+HORIZON
+! coordinate system for focal plane [TELESCOPE/HORIZON]
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY \anchor obs_coord_sys_focal_plane__obs2tel
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	obs_x_focal_plane	%12.8g
+obs_x_focal_plane
+0.0
+! reference position in telescope focalplane [arcsec]/instrument mount reference frame [mm], first coord 
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY \anchor obs_x_focal_plane__obs2tel
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	obs_y_focal_plane	%12.8g
+obs_y_focal_plane
+0.0
+! reference position in telescope focalplane [arcsec]/instrument mount reference  frame [mm], second coord 
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY \anchor obs_y_focal_plane__obs2tel
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	obs_los_angle_focal_plane	%12.8g
+obs_los_angle_focal_plane
+0.0
+! los rotation angle for focal plane (within +/- 3 degree on SOFIA, 0 everywhere else) [degree]
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY Kset_sofia \anchor obs_los_angle_focal_plane__obs2tel
+/* HouseKeepingDataBase */
+
+INT_VAR	obs_los_trigger_rewind	%d
+obs_los_trigger_rewind
+0
+! trigger flag for los rewind: 1: do rewind to specified los angle, 0: do not, -1: rewind to TO-specified margin
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY Kset_sofia \anchor obs_los_trigger_rewind__obs2tel
+
+STRING_VAR	obs_los_mode		%5s
+obs_los_mode
+SET
+! modus for los-tracking [SET/TRACK]
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY \anchor obs_los_mode__obs2tel
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	obs_wavelength		%12g
+obs_wavelength
+500.0
+! rough value for observing wavelength used to correct pointing for atmospheric refraction [micron]
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY \anchor obs_wavelength__obs2tel
+/* HouseKeepingDataBase */
+
+**********************************************
+************ control parameters **************
+**********************************************
+
+DOUBLE_VAR	obs_track_duration	%12g
+obs_track_duration
+0.0
+! duration of scan (duration of tracking, =0 permanent tracking, OTF-mode: 0 to >0 triggers otf-scan) [seconds]
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY \anchor obs_track_duration__obs2tel
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	obs_start_time		%20.5f
+obs_start_time
+0.0
+! start time of scan (before and after the scan tel_on_track will be N) [seconds since 1970.00 UT]
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY \anchor obs_start_time__obs2tel
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR 	obs_tolerance		%12.8g
+obs_tolerance
+10.0
+! maximum allowed tracking error [arcsec]
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY \anchor obs_tolerance__obs2tel
+/* HouseKeepingDataBase */
+
+STRING_VAR	obs_coord_sys_chop	%32s
+obs_coord_sys_chop
+HORIZON
+! coordinate system for chopper positioning (e.g. J2000, B1950, GALACTIC, HORIZON)
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ READ_IF_INTENSITY K_SET_OBSERVATORY \anchor obs_coord_sys_chop__obs2tel
+OBS2CHOP_FILE | OBS2CHOP_WRITE | OBS2CHOP_READ \anchor obs_coord_sys_chop__obs2chop
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	obs_amp_chop		%12.8g
+obs_amp_chop
+0.0
+! [arcsec] secondary chopper amplitude (half the throw!)
+OBS2CHOP_FILE | OBS2CHOP_WRITE | OBS2CHOP_READ \anchor obs_amp_chop__obs2chop
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY READ_IF_INTENSITY \anchor obs_amp_chop__obs2tel 
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	obs_angle_chop		%12.8g
+obs_angle_chop
+0.0
+! secondary chopper angle [degree,ccw from pos dir of first coordinate]
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY READ_IF_INTENSITY \anchor obs_angle_chop__obs2tel
+OBS2CHOP_FILE | OBS2CHOP_WRITE | OBS2CHOP_READ \anchor obs_angle_chop__obs2chop
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	obs_tip_chop		%12.8g
+obs_tip_chop
+0.0
+! fraction of secondary chopper amplitude to tip, may be greater than 1.0 or less than -1.0, =0.0: symmetric chop, =1.0: asymmetric over plus beam, =-1.0 asymmetric over minus beam
+OBS2CHOP_FILE | OBS2CHOP_WRITE | OBS2CHOP_READ \anchor obs_tip_chop__obs2chop
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY READ_IF_INTENSITY \anchor obs_tip_chop__obs2tel 
+/* HouseKeepingDataBase */
+
+INT_VAR		obs_chop_beam		%d
+obs_chop_beam
+0
+! chop-beam position [+1/-1/0], =0: chopper off resp. old AOSOBS mode
+OBS2TEL_FILE | OBS2TEL_WRITE | OBS2TEL_READ K_SET_OBSERVATORY READ_IF_INTENSITY \anchor obs_chop_beam__obs2tel 
+/* HouseKeepingDataBase */
+
+**********************************************
+**************** tel to obs ******************
+**********************************************
+
+STRING_VAR	tel_telescope		%32s
+tel_telescope
+KOSMA
+! Telescope Identifier (for display and backend_name in FITS header)
+TEL2OBS_FILE | TEL2OBS_WRITE | TEL2OBS_READ K_SET_OBSERVATORY READ_FOCALPLANE READ_WRITEHEADER \anchor tel_telescope__tel2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	tel_on_track		%1s
+tel_on_track
+N
+! Y if tracking on commanded position/track within tolerance [Y/N]
+TEL2OBS_FILE | TEL2OBS_WRITE | TEL2OBS_READ K_SET_OBSERVATORY  \anchor tel_on_track__tel2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	tel_lost_track		%1s
+tel_lost_track
+N
+! Y if tracking got beyond tolerance since start of track [Y/N]
+TEL2OBS_FILE | TEL2OBS_WRITE | TEL2OBS_READ K_SET_OBSERVATORY \anchor tel_lost_track__tel2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	tel_pos_in_range	%1s
+tel_pos_in_range
+Y
+! Y if commanded position is within telescope range [Y/N]
+TEL2OBS_FILE | TEL2OBS_WRITE | TEL2OBS_READ K_SET_OBSERVATORY  \anchor tel_pos_in_range__tel2obs
+/* HouseKeepingDataBase */
+
+****************************************************
+**** otf pattern parameters ************************
+****************************************************
+
+
+INT_VAR otf_pattern_max %d
+otf_pattern_max
+NPATTERN
+! maximum number of otf-pattern positions (>=2)
+NULL |  | OBS2TEL_READ READ_IF_INTENSITY \anchor otf_pattern_max__otfpattern2tel
+/* HouseKeepingDataBase */
+
+INT_VAR otf_pattern_no_of_points %d
+otf_pattern_no_of_points
+0
+! number of otf-pattern positions (>=2)
+KOSMA_otfpattern2tel.set |  | OBS2TEL_READ READ_IF_INTENSITY \anchor otf_pattern_no_of_points__otfpattern2tel
+/* HouseKeepingDataBase */
+
+STRING_VAR otf_pattern_type %s
+otf_pattern_type
+STEP
+! otf pattern type: STEP-wise otf; SMOOTH, including endpoints at full velocity; LINEAR (discouraged)
+KOSMA_otfpattern2tel.set |  | OBS2TEL_READ READ_IF_INTENSITY \anchor otf_pattern_type__otfpattern2tel
+/* HouseKeepingDataBase */
+
+STRING_VAR otf_pattern_filename %s
+otf_pattern_filename
+NONE
+! otf pattern_filename, located in $OTF_PATTERN_DIR (for info only)
+KOSMA_otfpattern2tel.set |  | OBS2TEL_READ READ_IF_INTENSITY \anchor otf_pattern_filename__otfpattern2tel
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR otf_pattern_pre_x %f
+otf_pattern_pre_x
+-9999.0
+! pre-otf position for pattern mode, x-value
+KOSMA_otfpattern2tel.set |  | OBS2TEL_READ \anchor otf_pattern_pre_x__otfpattern2tel
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR otf_pattern_pre_y %f
+otf_pattern_pre_y
+-9999.0
+! pre-otf position for pattern mode, y-value
+KOSMA_otfpattern2tel.set |  | OBS2TEL_READ \anchor otf_pattern_pre_y__otfpattern2tel
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR otf_pattern_pos_x[NPATTERN] %f
+otf_pattern_pos_x
+-9999.0
+! otf positions for pattern mode, x-values
+KOSMA_otfpattern2tel.set |  | OBS2TEL_READ READ_IF_INTENSITY \anchor otf_pattern_pos_x__otfpattern2tel
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR otf_pattern_pos_y[NPATTERN] %f
+otf_pattern_pos_y
+-9999.0
+! otf positions for pattern mode, y-values
+KOSMA_otfpattern2tel.set |  | OBS2TEL_READ READ_IF_INTENSITY \anchor otf_pattern_pos_y__otfpattern2tel
+/* HouseKeepingDataBase */
+
+****************************************************
+* end of otf-pattern stuff *************************
+****************************************************
+
+
+*******************************************
+*** ERROR handling tel ********************
+*******************************************
+
+INT_VAR		tel_error		%12d
+tel_error
+0
+! flags telescope command syntax/consistency and functional errors (=0: ok)
+TEL2OBS_FILE | TEL2OBS_WRITE | TEL2OBS_READ K_SET_OBSERVATORY \anchor tel_error__tel2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	tel_error_string	%s
+tel_error_string
+NONE
+! Error message associated with telescope command (=NONE: OK)
+TEL2OBS_FILE | TEL2OBS_WRITE | TEL2OBS_READ \anchor tel_error_string__tel2obs
+/* HouseKeepingDataBase */
+
+INT_VAR		tel_error_level	%12d
+tel_error_level
+5
+! Error level for message in tel_error_string [1: trace, 2: debug, 4: info, 5: message, 7: warn, 8: error, 9: fatal]
+TEL2OBS_FILE | TEL2OBS_WRITE | TEL2OBS_READ K_SET_OBSERVATORY \anchor tel_error_level__tel2obs
+/* HouseKeepingDataBase */
+
+********************************************
+
+INT_VAR		tel_return_cookie	%12d
+tel_return_cookie
+0
+! return cookie to identify proper observation 
+TEL2OBS_FILE | TEL2OBS_WRITE | TEL2OBS_READ K_SET_OBSERVATORY READ_OBSDOP  READ_FOCALPLANE \anchor tel_return_cookie__tel2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	tel_plate_scale		%12.8g
+tel_plate_scale
+4.96
+! plate scale of focal plane [arcsec/mm]
+TEL2OBS_FILE | TEL2OBS_WRITE | TEL2OBS_READ K_SET_OBSERVATORY  READ_FOCALPLANE \anchor tel_plate_scale__tel2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	tel_latitude		%12.8lf
+tel_latitude
+50.5
+! latitude of observatory (needed for Doppler correction) [degree]
+TEL2OBS_FILE | TEL2OBS_WRITE | TEL2OBS_READ K_SET_OBSERVATORY READ_OBSDOP READ_WRITEHEADER \anchor tel_latitude__tel2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	tel_longitude		%12.8lf
+tel_longitude
+-7.
+! longitude of observatory (needed for Doppler correction) [degree, +west (astronomical notation)]
+TEL2OBS_FILE | TEL2OBS_WRITE | TEL2OBS_READ K_SET_OBSERVATORY READ_OBSDOP READ_WRITEHEADER \anchor tel_longitude__tel2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	tel_altitude		%12.8g
+tel_altitude
+3000.0
+! height above sea level (needed for Doppler correction) [meter]
+TEL2OBS_FILE | TEL2OBS_WRITE | TEL2OBS_READ K_SET_OBSERVATORY READ_OBSDOP READ_WRITEHEADER \anchor tel_altitude__tel2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	tel_angle_focal_plane	%12.8g
+tel_angle_focal_plane
+0.0
+! ccw angle from second coordinate of the telescope reference coordinate system (TARF,HORIZON) to second coordinate of obs_coord_sys_del [degree]
+TEL2OBS_FILE | TEL2OBS_WRITE | TEL2OBS_READ K_SET_OBSERVATORY READ_FOCALPLANE READ_IF_INTENSITY \anchor tel_angle_focal_plane__tel2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	tel_los_act		%12.8g
+tel_los_act
+0.0
+! actual los-angle [degree]
+TEL2OBS_FILE | TEL2OBS_WRITE | TEL2OBS_READ K_SET_OBSERVATORY \anchor tel_los_act__tel2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	tel_time_act		 %20.5f
+tel_time_act
+0.0
+! time when status data were valid [seconds since 1970 UTC]
+TEL2OBS_FILE | TEL2OBS_WRITE | TEL2OBS_READ K_SET_OBSERVATORY READ_OBSDOP \anchor tel_time_act__tel2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	tel_time_del		%12.8g
+tel_time_del
+0.0
+! time since start of track (may be negative, if start in the future) [seconds]
+TEL2OBS_FILE | TEL2OBS_WRITE | TEL2OBS_READ K_SET_OBSERVATORY  \anchor tel_time_del__tel2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	tel_azm_cmd		%12.8g
+tel_azm_cmd
+10.0
+! commanded azimuth (for tracking display) [degree,cw toward east]
+TEL2OBS_FILE | TEL2OBS_WRITE | TEL2OBS_READ K_SET_OBSERVATORY READ_WRITEHEADER \anchor tel_azm_cmd__tel2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	tel_elv_cmd		%12.8g
+tel_elv_cmd
+60.0
+! commanded elevation (for tracking display and for atmospheric calibration) [degree]
+TEL2OBS_FILE | TEL2OBS_WRITE | TEL2OBS_READ K_SET_OBSERVATORY READ_WRITEHEADER READ_IF_INTENSITY \anchor tel_elv_cmd__tel2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	tel_azm_act		%12.8g
+tel_azm_act
+10.0
+! actual azimuth (for tracking display) [degree,cw toward east]
+TEL2OBS_FILE | TEL2OBS_WRITE | TEL2OBS_READ K_SET_OBSERVATORY \anchor tel_azm_act__tel2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	tel_elv_act		%12.8g
+tel_elv_act
+60.0
+! actual elevation (for tracking display) [degree]
+TEL2OBS_FILE | TEL2OBS_WRITE | TEL2OBS_READ K_SET_OBSERVATORY READ_WRITEHEADER READ_FOCALPLANE \anchor tel_elv_act__tel2obs
+/* HouseKeepingDataBase */
+
+#if defined (OBS_CCAT)
+DOUBLE_VAR	tel_mjd1		%16.10lf
+tel_mjd1
+-100.00
+! modified Julian Date UT1 [days]
+TEL2OBS_FILE | TEL2OBS_WRITE | TEL2OBS_READ K_SET_OBSERVATORY READ_WRITEHEADER READ_FOCALPLANE \anchor tel_mjd1t__tel2obs
+#endif
+
+#if defined (OBS_SOFIA)
+DOUBLE_VAR	tel_lam_cmd		%12.8g
+tel_lam_cmd
+0.0
+! commanded first coordinate using coordinate system of obs_coord_sys_on
+TEL2OBS_FILE | TEL2OBS_WRITE | TEL2OBS_READ K_SET_OBSERVATORY \anchor tel_lam_cmd__tel2obs
+/* HouseKeepingDataBase trigger=y  polltime=1. up_tbl_only=y */
+
+
+DOUBLE_VAR	tel_bet_cmd		%12.8g
+tel_bet_cmd
+0.0
+! commanded second coordinate using coordinate system of obs_coord_sys_on
+TEL2OBS_FILE | TEL2OBS_WRITE | TEL2OBS_READ K_SET_OBSERVATORY \anchor tel_bet_cmd__tel2obs
+/* HouseKeepingDataBase trigger=y  polltime=1. up_tbl_only=y */
+
+DOUBLE_VAR	tel_lam_act		%12.8g
+tel_lam_act
+0.0
+! actual first coordinate using coordinate system of obs_coord_sys_on
+TEL2OBS_FILE | TEL2OBS_WRITE | TEL2OBS_READ READ_OBSDOP K_SET_OBSERVATORY \anchor tel_lam_act__tel2obs
+/* HouseKeepingDataBase trigger=y  polltime=1. up_tbl_only=y */
+
+DOUBLE_VAR	tel_bet_act		%12.8g
+tel_bet_act
+0.0
+! actual second coordinate using coordinate system of obs_coord_sys_on
+TEL2OBS_FILE | TEL2OBS_WRITE | TEL2OBS_READ READ_OBSDOP K_SET_OBSERVATORY \anchor tel_bet_act__tel2obs
+/* HouseKeepingDataBase trigger=y  polltime=1. up_tbl_only=y */
+#endif
+
+STRING_VAR	tel_supports_ephemeris	%1s
+tel_supports_ephemeris
+Y
+! Y if telescope can calculate ephemeris, N if telescope expects observing task to do this for non-inertial objects [Y/N]
+TEL2OBS_FILE | TEL2OBS_WRITE | TEL2OBS_READ K_SET_OBSERVATORY READ_OBSDOP \anchor tel_supports_ephemeris__tel2obs
+/* HouseKeepingDataBase */
+
+#ifndef OBS_CCAT
+**********************************************
+*************** obs to chop ******************
+**********************************************
+
+INT_VAR		obs_chop_cookie		%12d
+obs_chop_cookie
+0
+! unique internal identifier for observation (to chopper)
+OBS2CHOP_FILE | OBS2CHOP_WRITE | OBS2CHOP_READ \anchor obs_cookie__obs2chop 
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	obs_chop_info_update_time	%12.8g
+obs_chop_info_update_time
+0.
+! cycle time for updating feedback-file (=0: no continuous update) [seconds]
+OBS2CHOP_FILE | OBS2CHOP_WRITE | OBS2CHOP_READ
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	obs_chop_frequ		%12.8g
+obs_chop_frequ
+-1.
+! chopper frequency [Hz] (>0: sets chopper, <0: external chop control, frequ. info only, e.g. to set filter)
+OBS2CHOP_FILE | OBS2CHOP_WRITE | OBS2CHOP_READ writeheader aos_dummy K_SET_OBSERVATORY \anchor obs_chop_frequ__obs2chop
+/* HouseKeepingDataBase */
+
+STRING_VAR	obs_chop_active		%1s
+obs_chop_active
+N
+! switch chopper on or off [Y/N]
+OBS2CHOP_FILE | OBS2CHOP_WRITE | OBS2CHOP_READ 
+/* HouseKeepingDataBase */
+
+**********************************************
+*************** chop to obs ******************
+**********************************************
+
+STRING_VAR	chop_ok			%1s
+chop_ok
+N
+! chopper is presently performing ok [Y/N]
+CHOP2OBS_FILE | CHOP2OBS_WRITE | CHOP2OBS_READ K_SET_OBSERVATORY 
+/* HouseKeepingDataBase */
+
+INT_VAR	chop_return_cookie		%12d
+chop_return_cookie
+0
+! return cookie to identify proper observation 
+CHOP2OBS_FILE | CHOP2OBS_WRITE | CHOP2OBS_READ K_SET_OBSERVATORY 
+
+*******************************************
+*** ERROR handling chop********************
+*******************************************
+INT_VAR		chop_error		%12d
+chop_error
+0
+! flags chopper command syntax/consistency and functionality error (=0: ok)
+CHOP2OBS_FILE | CHOP2OBS_WRITE | CHOP2OBS_READ K_SET_OBSERVATORY 
+/* HouseKeepingDataBase */
+
+STRING_VAR	chop_error_string	%s
+chop_error_string
+NONE
+! Error message not associated with chopper command (=NONE: OK)
+CHOP2OBS_FILE | CHOP2OBS_WRITE | CHOP2OBS_READ \anchor chop_error_string__chop2obs
+/* HouseKeepingDataBase */
+
+INT_VAR		chop_error_level	%12d
+chop_error_level
+5
+! Error level for message in chop_error_string [1: trace, 2: debug, 4: info, 5: message, 7: warn, 8: error, 9: fatal]
+CHOP2OBS_FILE | CHOP2OBS_WRITE | CHOP2OBS_READ K_SET_OBSERVATORY \anchor chop_error_level__chop2obs
+/* HouseKeepingDataBase */
+
+********************************************
+
+STRING_VAR	chop_failed		%1s
+chop_failed
+N
+! chopper failed sometime since last commanded [Y/N]
+CHOP2OBS_FILE | CHOP2OBS_WRITE | CHOP2OBS_READ K_SET_OBSERVATORY 
+/* HouseKeepingDataBase */
+#endif
+
+#if defined (OBS_CCAT)
+*******************************
+frequency switch stuff for CCAT
+*******************************
+DOUBLE_VAR	obs_fs_chop_frequ		%12.8g
+obs_fs_chop_frequ
+-1.
+! FS chop frequency [Hz] 
+KOSMA_obs2fschop.set | control_lo | aos_dummy writeheader K_SET_OBSERVATORY \anchor obs_fs_chop_frequ__obs2fschop
+
+INT_VAR	obs_fs_chop_active		%4d
+obs_fs_chop_active
+N
+! status of FS chop (0: off; 1: up, -1: down)
+KOSMA_obs2fschop.set | control_lo | aos_dummy K_SET_OBSERVATORY \anchor obs_fs_chop_active__obs2fschop
+#endif
+
+*************************
+
+
+**********************************************
+*************** obs to sofia ******************
+**********************************************
+
+#if defined (OBS_SOFIA)
+DOUBLE_VAR	obs_sofia_info_update_time	%12.8g
+obs_sofia_info_update_time
+0.
+! Cycle time for updating feedback-file (=0: no continuous update) [seconds]
+OBS2SOFIA_FILE | OBS2SOFIA_WRITE | OBS2SOFIA_READ los_focus_monitor Kset_sofia
+/* HouseKeepingDataBase */
+#endif
+
+STRING_VAR	OK2CmdTelChp	%1s
+OK2CmdTelChp
+N
+! Local copy of OK2Cmd for KOSMA_obs2sofia/nanten2/ccat file (not to be set by user)
+OBS2SOFIA_FILE | OBS2SOFIA_WRITE | OBS2SOFIA_READ focalplane astra_dummy skychop_dummy Kset_sofia \anchor OK2CmdTelChp__obs2sofia
+/* HouseKeepingDataBase */
+
+STRING_VAR	OK2Cmd	%1s
+OK2Cmd_internal
+N
+! Disable/enable commanding to telescope and chopper [Y/N]
+CMD2SOFIA_FILE | | OBS2SOFIA_READ server_common Kset_sofia \anchor OK2Cmd_internal__KOSMA_cmd2sofia
+
+STRING_VAR	obs_comment	%s
+obs_comment
+NONE
+! Comment sent to the telescope operators, use BACKSLASH-n to signify line breaks
+OBS2SOFIA_FILE | OBS2SOFIA_WRITE | OBS2SOFIA_READ Kset_sofia \anchor obs_comment__obs2sofia
+/* HouseKeepingDataBase */
+
+#if defined (OBS_SOFIA)
+INT_VAR		obs_aoi_mode	%12d
+obs_aoi_mode
+-9999
+! Tracking mode (-9999: no tracking, -1: obtain AOI from reftrack position, 0: obtain AOI from nodtrackabx positions)
+OBS2SOFIA_FILE | OBS2SOFIA_WRITE | OBS2SOFIA_READ Kset_sofia \anchor obs_aoi_mode__obs2sofia
+/* HouseKeepingDataBase */
+
+STRING_VAR		obs_request_ephemeris	%1s
+obs_request_ephemeris
+N
+! trigger flag for telescope ephemeris: Y: ask telescope to set tel_supports_ephemeris if able, N: do not
+OBS2SOFIA_FILE | OBS2SOFIA_WRITE | OBS2SOFIA_READ astra_dummy Kset_sofia \anchor obs_request_ephemeris__obs2sofia
+/* HouseKeepingDataBase */
+#endif
+
+STRING_VAR	si_obs_mode	%8s
+si_obs_mode
+NONE
+! observing mode [NONE/BSA/BSB/CAL-COL/CAL-HOT/CAL-SKY/CAL-ZER/CMB-COMB/CMB-ZER/DIP/FSA/FSB/IDLE/LSOFF/LSON/OTFT-OFF/OTFT/OTFSWA/OTFSWB/TP-OFF/TP-ON]
+OBS2SOFIA_FILE | OBS2SOFIA_WRITE | OBS2SOFIA_READ Kset_sofia \anchor si_obs_mode__obs2sofia
+/* HouseKeepingDataBase */
+
+INT_VAR		si_scan_num		%12d
+si_scan_num
+0
+! Scan number (for display and archiving)
+OBS2SOFIA_FILE | OBS2SOFIA_WRITE | OBS2SOFIA_READ Kset_sofia \anchor si_scan_num__obs2sofia
+/* HouseKeepingDataBase */
+
+INT_VAR		si_sub_scan_num		%12d
+si_sub_scan_num
+0
+! Subscan number (for display and archiving)
+OBS2SOFIA_FILE | OBS2SOFIA_WRITE | OBS2SOFIA_READ Kset_sofia \anchor si_sub_scan_num__obs2sofia
+/* HouseKeepingDataBase */
+
+STRING_VAR	si_integrating_flag	%1s
+si_integrating_flag
+N
+! Flag [Y/N] indicating that the SI is acquiring data
+OBS2SOFIA_FILE | OBS2SOFIA_WRITE | OBS2SOFIA_READ READ_SOFIA_TIMING Kset_sofia \anchor si_integrating_flag__obs2sofia
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	si_integration_duration	%12.3f
+si_integration_duration
+-9999.
+! Integration duration of last scan [seconds], 0.: scan was cancelled
+OBS2SOFIA_FILE | OBS2SOFIA_WRITE | OBS2SOFIA_READ READ_SOFIA_TIMING Kset_sofia \anchor si_integration_duration__obs2sofia
+/* HouseKeepingDataBase */
+
+#if defined (OBS_SOFIA)
+DOUBLE_VAR	sofia_focusOffset	%12.3f
+sofia_focusOffset
+-9999.
+! Absolute focus offset in the T axis; -9999: do not update offset [microns]
+OBS2SOFIA_FILE | OBS2SOFIA_WRITE | OBS2SOFIA_READ Kset_sofia \anchor sofia_focusOffset__obs2sofia
+/* HouseKeepingDataBase */
+
+STRING_VAR	sofia_fpiFocusOffsetFlag	%1s
+sofia_fpiFocusOffsetFlag
+N
+! Flag [Y/N] indicating that the FPI focus offset should be updated
+OBS2SOFIA_FILE | OBS2SOFIA_WRITE | OBS2SOFIA_READ Kset_sofia \anchor sofia_fpiFocusOffsetFlag__obs2sofia
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_focusUpdateLimit		%12.3f
+sofia_focusUpdateLimit
+0.
+! Difference between actual and calculated focus that triggers a focus update [microns], 0.: do not update
+OBS2SOFIA_FILE | OBS2SOFIA_WRITE | OBS2SOFIA_READ astra_dummy los_focus_monitor Kset_sofia \anchor sofia_focusUpdateLimit__obs2sofia
+/* HouseKeepingDataBase */
+
+STRING_VAR	sofia_focusUpdateTrigger	%9s
+sofia_focusUpdateTrigger
+NO
+! Update focus [YES/IF_NEEDED/NO]
+OBS2SOFIA_FILE | OBS2SOFIA_WRITE | OBS2SOFIA_READ astra_dummy Kset_sofia \anchor sofia_focusUpdateTrigger__obs2sofia
+/* HouseKeepingDataBase */
+#endif
+
+************************************************
+**************** focalplane to sofia ***********
+************************************************
+
+#if defined (OBS_SOFIA)
+STRING_VAR	sofia_coord_sys_pix		%32s
+sofia_coord_sys_pix
+SIRF
+! Coordinate system of pixel locations (eg. SIRF, J2000, B1950, GALACTIC, HORIZON)
+FOCALPLANE2SOFIA_FILE | FOCALPLANE2SOFIA_WRITE | FOCALPLANE2SOFIA_READ Kset_focalplane2sofia \anchor sofia_coord_sys_pix__focalplane2sofia
+/* HouseKeepingDataBase */
+
+INT_VAR		sofia_n_pix			%d
+sofia_n_pix
+NRX
+! Number of pixel locations (maximum: NRX)
+FOCALPLANE2SOFIA_FILE | FOCALPLANE2SOFIA_WRITE | FOCALPLANE2SOFIA_READ Kset_focalplane2sofia \anchor sofia_n_pix__focalplane2sofia
+/* HouseKeepingDataBase */
+
+STRING_VAR	sofia_pix_display_array_order   %30s
+sofia_pix_display_array_order
+NONE:NONE:NONE:NONE
+! order of array_names (as given by Rx_ArrayName) for numbering of pixel display (SOFIA-MCCS: p0, p1, ....)
+FOCALPLANE2SOFIA_FILE | FOCALPLANE2SOFIA_WRITE | FOCALPLANE2SOFIA_READ Kset_focalplane2sofia \anchor sofia_pix_display_array_order__focalplane2sofia
+/* HouseKeepingDataBase */
+
+STRING_VAR	sofia_id_pix[NRX]		%3s
+sofia_id_pix
+OFF
+! Pixel type, used to plot colors or symbols or to suppress display [OFF/ON/A/B]
+FOCALPLANE2SOFIA_FILE | FOCALPLANE2SOFIA_WRITE | FOCALPLANE2SOFIA_READ Kset_focalplane2sofia \anchor sofia_id_pix__focalplane2sofia
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_x_pix[NRX]		%12.8g
+sofia_x_pix
+0.0
+! X-coordinate of pixel location
+FOCALPLANE2SOFIA_FILE | FOCALPLANE2SOFIA_WRITE | FOCALPLANE2SOFIA_READ Kset_focalplane2sofia \anchor sofia_x_pix__focalplane2sofia
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_y_pix[NRX]		%12.8g
+sofia_y_pix
+0.0
+! Y-coordinate of pixel location
+FOCALPLANE2SOFIA_FILE | FOCALPLANE2SOFIA_WRITE | FOCALPLANE2SOFIA_READ Kset_focalplane2sofia \anchor sofia_y_pix__focalplane2sofia
+/* HouseKeepingDataBase */
+#endif
+
+STRING_VAR	pause_action	%1s
+pause_action
+N
+! Pause next action [Y/W/N: pausing, pending, continue]
+KOSMA_pause.set | | Kset_pause \anchor pause_action__KOSMA_pause
+/* HouseKeepingDataBase */
+
+#if defined (OBS_SOFIA)
+
+************************************************
+**************** sofia to obs ******************
+************************************************
+
+INT_VAR		sofia_return_cookie	%12d
+sofia_return_cookie
+0
+! Return cookie to identify proper observation 
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_return_cookie__sofia2obs
+/* HouseKeepingDataBase */
+
+*******************************************
+*** ERROR handling sofia ******************
+*******************************************
+
+STRING_VAR	sofia_error_string	%s
+sofia_error_string
+NONE
+! Error message not associated with telescope or chopper command (=NONE: OK)
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_error_string__sofia2obs
+/* HouseKeepingDataBase */
+
+INT_VAR		sofia_error_level	%12d
+sofia_error_level
+5
+! Error level for message in sofia_error_string [1: trace, 2: debug, 4: info, 5: message, 7: warn, 8: error, 9: fatal]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ Kset_sofia \anchor sofia_error_level__sofia2obs
+/* HouseKeepingDataBase */
+
+*******************************************
+
+STRING_VAR	sofia_missionID		%32s
+sofia_missionID
+NONE
+! Current mission ID
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ READ_SOFIA_TIMING Kset_sofia \anchor sofia_missionID__sofia2obs
+/* HouseKeepingDataBase */
+
+INT_VAR		sofia_flightLeg	%12d
+sofia_flightLeg
+-9999
+! Flight leg
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ READ_SOFIA_TIMING Kset_sofia \anchor sofia_flightLeg__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_timeLeftOnLeg		%12g
+sofia_timeLeftOnLeg
+-9999.
+! Time left on leg [seconds]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ Kset_sofia \anchor sofia_timeLeftOnLeg_sofia2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	sofia_keywordDict		%32s
+sofia_keywordDict
+UNKNOWN
+! Version of FITS keyword dictionary
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_keywordDict__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_longitude		%12g
+sofia_longitude
+-9999.
+! Aircraft longitude [degrees, +east (geographical notation)]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_longitude__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_latitude		%12g
+sofia_latitude
+-9999.
+! Aircraft latitude [degrees]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_latitude__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_altitude		%12g
+sofia_altitude
+-9999.
+! GPS MSL altitude [feet]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_altitude__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_airspeed		%12g
+sofia_airspeed
+-9999.
+! True aircraft airspeed [knots]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_airspeed__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_groundSpeed		%12g
+sofia_groundSpeed
+-9999.
+! Aircraft ground speed [knots]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_groundSpeed__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_heading		%12g
+sofia_heading
+-9999.
+! Aircraft true heading [degrees]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_heading__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_trackAngle		%12g
+sofia_trackAngle
+-9999.
+! Aircraft track angle [degrees]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_trackAngle__sofia2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	sofia_tscStatus		%32s
+sofia_tscStatus
+UNKNOWN
+! Operation mode of the servo system
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_tscStatus__sofia2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	sofia_fbcStatus		%32s
+sofia_fbcStatus
+UNKNOWN
+! Operation mode of the FBC system
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_fbcStatus__sofia2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	sofia_gateValveOpen	%1s
+sofia_gateValveOpen
+N
+!  Is gate valve open [Y/N]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ server_common Kset_sofia \anchor sofia_gateValveOpen__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR sofia_telescopeSiFocus		%12g
+sofia_telescopeSiFocus
+-9999.
+! XML focus position [millimeters] 
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ Kset_sofia \anchor sofia_telescopeSiFocus__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR sofia_telescopeSiFocusOffset		%12g
+sofia_telescopeSiFocusOffset
+-9999.
+! Accumulation of the offsets provided by the operator [microns] 
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ Kset_sofia \anchor sofia_telescopeSiFocusOffset__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR sofia_telescopeCalculatedFocus	%12g
+sofia_telescopeCalculatedFocus
+-9999.
+! Calculated SMA focus for a given temperature [microns] 
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ Kset_sofia \anchor sofia_telescopeCalculatedFocus__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_telescopeFocus		%12g
+sofia_telescopeFocus
+-9999.
+! Telescope focus - SMA FCM t position [microns]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ Kset_sofia \anchor sofia_telescopeFocus__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_waterVaporZenith		%12g
+sofia_waterVaporZenith
+-9999.
+! Water vapor, integrated to zenith, observation [microns]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_waterVaporZenith_sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_staticAirTemp		%12g
+sofia_staticAirTemp
+-9999.
+! Static air temperature outside aircraft [degrees Celsius]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_staticAirTemp_sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_staticAirPress		%12g
+sofia_staticAirPress
+-9999.
+! Static outside air pressure [inch Hg]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_staticAirPress_sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_pressureAltitude		%12g
+sofia_pressureAltitude
+-9999.
+! Pressure equivalent Aircraft pressure altitude [feet]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_pressureAltitude_sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_baroAltitude		%12g
+sofia_baroAltitude
+-9999.
+! Barometric altitude [feet]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_baroAltitude_sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_pmTemp1		%12g
+sofia_pmTemp1
+-9999.
+! Primary Mirror temperature sensor #1 (at cell L2) [degrees Celsius]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_pmTemp1__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_pmTemp2		%12g
+sofia_pmTemp2
+-9999.
+! Primary Mirror temperature sensor #2 (at cell C10) [degrees Celsius]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_pmTemp2__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_pmTemp3		%12g
+sofia_pmTemp3
+-9999.
+! Primary Mirror temperature sensor #3 (at cell J9) [degrees Celsius]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_pmTemp3__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_secMirTemp		%12g
+sofia_secMirTemp
+-9999.
+! Secondary Mirror temperature sensor #1 (backside, around 0.7 of the diameter) [degrees Celsius]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_sofia_secMirTemp__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_cabinTemp1		%12g
+sofia_cabinTemp1
+-9999.
+! Cabin temperature sensor #1 (TA area, not installed) [degrees Celsius]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_cabinTemp1__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_cabinTemp2		%12g
+sofia_cabinTemp2
+-9999.
+! Cabin temperature sensor #2 (Mission area, not installed) [degrees Celsius]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_cabinTemp2__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_cabinTemp3		%12g
+sofia_cabinTemp3
+-9999.
+! Cabin temperature sensor #3 (Average of 4 sensors around the TA close to the bulkhead area at 0, 90, 180, and 270 deg) [degrees Celsius]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_cabinTemp3__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_cabinTemp4		%12g
+sofia_cabinTemp4
+-9999.
+! Cabin temperature sensor #4 (reserved for future use) [degrees Celsius]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_cabinTemp4__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_cabinTemp5		%12g
+sofia_cabinTemp5
+-9999.
+! Cabin temperature sensor #5 (reserved for future use) [degrees Celsius]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_cabinTemp5__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_cabinPressure		%12g
+sofia_cabinPressure
+-9999.
+! Cabin pressure [Torr]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_cabinPressure_sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_hourAngle		%12g
+sofia_hourAngle
+-9999.
+! Telescope Hour Angle (used by los_focus_monitor to calculate the direction and speed of the los-rotation) [+/-hours]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_hourAngle__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_elevation		%12g
+sofia_elevation
+-9999.
+! Telescope elevation [degrees]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_elevation__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_teleCrossElevation		%12g
+sofia_teleCrossElevation
+-9999.
+! Telescope cross elevation [degrees]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_teleCrossElevation__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_skyLosRate		%12g
+sofia_skyLosRate
+-9999.
+! Sky rotation rate estimated from actual conditions [deg/h]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_skyLosRate__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_timeUntilRewind		%12g
+sofia_timeUntilRewind
+-9999.
+! Time remaining until a rewind will be required; negative values mean rewind not required [seconds]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ control_tel Kset_sofia \anchor sofia_timeUntilRewind__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_zenithAngle		%12g
+sofia_zenithAngle
+-9999.
+! Zenith angle [degrees]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_zenithAngle__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_teleRA		%12g
+sofia_teleRA
+-9999.
+! Telescope Right Ascension [hours]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_teleRA__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_teleDec		%12g
+sofia_teleDec
+-9999.
+! Telescope Declination [degrees]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_teleDec__sofia2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	sofia_teleEquinox		%32s
+sofia_teleEquinox
+UNKNOWN
+! Equinox of ERF coords (RA/Dec/VPA) [string]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_teleEquinox__sofia2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	sofia_lastRewindUtc		%32s
+sofia_lastRewindUtc
+UNKNOWN
+! Time of last rewind (UTC) [TBD]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_lastRewindUtc__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_obsRA		%12g
+sofia_obsRA
+-9999.
+! Requested Right Ascension [hours]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_obsRA__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_obsDec		%12g
+sofia_obsDec
+-9999.
+! Requested Declination [degrees]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_obsDec__sofia2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	sofia_obsCoordSys	%32s
+sofia_obsCoordSys
+ICRS
+! Coordinate System for Requested Right Ascension and Declination [FK4/FK5/ICRS]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_obsCoordSys__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_obsCoordEquinox		%12g
+sofia_obsCoordEquinox
+-9999.
+! Coordinate Equinox for Requested Right Ascension and Declination [yrs]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_obsCoordEquinox__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_teleLineOfSight		%12g
+sofia_teleLineOfSight
+-9999.
+! Telescope LOS at observation [degrees]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_teleLineOfSight__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_teleVPA		%12g
+sofia_teleVPA
+-9999.
+! Telescope VPA [degrees]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_teleVPA__sofia2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	sofia_trackingMode	%32s
+sofia_trackingMode
+UNKNOWN
+! SOFIA tracking mode [string] (FITSKEYWORD: TRACMODE)
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_trackingMode__sofia2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	sofia_trackingError	%1s
+sofia_trackingError
+N
+! Tracking error flag [Y/N]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_trackingError__sofia2obs
+/* HouseKeepingDataBase */
+
+INT_VAR		sofia_trackWaitIter	%12d
+sofia_trackWaitIter
+-9999
+! Maximum number of steps (within tracker`s Two Axis Position Calculation) to wait after commanding the TA to centroid track
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ READ_SOFIA_TIMING Kset_sofia \anchor sofia_trackWaitIter__sofia2obs
+/* HouseKeepingDataBase */
+
+INT_VAR		sofia_rofWaitIter	%12d
+sofia_rofWaitIter
+-9999
+! Maximum number of steps (within tracker`s ROF Calculation) to wait after commanding the TA to centroid track
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ READ_SOFIA_TIMING Kset_sofia \anchor sofia_rofWaitIter__sofia2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	sofia_mccsMode	%32s
+sofia_mccsMode
+UNKNOWN
+! MCCS SI Mode (MCCS_SI_04)
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_mccsMode__sofia2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	sofia_telPlateScaleSource	%32s
+sofia_telPlateScaleSource
+UNKNOWN
+! mode of telescope plate scale setting: CALCULATED|HOUSEKEEPING_XML|HOUSEKEEPING_MODIFIED 
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ Kset_sofia \anchor sofia_telPlateScaleSource__sofia2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	sofia_boresightLocation	%32s
+sofia_boresightLocation
+UNKNOWN
+! Boresight location currently in use [sibs, tabs, wfi_fov, ffi_fov, fpi_fov]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ Kset_sofia \anchor sofia_boresightLocation__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_sibs_x		%12g
+sofia_sibs_x
+-9999.
+! SI boresight (x) - as returned by MCCS
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_sibs_x__sofia2obs
+/* HouseKeepingDataBase */
+	
+DOUBLE_VAR	sofia_sibs_y		%12g
+sofia_sibs_y
+-9999.
+! SI boresight (y) - as returned by MCCS
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_sibs_y__sofia2obs
+/* HouseKeepingDataBase */
+	
+STRING_VAR	sofia_isChopping	%1s
+sofia_isChopping
+N
+! Is telescope chopping [Y/N]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_isChopping__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_chopFrequency		%12g
+sofia_chopFrequency
+-9999.
+! Chopping Frequency [Hz]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_chopFrequency__sofia2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	sofia_chopMode		%32s
+sofia_chopMode
+UNKNOWN
+! Chopping profile: 2 or 3 point
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_chopMode__sofia2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	sofia_chopSymmetry		%32s
+sofia_chopSymmetry
+UNKNOWN
+! Chopping symmetry [SYM, ASYM]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_chopSymmetry__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_chopAmplitude1		%12g
+sofia_chopAmplitude1
+-9999.
+! Chop amplitude 1 [arcsec]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_chopAmplitude1__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_chopAmplitude2		%12g
+sofia_chopAmplitude2
+-9999.
+! Chop amplitude 2 [arcsec]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_chopAmplitude2__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_chopAngle		%12g
+sofia_chopAngle
+-9999.
+! Calculated angle in the sky_coord_sys reference frame [degrees]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_chopAngle__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_chopTip		%12g
+sofia_chopTip
+-9999.
+! Calculated tip in the sky_coord_sys reference frame [arcsec]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_chopTip__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_chopTilt		%12g
+sofia_chopTilt
+-9999.
+! Calculated tilt in the sky_coord_sys reference frame [arcsec]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_chopTilt__sofia2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	sofia_chopCoordSys		%32s
+sofia_chopCoordSys
+UNKNOWN
+! MCCS Coordinate system for sky tip, tilt and angle
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_chopCoordSys__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_chopPhase		%12g
+sofia_chopPhase
+-9999.
+! Chop Phase [milliseconds]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_chopPhase__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_nodAmp		%12g
+sofia_nodAmp
+-9999.
+! Nod amplitude [arcsec]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_nodAmp__sofia2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	sofia_nodBeam		%32s
+sofia_nodBeam
+UNKNOWN
+! Name of nod beam
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_nodBeam__sofia2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	sofia_nodCoordSys		%32s
+sofia_nodCoordSys
+UNKNOWN
+! Nod coordinate system (EQUATORIAL/GALACTIC/ECLIPTIC/USER)
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_nodCoordSys__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_nodAngle		%12g
+sofia_nodAngle
+-9999.
+! Nod angle [degrees]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_nodAngle__sofia2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	sofia_isScanning	%1s
+sofia_isScanning
+N
+! Is telescope scanning [Y/N] (do not use to populate SCANNING keyword as this is only true when the telescope is actively scanning)
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_isScanning__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_startRA		%12g
+sofia_startRA
+-9999.
+! Start of scan - RA [hrs]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_startRA__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_startDec		%12g
+sofia_startDec
+-9999.
+! Start of scan - Dec [degrees]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_startDec__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_endRA		%12g
+sofia_endRA
+-9999.
+! End of scan - RA [hrs]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_endRA__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_endDec		%12g
+sofia_endDec
+-9999.
+! End of scan - Dec [degrees]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_endDec__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_scanRate		%12g
+sofia_scanRate
+-9999.
+! Scan velocity [arcsec/sec]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_scanRate__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_scanDirection		%12g
+sofia_scanDirection
+-9999.
+! Scan direction [degrees]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_scanDirection__sofia2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	sofia_scanCoordSys		%32s
+sofia_scanCoordSys
+UNKNOWN
+! Scan Coordinate System
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ \anchor sofia_scanCoordSys__sofia2obs
+/* HouseKeepingDataBase */
+
+INT_VAR		sofia_obsstat_md	%12d
+sofia_obsstat_md
+0
+! SOFIA observatory status: Mission Director [0: UNKNOWN/1: OBS_FAULT/2: TURNING/3: ON_LEG]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ READ_SOFIA_TIMING Kset_sofia \anchor sofia_obsstat_md__sofia2obs
+/* HouseKeepingDataBase */
+
+INT_VAR		sofia_obsstat_to	%12d
+sofia_obsstat_to
+0
+! SOFIA observatory status: Telescope Operator [0: UNKNOWN/1: TA_FAULT/2: CONFIGURING/3: READY]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ READ_SOFIA_TIMING Kset_sofia \anchor sofia_obsstat_to__sofia2obs
+/* HouseKeepingDataBase */
+
+INT_VAR		sofia_obsstat_si	%12d
+sofia_obsstat_si
+0
+! SOFIA observatory status: Science Instrument [0: UNKNOWN/1: SI_FAULT/2: COMPLETED/3: OBSERVING]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ READ_SOFIA_TIMING Kset_sofia \anchor sofia_obsstat_si__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_telescopeMoveDuration		%12g
+sofia_telescopeMoveDuration
+-9999.
+! Time taken to move to desired source [seconds]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ READ_SOFIA_TIMING \anchor sofia_telescopeMoveDuration__sofia2obs
+/* HouseKeepingDataBase */
+
+INT_VAR	sofia_telescopeMoveDurationCookie		%12d
+sofia_telescopeMoveDurationCookie
+0
+! Return cookie to identify proper observation (tel2obs obs_cookie)
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ READ_SOFIA_TIMING \anchor sofia_telescopeMoveDurationCookie__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_rewindDuration		%12g
+sofia_rewindDuration
+-9999.
+! Time taken to perform LOS rewind [seconds]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ READ_SOFIA_TIMING \anchor sofia_rewindDuration__sofia2obs
+/* HouseKeepingDataBase */
+
+INT_VAR	sofia_rewindDurationCookie		%12d
+sofia_rewindDurationCookie
+0
+! Return cookie to identify proper observation (obs2tel obs_cookie)
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ READ_SOFIA_TIMING \anchor sofia_rewindDurationCookie__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_chopOnDuration		%12g
+sofia_chopOnDuration
+-9999.
+! Time taken to turn on chopper [seconds]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ READ_SOFIA_TIMING \anchor sofia_chopOnDuration__sofia2obs
+/* HouseKeepingDataBase */
+
+INT_VAR	sofia_chopOnDurationCookie		%12d
+sofia_chopOnDurationCookie
+0
+! Return cookie to identify proper observation (obs2chop obs_chop_cookie)
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ READ_SOFIA_TIMING \anchor sofia_chopOnDurationCookie__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_chopOffDuration		%12g
+sofia_chopOffDuration
+-9999.
+! Time taken to turn off chopper [seconds]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ READ_SOFIA_TIMING \anchor sofia_chopOffDuration__sofia2obs
+/* HouseKeepingDataBase */
+
+INT_VAR	sofia_chopOffDurationCookie		%12d
+sofia_chopOffDurationCookie
+0
+! Return cookie to identify proper observation (obs2chop obs_chop_cookie)
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ READ_SOFIA_TIMING \anchor sofia_chopOffDurationCookie__sofia2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	sofia_redToGreenDuration		%12g
+sofia_redToGreenDuration
+-9999.
+! Time taken to complete red to green sequence [seconds]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ READ_SOFIA_TIMING \anchor sofia_redToGreenDuration__sofia2obs
+/* HouseKeepingDataBase */
+
+INT_VAR	sofia_redToGreenDurationCookie		%12d
+sofia_redToGreenDurationCookie
+0
+! Return cookie to uniquely identify value (current time in millis)
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ READ_SOFIA_TIMING \anchor sofia_redToGreenDurationCookie__sofia2obs
+/* HouseKeepingDataBase */
+
+INT_VAR	sofia_fpiIntegrationTime		%12d
+sofia_fpiIntegrationTime
+0
+! Integration time for each FPI image [milliseconds]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ Kset_sofia READ_SOFIA_TIMING \anchor sofia_fpiIntegrationTime__sofia2obs
+/* HouseKeepingDataBase */
+
+INT_VAR	sofia_ffiIntegrationTime		%12d
+sofia_ffiIntegrationTime
+0
+! Integration time for each FFI image [milliseconds]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ Kset_sofia READ_SOFIA_TIMING \anchor sofia_ffiIntegrationTime__sofia2obs
+/* HouseKeepingDataBase */
+
+INT_VAR	sofia_wfiIntegrationTime		%12d
+sofia_wfiIntegrationTime
+0
+! Integration time for each WFI image [milliseconds]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ Kset_sofia READ_SOFIA_TIMING \anchor sofia_wfiIntegrationTime__sofia2obs
+/* HouseKeepingDataBase */
+
+INT_VAR	sofia_binning		%12d
+sofia_binning
+0
+! Binning factor for FPI CCD array [UNDEFINED: -1, 1x1: 0, 2x2: 1, 4x4:2]
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ Kset_sofia READ_SOFIA_TIMING \anchor sofia_binning__sofia2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	sofia_nodtrackaAoiSize		%32s
+sofia_nodtrackaAoiSize
+NONE
+! AOI size for nodtracka (UNKNOWN: position undefined, else: width height)
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ Kset_sofia \anchor sofia_nodtrackaAoiSize__sofia2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	sofia_nodtrackbAoiSize		%32s
+sofia_nodtrackbAoiSize
+NONE
+! AOI size for nodtrackb (=NONE: position undefined; width height)
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ Kset_sofia \anchor sofia_nodtrackbAoiSize__sofia2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	sofia_nodtrackxAoiSize		%32s
+sofia_nodtrackxAoiSize
+NONE
+! AOI size for nodtrackx (=NONE: position undefined; width height)
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ Kset_sofia \anchor sofia_nodtrackxAoiSize__sofia2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	sofia_reftrackAoiSize		%32s
+sofia_reftrackAoiSize
+NONE
+! AOI size for reftrack (=NONE: position undefined; width height)
+SOFIA2OBS_FILE | SOFIA2OBS_WRITE | SOFIA2OBS_READ Kset_sofia \anchor sofia_reftrackAoiSize__sofia2obs
+/* HouseKeepingDataBase */
+
+#endif 
+
+**********************************************
+*************** obs to load ******************
+**********************************************
+
+INT_VAR mir_rxport %12d
+mir_rxport
+0
+! Load receiver port (left/right=0/1)
+OBS2LOAD_FILE | OBS2LOAD_WRITE | OBS2LOAD_READ \anchor mir_rxport__obs2load
+/* HouseKeepingDataBase */
+
+INT_VAR mir_hotcold %12d
+mir_hotcold
+0
+! Load (hot/cold=0/1)
+OBS2LOAD_FILE | OBS2LOAD_WRITE | K_SET_OBS_LOAD OBS2LOAD_READ READ_IF_INTENSITY \anchor mir_hotcold__obs2load
+/* HouseKeepingDataBase */
+
+INT_VAR mir_skyload %12d
+mir_skyload
+0
+! Load sky (sky/load=0/1)
+OBS2LOAD_FILE | OBS2LOAD_WRITE | K_SET_OBS_LOAD OBS2LOAD_READ READ_IF_INTENSITY \anchor mir_skyload__obs2load
+/* HouseKeepingDataBase */
+
+INT_VAR mir_cookie %12d
+mir_cookie
+0
+! Load Cookie
+OBS2LOAD_FILE | OBS2LOAD_WRITE | K_SET_OBS_LOAD OBS2LOAD_READ \anchor mir_cookie__obs2load
+/* HouseKeepingDataBase */
+
+#if defined(OBS_NANTEN2)
+
+INT_VAR loadblade_hotcold %12d
+loadblade_hotcold
+1
+! control for extra load blade on NANTEN2/SMART (hot/cold=0/1)
+OBS2LOADBLADE_FILE | OBS2LOADBLADE_WRITE | K_SET_OBS_LOAD OBS2LOADBLADE_READ READ_IF_INTENSITY \anchor loadblade_hotcold__obs2loadblade
+/* HouseKeepingDataBase */
+
+INT_VAR loadblade_cookie %12d
+loadblade_cookie
+0
+! Loadblade Cookie
+OBS2LOADBLADE_FILE | OBS2LOADBLADE_WRITE | K_SET_OBS_LOAD OBS2LOADBLADE_READ \anchor loadblade_hotcold__obs2loadblade
+#endif
+
+**********************************************
+*************** load to obs ******************
+**********************************************
+INT_VAR mir_retcookie %12d
+mir_retcookie
+0
+! Return value of Load Cookie
+LOAD2OBS_FILE | LOAD2OBS_WRITE | LOAD2OBS_READ LOAD2OBS_K_SET \anchor mir_retcookie__load2obs
+
+INT_VAR mir_status %12d
+mir_status
+0
+! Load status (okay=1)
+LOAD2OBS_FILE | LOAD2OBS_WRITE | LOAD2OBS_READ LOAD2OBS_K_SET \anchor mir_status__load2obs
+
+#if defined(OBS_NANTEN2)
+
+INT_VAR loadblade_retcookie %12d
+loadblade_retcookie
+0
+! Return value of Loadblade Cookie
+LOADBLADE2OBS_FILE | LOADBLADE2OBS_WRITE | LOADBLADE2OBS_READ \anchor loadblade_retcookie_loadblade2obs
+
+INT_VAR loadblade_status %12d
+loadblade_status
+-1
+! loadblade_status (-2 off, -1 error, 0 unknown, 1 ok)
+LOADBLADE2OBS_FILE | LOADBLADE2OBS_WRITE | K_SET_OBS_LOAD LOADBLADE2OBS_READ READ_IF_INTENSITY \anchor loadblade_status_loadblade2obs
+/* HouseKeepingDataBase */
+#endif
+
+****************************
+****** load temperatures ***
+****************************
+
+INT_VAR load_n_rx %d
+N_RX
+NRX
+! Number of available RXs
+NULL | | LOADTEMP2OBS_WRITE LOADTEMP2OBS_READ 
+/* HouseKeepingDataBase */
+
+INT_VAR n_loadtemp_max %d
+n_load_temp_max
+NLOADT
+! maximum number of load temperature frequency points
+NULL | | LOADTEMP2OBS_WRITE LOADTEMP2OBS_READ
+/* HouseKeepingDataBase */
+
+INT_VAR n_loadtemp %d
+n_load_temp
+0
+! number of load temperature frequency points (=0 no frequency dependent array handling)
+LOADTEMP2OBS_FILE | LOADTEMP2OBS_WRITE | LOADTEMP2OBS_READ
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR tloadambient_physical[NRX] %f
+tloadambient_physical
+270.
+! physical ambient load temperature for rx_channel [K]
+LOADTEMP2OBS_FILE | LOADTEMP2OBS_WRITE | LOADTEMP2OBS_READ
+/* HouseKeepingDataBase */
+ 
+DOUBLE_VAR fambient_load[NRX] %f
+fambient_load
+0.0
+! ambient load filling factor for rx_channel 
+LOADTEMP2OBS_FILE | LOADTEMP2OBS_WRITE | LOADTEMP2OBS_READ
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR load_frequ[NLOADT] %f
+load_frequ
+0.
+! frequency values at frequency points [MHz]
+LOADTEMP2OBS_FILE | LOADTEMP2OBS_WRITE | LOADTEMP2OBS_READ
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR thot_frequ[NLOADT] %f
+thot_frequ
+270.
+! hot load radiative temperature at frequency points  [K]
+LOADTEMP2OBS_FILE | LOADTEMP2OBS_WRITE | LOADTEMP2OBS_READ
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR tcold_frequ[NLOADT] %f
+tcold_frequ
+77.
+! cold load radiative temperature at frequency points [K]
+LOADTEMP2OBS_FILE | LOADTEMP2OBS_WRITE | LOADTEMP2OBS_READ
+/* HouseKeepingDataBase */
+
+STRING_VAR tload_rxarray[NLOADT] %s
+tload_rxarray
+NULL
+! array or rx (=pixel) -name of frequency point (matching hardware setup strings)
+LOADTEMP2OBS_FILE | LOADTEMP2OBS_WRITE | LOADTEMP2OBS_READ
+/* HouseKeepingDataBase */
+
+
+DOUBLE_VAR thot_usb[NRX] %5.4f
+thot_usb
+-1.
+! hot load usb physical temperature for rx channel [K]
+LOADTEMP2OBS_FILE | LOADTEMP2OBS_WRITE | LOADTEMP2OBS_READ \anchor thot_usb__loadtemp2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR thot_lsb[NRX] %5.4f
+thot_lsb
+-1.
+! hot load lsb physical temperature for rx channel [K]
+LOADTEMP2OBS_FILE | LOADTEMP2OBS_WRITE | LOADTEMP2OBS_READ \anchor thot_lsb__loadtemp2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR tcold_usb[NRX] %5.4f
+tcold_usb
+-1.
+! cold load usb physical temperature for rx channel [K]
+LOADTEMP2OBS_FILE | LOADTEMP2OBS_WRITE | LOADTEMP2OBS_READ \anchor tcold_usb__loadtemp2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR tcold_lsb[NRX] %5.4f
+tcold_lsb
+-1.
+! cold load lsb physical temperature for rx channel [K]
+LOADTEMP2OBS_FILE | LOADTEMP2OBS_WRITE | LOADTEMP2OBS_READ \anchor tcold_lsb__loadtemp2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR window_transmission[NRX] %5.4f
+window_transmission
+0.5
+! transmission of cold load window for rx channel [K]
+load_hardware.status | | loadtemp_server \anchor window_transmission__load_hardware_status
+/* HouseKeepingDataBase */
+
+#ifndef OBS_CCAT
+**********************************************
+*************** obs to if ********************
+**********************************************
+INT_VAR  if_comb %d
+IF_Comb
+0
+! IF-electronics hardwarebit to enable comb (on=1)
+OBS2IF_FILE | OBS2IF_WRITE | K_SET_OBS_IF OBS2IF_READ  \anchor IF_comb__obs2if
+if2rx | OBS2IF_READ | rx
+/* HouseKeepingDataBase */
+
+INT_VAR  if_zero %d
+IF_Zero
+0
+! IF-electronics hardwarebit to enable zero (on=1)
+OBS2IF_FILE | OBS2IF_WRITE | K_SET_OBS_IF OBS2IF_READ  \anchor IF_zero__obs2if
+if2rx | OBS2IF_READ | rx
+/* HouseKeepingDataBase */
+
+INT_VAR  if_cookie %d
+IF_Cookie
+0
+! cookie for IF-electronics hardwarebits
+OBS2IF_FILE | OBS2IF_WRITE | OBS2IF_READ 
+
+
+**********************************************
+*************** if to obs ********************
+**********************************************
+
+INT_VAR  status_if_comb %d
+Status_IF_Comb
+0
+! status of IF-electronics hardwarebit to enable comb (on=1)
+IF2OBS_FILE | IF2OBS_WRITE  | IF2OBS_READ READ_IF_INTENSITY \anchor Status_IF_Comb__if2obs
+rx2if | rx | RX2OBS_READ
+/* HouseKeepingDataBase */
+
+INT_VAR  status_if_zero %d
+Status_IF_Zero
+0
+! status of IF-electronics hardwarebit to enable zero (on=1)
+IF2OBS_FILE | IF2OBS_WRITE  | IF2OBS_READ READ_IF_INTENSITY \anchor Status_IF_Zero__if2obs
+rx2if | rx | RX2OBS_READ
+/* HouseKeepingDataBase */
+#endif
+
+***************** focal plane stuff *********************
+*********************************************************
+****************** obs to focalplane task ***************
+*********************************************************
+
+DOUBLE_VAR 	rot_source_angle %5.4f
+rot_source_angle
+0.0
+! Source angle offset [deg]
+OBS2FP_FILE | OBS2FP_WRITE | OBS2FP_READ READ_WRITEHEADER \anchor rot_source_angle__obs2fp
+/* HouseKeepingDataBase */
+
+#if defined (OBS_SOFIA)
+INT_VAR	        rot_recenter %1d
+rot_recenter
+0
+! flag for re-centering beam rotator on next update
+OBS2FP_FILE | OBS2FP_WRITE | OBS2FP_READ \anchor rot_recenter__obs2fp
+/* HouseKeepingDataBase */
+#endif
+
+*********************************************************
+****************** focalplane task to obs ***************
+*********************************************************
+
+DOUBLE_VAR	fp_boresight_x	%5.4f
+fp_boresight_x
+0.0
+! x Boresight Offset [mm] of the focalplane tracking position
+FP2OBS_FILE | FP2OBS_WRITE | FP2OBS_READ READ_IF_INTENSITY READ_WRITEHEADER \anchor fp_boresight_x__fp2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	fp_boresight_y	%5.4f
+fp_boresight_y
+0.0
+! y Boresight Offset [mm] of the focalplane tracking position
+FP2OBS_FILE | FP2OBS_WRITE | FP2OBS_READ READ_IF_INTENSITY READ_WRITEHEADER \anchor fp_boresight_y__fp2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	fp_offset_x	%5.4f
+fp_offset_x
+0.0
+! x Focal Plane Pointing Offset (not interactive) [arcsec] of the focalplane tracking position 
+FP2OBS_FILE | FP2OBS_WRITE | FP2OBS_READ READ_IF_INTENSITY READ_WRITEHEADER \anchor fp_offset_x__fp2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	fp_offset_y	%5.4f
+fp_offset_y
+0.0
+! y Focal Plane Pointing Offset (not interactive) [arcsec] of the focalplane tracking position
+FP2OBS_FILE | FP2OBS_WRITE | FP2OBS_READ READ_IF_INTENSITY READ_WRITEHEADER \anchor fp_offset_y__fp2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	fp_angle	%5.4f
+fp_angle
+0.0
+! commanded angle of beam rotator [deg]
+FP2OBS_FILE | FP2OBS_WRITE | FP2OBS_READ READ_BEAMROT READ_WRITEHEADER READ_IF_INTENSITY \anchor fp_angle__fp2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	fp_angle_center  %1s
+fp_angle_center
+N
+! flag to indicate to beam rotator that centering should be performed [Y/N]
+FP2OBS_FILE | FP2OBS_WRITE | READ_BEAMROT READ_WRITEHEADER READ_IF_INTENSITY  \anchor fp_angle_center__fp2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	fp_angle_disable_track	%1s
+fp_angle_disable_track
+N
+! flag to indicate to beam rotator that tracking should be disabled [Y/N]
+FP2OBS_FILE | FP2OBS_WRITE | READ_BEAMROT READ_WRITEHEADER READ_IF_INTENSITY \anchor fp_angle_disable_track__fp2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	fp_reference_tilt	%5.4f
+fp_reference_tilt
+0.0
+! tilt of reference array [deg]
+FP2OBS_FILE | FP2OBS_WRITE | READ_WRITEHEADER READ_IF_INTENSITY \anchor fp_reference_tilt__fp2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	rotator_angle	%12g
+rotator_angle
+0
+! actual position of rotator [deg]
+KOSMA_rotator.status | WRITE_BEAMROT | READ_FOCALPLANE K_SET_OBSERVATORY \anchor rotator_angle__rotator_status
+/* HouseKeepingDataBase */
+
+STRING_VAR    rot_name        %s
+rot_name
+Rotator
+! Name of the rotator
+KOSMA_rotator.status | WRITE_BEAMROT | READ_FOCALPLANE \anchor rot_name__rotator_status
+/* HouseKeepingDataBase */
+
+STRING_VAR    rot_status      %s
+rot_status
+STOP
+! current status of the rotator
+KOSMA_rotator.status | WRITE_BEAMROT | READ_FOCALPLANE K_SET_OBSERVATORY \anchor rot_status__rotator_status
+/* HouseKeepingDataBase */
+
+INT_VAR	rot_inpos	%12d
+rot_inpos
+0
+! 1: Rotator reached position, 0: Rotator not in position
+KOSMA_rotator.status | WRITE_BEAMROT | READ_FOCALPLANE K_SET_OBSERVATORY \anchor rot_inpos__rotator_status
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	fp_angle_diff	%5.4f
+fp_angle_diff
+0.0
+! Deviation from cmd angle (commanded-actual, e.g. if no beam rotator is used) [deg]
+FP2OBS_FILE | FP2OBS_WRITE | FP2OBS_READ READ_WRITEHEADER READ_IF_INTENSITY \anchor fp_angle_diff__fp2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	fp_focal_length	%8.2f
+fp_focal_length
+0.0
+! Focal-Length of the active instrument-telescope configuration [mm]
+FP2OBS_FILE | FP2OBS_WRITE | FP2OBS_READ READ_IF_INTENSITY READ_WRITEHEADER
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	fp_plate_scale	%12.8g
+fp_plate_scale
+0.0
+! plate-scale [arc/mm], read from KOSMA_tel2obs.set and forwarded to other tasks
+FP2OBS_FILE | FP2OBS_WRITE | FP2OBS_READ KOSMA_setoffset setpoint set_upgreat_pointing READ_IF_INTENSITY READ_WRITEHEADER Kset_fpplatescale
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	fp_reference_x	%5.4f
+fp_reference_x
+0.0
+! x Reference Offset in Sky frame [arcsec]
+FP2OBS_FILE | FP2OBS_WRITE | FP2OBS_READ READ_WRITEHEADER \anchor fp_reference_x__fp2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	fp_reference_y	%5.4f
+fp_reference_y
+0.0
+! y Reference Offset in Sky frame [arcsec]
+FP2OBS_FILE | FP2OBS_WRITE | FP2OBS_READ READ_WRITEHEADER \anchor fp_reference_y__fp2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	fp_elax_ref_x	%5.4f
+fp_elax_ref_x
+0.0
+! reference instrument elevation axis, x-offset [arcsec]
+FP2OBS_FILE | FP2OBS_WRITE | FP2OBS_READ READ_WRITEHEADER \anchor fp_elax_ref_x__fp2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	fp_elax_ref_y	%5.4f
+fp_elax_ref_y
+0.0
+! reference instrument elevation axis, y-offset [arcsec]
+FP2OBS_FILE | FP2OBS_WRITE | FP2OBS_READ READ_WRITEHEADER \anchor fp_elax_ref_y__fp2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	fp_rotax_ref_x	%5.4f
+fp_rotax_ref_x
+0.0
+! reference instrument rotator axis, x-offset [arcsec]
+FP2OBS_FILE | FP2OBS_WRITE | FP2OBS_READ READ_WRITEHEADER \anchor fp_rotax_ref_x__fp2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	fp_rotax_ref_y	%5.4f
+fp_rotax_ref_y
+0.0
+! reference instrument rotator axis, y-offset [arcsec]
+FP2OBS_FILE | FP2OBS_WRITE | FP2OBS_READ READ_WRITEHEADER \anchor fp_rotax_ref_y__fp2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	fp_alpha_im	%5.4f
+fp_alpha_im
+0.0
+! instrument mount rotation angle [degree] 
+FP2OBS_FILE | FP2OBS_WRITE | READ_IF_INTENSITY READ_WRITEHEADER \anchor fp_alpha_im__fp2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	fp_xi_s	%5.4f
+fp_xi_s
+0.0
+! source angle (obs coord to telescope reference frame [degree])
+FP2OBS_FILE | FP2OBS_WRITE | READ_IF_INTENSITY READ_WRITEHEADER \anchor fp_xi_s__fp2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	fp_sign_x	%5.4f
+fp_sign_x
+1.0
+! x sign of focal plane system (for conversion from instrument focalplane [mm] -> tel-coordinates [arcsec])
+FP2OBS_FILE | FP2OBS_WRITE | FP2OBS_READ READ_WRITEHEADER \anchor fp_sign_x__fp2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	fp_sign_y	%5.4f
+fp_sign_y
+1.0
+! y sign of focal plane system (for conversion from instrument focalplane [mm]-> tel_coordinates [arcsec])
+FP2OBS_FILE | FP2OBS_WRITE | FP2OBS_READ READ_WRITEHEADER \anchor fp_sign_y__fp2obs
+/* HouseKeepingDataBase */
+
+INT_VAR		fp_cookie	%d
+fp_cookie
+0
+! Focal Plane cookie 
+FP2OBS_FILE | FP2OBS_WRITE | FP2OBS_READ READ_WRITEHEADER \anchor fp_cookie__fp2obs
+
+#if defined (OBS_SOFIA)
+
+*************************************************************
+*** line-of-sight stuff *************************************
+*************************************************************
+
+DOUBLE_VAR los_timing_margin %12g
+los_timing_margin
+5.
+! time margin [seconds] for los_timing (for los-control, los_mode 5)
+los_timing | KOSMA_setCycleDuration | KOSMA_setCycleDuration control_tel \anchor los_timing_margin__los_timing
+
+DOUBLE_VAR length_of_next_observationcycle %12g
+length_of_next_observationcycle
+-1.
+! total length [seconds] of next observation (for los-control, los_mode 5)
+los_timing | KOSMA_setCycleDuration | KOSMA_setCycleDuration control_tel \anchor length_of_next_observationcycle__los_timing
+
+DOUBLE_VAR time_of_writing %f
+time_of_writing
+0.
+! time (Unix sec) of writing duration information (for los-control, los_mode 5)
+los_timing | KOSMA_setCycleDuration | KOSMA_setCycleDuration \anchor time_of_writing__los_timing
+
+INT_VAR los_mode %d
+los_mode
+4
+! los-rewind mode: -1/0/1/2/3/4/5: left/middle/right/2: by vlos from SOFIA/3: calculated/4: automatic margins/5: TO-specified margins
+line_of_sight_and_focus.params | | los_focus_monitor Kset_los_focus_monitor \anchor los_mode__losparms
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR los_limit_range %5.4f
+los_limit_range
+3.0
+! amplitude of allowed range for los degree of freedom (degree)
+line_of_sight_and_focus.params | | los_focus_monitor Kset_los_focus_monitor \anchor los_limit_range__losparms
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR los_limit_margin %5.4f
+los_limit_margin
+0.5
+! margin from los-limit within which to trigger los rewind (degree)
+line_of_sight_and_focus.params | | los_focus_monitor Kset_los_focus_monitor \anchor los_limit_margin__losparms
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR los_rewind_margin %5.4f
+los_rewind_margin
+0.5
+! margin from limit to which to rewind telescope 
+line_of_sight_and_focus.params | | los_focus_monitor Kset_los_focus_monitor \anchor los_rewind_margin__losparms
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR los_sign_master %5.4f
+los_sign_master
+1.
+! sign convention 
+line_of_sight_and_focus.params | | los_focus_monitor \anchor los_sign_master__losparms
+/* HouseKeepingDataBase */
+
+INT_VAR focus_update_mode %d
+focus_update_mode
+2
+! mode for focus update: 1/2: triggered by kosma_translator/triggered by los_focus_monitor
+line_of_sight_and_focus.params | | los_focus_monitor control_tel Kset_los_focus_monitor \anchor focus_update_mode__losparms
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR los_rewind_angle %5.4f
+los_rewind_angle
+0.0
+! los angle to rewind to (degree)
+line_of_sight_and_focus.set | los_focus_monitor | control_tel \anchor los_rewind_angle__losset
+/* HouseKeepingDataBase */
+
+INT_VAR	los_rewind_trigger %d
+los_rewind_trigger
+0
+! trigger for los rewind action (triggers on changed value)
+line_of_sight_and_focus.set | los_focus_monitor | control_tel \anchor los_rewind_trigger__losset
+/* HouseKeepingDataBase */
+
+INT_VAR endtime_obscycle %d
+endtime_obscycle
+1
+! end time (Unix seconcs) of present observation cycle (los-control, los_mode 5)
+control_tel_internal.set | control_tel | control_tel los_focus_monitor 
+/* HouseKeepingDataBase */
+
+INT_VAR endtime_integration %d
+endtime_integration
+1
+! end time (Unix seconcs) of present integration (los-control, los_mode 5)
+control_tel_internal.set | control_tel | control_tel los_focus_monitor
+/* HouseKeepingDataBase */
+
+INT_VAR los_rewind_trigger_old %d
+los_rewind_trigger_old
+0
+! trigger for los rewind action, last setting
+control_tel_internal.set | control_tel | control_tel
+/* HouseKeepingDataBase */
+
+INT_VAR focus_update_trigger_old %d
+focus_update_trigger_old
+0
+! trigger for focus update action, last setting
+control_tel_internal.set | control_tel | control_tel
+/* HouseKeepingDataBase */
+
+INT_VAR	focus_update_trigger %d
+focus_update_trigger
+0
+! trigger for focus update action (triggers on changed value)
+line_of_sight_and_focus.set | los_focus_monitor | control_tel \anchor focus_update_trigger__losset
+/* HouseKeepingDataBase */
+#endif
+
+INT_VAR tel_set_pending %d
+tel_set_pending
+0
+! flag for pending telescope position check
+control_tel_internal.set | control_tel | control_tel
+/* HouseKeepingDataBase */
+
+INT_VAR tel_cookie_sent %d
+tel_cookie_sent
+0
+! last cookie sent to telescope
+control_tel_internal.set | control_tel | control_tel \anchor tel_cookie_sent__internal
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR obs_x_fp_old %f
+obs_x_fp_old
+0
+! focalplane offset in x, last setting
+control_tel_internal.set | control_tel | control_tel
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR obs_y_fp_old %f
+obs_y_fp_old
+0
+! focalplane offset in y, last setting
+control_tel_internal.set | control_tel | control_tel
+/* HouseKeepingDataBase */
+
+************************************************************************************
+*** ephemeris stuff
+************************************************************************************
+
+STRING_VAR	ephem_old_source	%64s
+ephem_old_source
+UNKNOWN
+! old ephemeris source name, storage for control_tel internally between servers
+control_tel_internal.set | control_tel | control_tel
+
+DOUBLE_VAR	ephem_wake_time         %f
+ephem_wake_time
+0.
+! ephemeris wake-up time (unix time stamp) [secs]
+ephem_internal | kephem | kephem \anchor ephem_wake_time__ephem_internal
+
+STRING_VAR	ephem_source		%64s
+ephem_source
+UNKNOWN
+! source name (@ token to mark special objects such as planets, changed to # on success)
+obs2ephem |  control_tel | kephem \anchor ephem_source__obs2ephem
+ephem2obs |  kephem            | control_tel \anchor ephem_source__ephem2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR 	ephem_tolerance		%12.8g
+ephem_tolerance
+2.0
+! ephemeris precision, determins update time [arcsec]
+obs2ephem |  control_tel | control_tel kephem \anchor ephem_tolerance__obs2ephem
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	ephem_lam		%12.8g
+ephem_lam
+0.0
+! first coordinate axis of spherical coordinate system ephem_coord_sys_on [degree]
+ephem2obs | kephem | control_tel \anchor ephem_lam__ephem2obs
+/* HouseKeepingDataBase */
+
+DOUBLE_VAR	ephem_bet		%12.8g
+ephem_bet
+0.0
+! second coordinate axis of spherical coordinate system ephem_coordsys_on [degree]
+ephem2obs | kephem | control_tel \anchor ephem_bet__ephem2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	ephem_coord_sys_on	%32s
+ephem_coord_sys_on
+J2000
+! coordinate system of ephemeris source (eg. J2000, B1950, GALACTIC, HORIZON)
+ephem2obs | kephem | control_tel \anchor ephem_coord_sys_on__ephem2obs
+/* HouseKeepingDataBase */
+
+STRING_VAR	fake_ephem_source_name %32s
+fake_ephem_source_name
+FAK_POLARIS
+! name of fake ephemeris source, e.g. @FAKE_POLARIS (must match ephemeris source name specified with setsource)
+fake_ephem | | kephem Kset_fake_ephem \anchor fake_ephem__fake_ephem_source_name
+
+DOUBLE_VAR	fake_ephem_ra_start	%10.6f
+fake_ephem_ra_start
+37.954517
+! RA (J2000) of fake ephem source start position [degree]
+fake_ephem | | kephem Kset_fake_ephem \anchor fake_ephem__fake_ephem_ra_start
+
+DOUBLE_VAR	fake_ephem_dec_start	%10.6f
+fake_ephem_dec_start
+89.264108
+! Dec (J2000) of fake ephem source start position [degree]
+fake_ephem | | kephem Kset_fake_ephem \anchor fake_ephem__fake_ephem_dec_start
+
+DOUBLE_VAR	fake_ephem_ra_end	%10.6f
+fake_ephem_ra_end
+37.954517
+! RA (J2000) of fake ephem source end position [degree] (option B)
+fake_ephem | | kephem Kset_fake_ephem \anchor fake_ephem__fake_ephem_ra
+
+DOUBLE_VAR	fake_ephem_dec_end	%10.6f
+fake_ephem_dec_end
+89.264108
+! Dec (J2000) of fake ephem source end position [degree] (option B)
+fake_ephem | | kephem Kset_fake_ephem \anchor fake_ephem__fake_ephem_dec
+
+DOUBLE_VAR	fake_ephem_vel	%10.6f
+fake_ephem_vel
+1.
+! ephemeric motion of fake ephem source [arcsec/minute] (option A)
+fake_ephem | | kephem Kset_fake_ephem \anchor fake_ephem__fake_ephem_vel
+
+DOUBLE_VAR	fake_ephem_vangle	%10.6f
+fake_ephem_vangle
+-30.
+! direction of ephemeric motion (cclw from RA) [degree] (option A)
+fake_ephem | | kephem Kset_fake_ephem \anchor fake_ephem__fake_ephem_vangle
+
+DOUBLE_VAR      fake_ephem_start_time   %10.6f
+fake_ephem_start_time
+0.
+! ephemeris interpolation time interval: starttime [unix secs] (option B, <0. --> option A)
+fake_ephem | | kephem Kset_fake_ephem \anchor fake_ephem__fake_ephem_start_time
+
+DOUBLE_VAR      fake_ephem_end_time   %10.6f
+fake_ephem_end_time
+0.
+! ephemeris interpolation time interval: endtime [unix secs] (option B)
+fake_ephem | | kephem Kset_fake_ephem \anchor fake_ephem__fake_ephem_end_time
+
+********************************************************
+************************ ROTATOR ***********************
+********************************************************
+
+INT_VAR       n_rotator       %6d
+n_rotator
+1
+! Number of rotators
+NULL | | READ_BEAMROT
+
+
+#undef NPATTERN
+#undef NLOADT
