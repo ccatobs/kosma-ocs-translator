@@ -307,6 +307,16 @@ class KOSMA_translator:
             input_dict["tel_on_track"] = "N"
             input_dict["tel_lost_track"] = "N"
     
+        # tel_pos_in_range is always Y - no check?
+        # tel_error is always 0 - no check?
+        # tel_error_level is missing - it wipes out of the file
+        # tel_plate_scale is always 1 - I assume not correct. How will provide it?
+        # tel_angle_focalplane is always 0 - cannot be correct!!!
+        # tel_los_act is missing - not needed but should be always set to 0
+        # tel_time_act, tel_time_del is hardcoded (wrong) - tel_time_act could be the time stampe of get_status. tel_time_del should be the time from the start time of the table sent
+        # tel_cmd, tel_act should NOT be the return from the ACU. This is the command sent (no correction, nominal) and + delta from telescope
+        # tel_mjd1 should be UT1 of the same instance to tel_time_act
+        
         #
         self.log.info(f"on track: {input_dict['tel_on_track']} az:{response['Azimuth current position']:3.2f} ele:{response['Elevation current position']:3.2f} cmd_az:{response['Azimuth commanded position']:3.2f} cmd_ele:{response['Elevation commanded position']:3.2f} obs_tolerance: {self.obs_tolerance/3600.0:3.2f} deg ")        
         fmt = "%d-%b-%Y  %H:%I:%S"
@@ -318,6 +328,12 @@ class KOSMA_translator:
     def write_tel2obs_file(self):
         #
         input_dict = self.set_tel2obs_dict()
+        #
+        # TODO: include also KOSMA_ccdpos.sim
+        # get tel_del from status, interpolate input table to its time stamp
+        # op_azm, op_elv,
+        # check the exact definition of op_oazm and op_oelv
+        # add del_tel_tot_azm/elv and rep_azm/elv
         #
         self.log.debug(
             f"writing tel2obs file with obs cookie: {self.tel_return_cookie}"
@@ -706,6 +722,7 @@ def main():
             #)
             continue
         translator.read_obs2tel_file()
+        # TODO: tel_return_cookie is already updated before sending commands!
         if translator.tel_return_cookie == translator.old_tel_return_cookie:
             translator.log.info(
                 f"obs2tel cookie has not changed ({translator.tel_return_cookie}), no action taken"
