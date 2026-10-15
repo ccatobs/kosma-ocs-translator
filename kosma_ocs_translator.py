@@ -75,6 +75,30 @@ def _apply_offset(coord, d_lam_arcsec, d_bet_arcsec, true_angle):
     )
 
 
+def _get_datetime_from_acu_format(day_of_year, year):
+    """
+    Convert the ACU provided time-related variables to datetime.
+    See housekeeping/monitors/acu/monitorAcu.py
+
+    Parameters
+    ----------
+    day_of_year : float
+        Unit in sec
+    year : int
+        Year
+
+    Returns
+    -------
+    t : datatime
+        Corresponding datetime object of the given time
+    """
+
+    date = datetime.datetime(
+        year=year, month=1, day=1) + datetime.timedelta(days=(day_of_year - 1))
+ 
+    return date
+
+
 def ImportKOSMAReadWriteIntoDictionary(files=None, variable=None, update_mod_time=True):
     log = logging.getLogger("kosma-ocs-translator")
     readwrite_dict = {}
@@ -189,6 +213,7 @@ class KOSMA_translator:
         #
         self.tel_return_cookie = 0
         self.old_tel_return_cookie = 0
+        self.next_tel_return_cookie = 0
         self.read_obs2tel_file()
         # get the telescope position from the ocs
         self.ocs.get_telescope_position()
@@ -197,6 +222,8 @@ class KOSMA_translator:
         # Add tracking thread management
         self._track_thread = None
         self._track_stop_event = threading.Event()
+        # Keep the record of the last payload sent.
+        self.last_payload = None
 
     def check_for_obs2tel_update(self):
         # check modification time of obs2tel file and store
@@ -221,8 +248,7 @@ class KOSMA_translator:
         )
         self.obs_tolerance = self.kio_files["KOSMA_obs2tel.set"]["obs_tolerance"]
         self.log.info(f"obs_tolerance set to {self.obs_tolerance} arcseconds")
-        self.old_tel_return_cookie = self.tel_return_cookie
-        self.tel_return_cookie = self.kio_files["KOSMA_obs2tel.set"]["obs_cookie"]
+        self.next_tel_return_cookie = self.kio_files["KOSMA_obs2tel.set"]["obs_cookie"]
         self.obs_tel_info_update_time = self.kio_files["KOSMA_obs2tel.set"][
             "obs_tel_info_update_time"
         ]
@@ -276,10 +302,6 @@ class KOSMA_translator:
     def set_tel2obs_dict(self):
         response = self.ocs.get_status()
         input_dict = {}
-        input_dict["tel_azm_act"] = response["Azimuth current position"]
-        input_dict["tel_elv_act"] = response["Elevation current position"]
-        input_dict["tel_azm_cmd"] = response["Azimuth commanded position"]
-        input_dict["tel_elv_cmd"] = response["Elevation commanded position"]
         input_dict["tel_latitude"] = self.ocs.earth_location.lat.deg
         input_dict["tel_longitude"] = self.ocs.earth_location.lon.deg
         input_dict["tel_altitude"] = self.ocs.earth_location.height.to(u.m).value
@@ -296,9 +318,12 @@ class KOSMA_translator:
         current_ele = response["Elevation current position"]
         cmd_azi = response["Azimuth commanded position"]
         cmd_ele = response["Elevation commanded position"]
-        actdiff = (
-            3600 * ((current_azi - cmd_azi) ** 2 + (current_ele - cmd_ele) ** 2) ** 0.5
-        )
+        acu_azm_del = current_azi - cmd_azi
+        acu_elv_del = current_ele - cmd_ele
+
+        # TODO: this one need a cos correction!
+        actdiff = 3600 * (acu_azm_del**2 + acu_elv_del**2) ** 0.5
+
         if actdiff < self.obs_tolerance:
             input_dict["tel_pos_in_range"] = "Y"
             input_dict["tel_on_track"] = "Y"
@@ -306,7 +331,27 @@ class KOSMA_translator:
             input_dict["tel_pos_in_range"] = "Y"
             input_dict["tel_on_track"] = "N"
             input_dict["tel_lost_track"] = "N"
-    
+
+        acu_azm_act = response["Azimuth current position"]
+        acu_elv_act = response["Elevation current position"]
+        acu_azm_cmd = response["Azimuth commanded position"]
+        acu_elv_cmd = response["Elevation commanded position"]
+
+        if self.last_payload is not None:
+            day_of_year = response["Time"]
+            year = response["Year"]
+            status_time = _get_datetime_from_acu_format(day_of_year, year)
+
+            t0 = self.last_payload["start_time"]
+            pts = np.array(self.last_payload["points"])   # shape (N, 5): dt, az, el, vaz, vel
+            t_rel = status_time - t0
+            input_dict["tel_azm_cmd"] = np.interp(t_rel, pts[:, 0], pts[:, 1])
+            input_dict["tel_elv_cmd"] = np.interp(t_rel, pts[:, 0], pts[:, 2])
+            input_dict["tel_azm_act"] = input_dict["tel_azm_cmd"] + acu_azm_del
+            input_dict["tel_elv_act"] = input_dict["tel_elv_cmd"] + acu_elv_del
+        else:
+            # TODO: what if there is no last_payload?
+
         # tel_pos_in_range is always Y - no check?
         # tel_error is always 0 - no check?
         # tel_error_level is missing - it wipes out of the file
@@ -465,6 +510,9 @@ class KOSMA_translator:
                 cmd_az = coord.az.deg
                 cmd_el = coord.alt.deg
             self.ocs.move_to(cmd_az, cmd_el)
+
+            # include the response check and update cookie/cmd values recording
+
             return
 
         # non-HORIZON source: make into an astropy coordinate object,
@@ -576,10 +624,20 @@ class KOSMA_translator:
             # TODO: find out the way to pass obs_wavelength together with payload
             response = self.ocs.scan_pattern(
                 data=payload, stop_event=self._track_stop_event)
-            self.log.info(f"scan pattern response: {response}")
+            body = response.json()
+            if response.status_code != 200 or body.get("status") != "ok":
+                self.log.error(
+                    f"scan_pattern rejected: HTTP {response.status_code}, "
+                    f"status={body.get('status')}, message={body.get('message')}"
+                )
+                self.last_payload = payload
+                self.old_tel_return_cookie = self.tel_return_cookie
+                self.tel_return_cookie = self.next_tel_return_cookie
+
+            else:
+                self.log.info(f"scan_pattern accepted: {body}")
         except Exception as e:
             self.log.error(f"Track error: {e}")
-
 
     def stop_track(self):
         if self._track_thread and self._track_thread.is_alive():
@@ -592,6 +650,7 @@ class KOSMA_translator:
             self.log.info("Track thread stopped")
 
             self._track_thread = None
+
 
 def setup_logging(log_level):
     # setup logging to file and to screen
@@ -723,7 +782,7 @@ def main():
             continue
         translator.read_obs2tel_file()
         # TODO: tel_return_cookie is already updated before sending commands!
-        if translator.tel_return_cookie == translator.old_tel_return_cookie:
+        if translator.tel_return_cookie == translator.next_tel_return_cookie:
             translator.log.info(
                 f"obs2tel cookie has not changed ({translator.tel_return_cookie}), no action taken"
             )
