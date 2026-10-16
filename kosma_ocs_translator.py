@@ -275,44 +275,51 @@ class KOSMA_translator:
     def load_tel2obs_template(self):
         self.tel2obs = """
         {0[timestring]}  {0[timestamp]}   File update time stamp   ! ccat_translator (test_computer:1000)
-        EMU_   tel_telescope   ! Telescope Identifier (for display and backend_name in FITS header)
+        {0[tel_telescope]}   tel_telescope   ! Telescope Identifier (for display and backend_name in FITS header)
         {0[tel_on_track]}   tel_on_track   ! Y if tracking on commanded position/track within tolerance [Y/N]
         {0[tel_lost_track]}   tel_lost_track   ! Y if tracking got beyond tolerance since start of track [Y/N]
         {0[tel_pos_in_range]}   tel_pos_in_range   ! Y if commanded position is within telescope range [Y/N]
-                0   tel_error   ! flags telescope command syntax/consistency and functional errors (=0: ok)
+        {0[tel_error]}   tel_error   ! flags telescope command syntax/consistency and functional errors (=0: ok)
         NONE   tel_error_string   ! Error message associated with telescope command (=NONE: OK)
-                5   tel_error_level   ! Error level for message in tel_error_string [1: trace, 2: debug, 4: info, 5: message, 7: warn, 8: error, 9: fatal]
+        5   tel_error_level   ! Error level for message in tel_error_string [1: trace, 2: debug, 4: info, 5: message, 7: warn, 8: error, 9: fatal]
             {0[tel_return_cookie]}  tel_return_cookie   ! return cookie to identify proper observation
             {0[tel_plate_scale]}  tel_plate_scale   ! plate scale of focal plane [arcsec/mm]
             {0[tel_latitude]}   tel_latitude   ! latitude of observatory (needed for Doppler correction) [degree]
             {0[tel_longitude]}  tel_longitude   ! longitude of observatory (needed for Doppler correction) [degree, +west (astronomical notation)]
             {0[tel_altitude]}  tel_altitude   ! height above sea level (needed for Doppler correction) [meter]
             {0[tel_angle_focal_plane]}   tel_angle_focal_plane   ! ccw angle from second coordinate of the telescope reference coordinate system (TARF,HORIZON) to second coordinate of obs_coord_sys_del [degree]
-        #           0   tel_los_act   ! actual los-angle [degree]
-        #    1557237163.99149   tel_time_act   ! time when status data were valid [seconds since 1970 UTC]
-        #   87.091738   tel_time_del   ! time since start of track (may be negative, if start in the future) [seconds]
+                 0   tel_los_act   ! actual los-angle [degree]
+        {0[tel_time_act]}   tel_time_act   ! time when status data were valid [seconds since 1970 UTC]
+        {0[tel_time_del]}   tel_time_del   ! time since start of track (may be negative, if start in the future) [seconds]
         {0[tel_azm_cmd]:3.4f}   tel_azm_cmd   ! commanded azimuth (for tracking display) [degree,cw toward east]
         {0[tel_elv_cmd]:3.4f}   tel_elv_cmd   ! commanded elevation (for tracking display and for atmospheric calibration) [degree]
         {0[tel_azm_act]:3.4f}   tel_azm_act   ! actual azimuth (for tracking display) [degree,cw toward east]
         {0[tel_elv_act]:3.4f}   tel_elv_act   ! actual elevation (for tracking display) [degree]
         {0[tel_supports_ephemeris]}   tel_supports_ephemeris   ! Telescope supports ephemeris tracking [Y/N] !
-        0.0    tel_mjd1 ! MJD of integer part of current time [days] 
+        {0[tel_mjd1]}    tel_mjd1 ! MJD of integer part of current time [days] 
         """
 
     def set_tel2obs_dict(self):
         response = self.ocs.get_status()
         input_dict = {}
+
+        # Fixed values 
         input_dict["tel_latitude"] = self.ocs.earth_location.lat.deg
         input_dict["tel_longitude"] = self.ocs.earth_location.lon.deg
         input_dict["tel_altitude"] = self.ocs.earth_location.height.to(u.m).value
         input_dict["tel_telescope"] = "CCAT"
-        input_dict["tel_plate_scale"] = "1"
-        input_dict["tel_angle_focal_plane"] = 0.0
-        input_dict["tel_on_track"] = "N"
-        input_dict["tel_lost_track"] = "N"
-        input_dict["tel_return_cookie"] = self.tel_return_cookie
-        input_dict["tel_error"] = "0"
         input_dict["tel_supports_ephemeris"] = "N"
+
+        # values set elsewhere
+        input_dict["tel_return_cookie"] = self.tel_return_cookie
+        # TODO create self.tel_error and use it
+        input_dict["tel_error"] = "0"
+
+        # TODO check where tel_plate_scale comes from and whether it is constant for CCAT
+        input_dict["tel_plate_scale"] = "1"
+
+        # TODO: calculate angle correctly
+        input_dict["tel_angle_focal_plane"] = 0.0
         #
         current_azi = response["Azimuth current position"]
         current_ele = response["Elevation current position"]
@@ -324,6 +331,11 @@ class KOSMA_translator:
         # TODO: this one need a cos correction!
         actdiff = 3600 * (acu_azm_del**2 + acu_elv_del**2) ** 0.5
 
+        # TODO: initialization does not make sense
+        #       tel_lost_track should be kept during the same cookie 
+        #       initialize to "N" only after cookie changes
+        input_dict["tel_on_track"] = "N"
+        input_dict["tel_lost_track"] = "N"
         if actdiff < self.obs_tolerance:
             input_dict["tel_pos_in_range"] = "Y"
             input_dict["tel_on_track"] = "Y"
@@ -331,6 +343,9 @@ class KOSMA_translator:
             input_dict["tel_pos_in_range"] = "Y"
             input_dict["tel_on_track"] = "N"
             input_dict["tel_lost_track"] = "N"
+
+        # TODO check whether tel_pos_in_range should be always "Y" or it should get
+        # some info from the input side
 
         acu_azm_act = response["Azimuth current position"]
         acu_elv_act = response["Elevation current position"]
@@ -352,12 +367,6 @@ class KOSMA_translator:
         else:
             # TODO: what if there is no last_payload?
 
-        # tel_pos_in_range is always Y - no check?
-        # tel_error is always 0 - no check?
-        # tel_error_level is missing - it wipes out of the file
-        # tel_plate_scale is always 1 - I assume not correct. How will provide it?
-        # tel_angle_focalplane is always 0 - cannot be correct!!!
-        # tel_los_act is missing - not needed but should be always set to 0
         # tel_time_act, tel_time_del is hardcoded (wrong) - tel_time_act could be the time stampe of get_status. tel_time_del should be the time from the start time of the table sent
         # tel_cmd, tel_act should NOT be the return from the ACU. This is the command sent (no correction, nominal) and + delta from telescope
         # tel_mjd1 should be UT1 of the same instance to tel_time_act
@@ -630,14 +639,15 @@ class KOSMA_translator:
                     f"scan_pattern rejected: HTTP {response.status_code}, "
                     f"status={body.get('status')}, message={body.get('message')}"
                 )
+                # TODO populate self.tel_error for the new cookie
+            else:
+                self.log.info(f"scan_pattern accepted: {body}")
                 self.last_payload = payload
                 self.old_tel_return_cookie = self.tel_return_cookie
                 self.tel_return_cookie = self.next_tel_return_cookie
-
-            else:
-                self.log.info(f"scan_pattern accepted: {body}")
         except Exception as e:
             self.log.error(f"Track error: {e}")
+            # TODO populate self.tel_error for the new cookie
 
     def stop_track(self):
         if self._track_thread and self._track_thread.is_alive():
