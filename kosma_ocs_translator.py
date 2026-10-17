@@ -75,10 +75,12 @@ def _apply_offset(coord, d_lam_arcsec, d_bet_arcsec, true_angle):
     )
 
 
-def _get_datetime_from_acu_format(day_of_year, year):
+def _get_time_from_acu_format(day_of_year, year):
     """
     Convert the ACU provided time-related variables to datetime.
-    See housekeeping/monitors/acu/monitorAcu.py
+    Input is assumed to be in UTC.
+    Used the same logic as housekeeping/monitors/acu/monitorAcu.py
+    but with astropy.time instead of datetime
 
     Parameters
     ----------
@@ -89,14 +91,13 @@ def _get_datetime_from_acu_format(day_of_year, year):
 
     Returns
     -------
-    t : datatime
-        Corresponding datetime object of the given time
+    t : astopy.time.Time
+        Corresponding Time object of the given time
     """
 
-    date = datetime.datetime(
-        year=year, month=1, day=1) + datetime.timedelta(days=(day_of_year - 1))
+    t = Time(f"{year}-01-01", format="iso", scale="utc") + (day_of_year - 1) * u.day
  
-    return date
+    return t
 
 
 def ImportKOSMAReadWriteIntoDictionary(files=None, variable=None, update_mod_time=True):
@@ -210,10 +211,12 @@ class KOSMA_translator:
         self.log.info(f"Using KOSMA ReadWrite directory: {self.read_write_dir}")
         #
         self.load_tel2obs_template()
+        self.load_ccdpossim_template()
         #
         self.tel_return_cookie = 0
         self.old_tel_return_cookie = 0
         self.next_tel_return_cookie = 0
+        self.tel_error = 0
         self.read_obs2tel_file()
         # get the telescope position from the ocs
         self.ocs.get_telescope_position()
@@ -222,8 +225,9 @@ class KOSMA_translator:
         # Add tracking thread management
         self._track_thread = None
         self._track_stop_event = threading.Event()
-        # Keep the record of the last payload sent.
+        # Keep the record of the last payload and corresponding obs2tel
         self.last_payload = None
+        self.last_obs2tel = None
 
     def check_for_obs2tel_update(self):
         # check modification time of obs2tel file and store
@@ -299,11 +303,34 @@ class KOSMA_translator:
         {0[tel_mjd1]}    tel_mjd1 ! MJD of integer part of current time [days] 
         """
 
+    def load_ccdpossim_template(self):
+        self.ccdpossim = """
+        {0[timestring]}  {0[timestamp]}   File update time stamp   ! ccat_translator (test_computer:1000)
+        {0[op_azm]}  op_azm   ! azimuth [radian] for optical pointing (commanded to telescope, without pointing model corrections)
+        {0[op_elv]}  op_elv   ! elevatin [radian] for optical pointing (commanded to telescope, without pointing model corrections)
+        {0[op_oazm]}  op_oazm   ! azimuth pointing offset [rad]; optical pointing (HORIZON system)
+        {0[op_oelv]}  op_oelv   ! elevation pointing offset [rad]; optical pointing (HORIZON system)
+        {0[del_tel_tot_azm]}   del_tel_tot_azm   ! azimuth  pointing offset [rad] from telescope pointing model (including non repeatable terms)
+        {0[del_tel_tot_elv]}   del_tel_tot_elv   ! elevation pointing offset [rad] from telescope pointing model (including non repeatable terms)
+        {0[del_tel_rep_azm]}   del_tel_rep_azm   ! azimuth  pointing offset [rad] from telescope pointing model (only repeatable terms)
+        {0[del_tel_rep_elv]}   del_tel_rep_elv   ! elevation pointing offset [rad] from telescope pointing model (only repeatable terms)
+        """
+
     def set_tel2obs_dict(self):
+        """
+        Set dictionary of KOSMA_tel2obs and KOSMA_ccdpos.sim
+        """
+
+        if self.last_payload is None or self.last_obs2tel is None:
+            self.log.info('No record of successfully sent command to telescope. Wait...')
+            return
+
         response = self.ocs.get_status()
         input_dict = {}
+        ccd_input_dict = {}
 
         # Fixed values 
+        input_dict["tel_pos_in_range"] = "Y"     # practically not used
         input_dict["tel_latitude"] = self.ocs.earth_location.lat.deg
         input_dict["tel_longitude"] = self.ocs.earth_location.lon.deg
         input_dict["tel_altitude"] = self.ocs.earth_location.height.to(u.m).value
@@ -312,15 +339,11 @@ class KOSMA_translator:
 
         # values set elsewhere
         input_dict["tel_return_cookie"] = self.tel_return_cookie
-        # TODO create self.tel_error and use it
-        input_dict["tel_error"] = "0"
+        input_dict["tel_error"] = self.tel_error
 
         # TODO check where tel_plate_scale comes from and whether it is constant for CCAT
         input_dict["tel_plate_scale"] = "1"
 
-        # TODO: calculate angle correctly
-        input_dict["tel_angle_focal_plane"] = 0.0
-        #
         current_azi = response["Azimuth current position"]
         current_ele = response["Elevation current position"]
         cmd_azi = response["Azimuth commanded position"]
@@ -328,8 +351,7 @@ class KOSMA_translator:
         acu_azm_del = current_azi - cmd_azi
         acu_elv_del = current_ele - cmd_ele
 
-        # TODO: this one need a cos correction!
-        actdiff = 3600 * (acu_azm_del**2 + acu_elv_del**2) ** 0.5
+        actdiff = 3600 * ((acu_azm_del*np.cos(np.dec2rad(cmd_azi))**2 + acu_elv_del**2) ** 0.5
 
         # TODO: initialization does not make sense
         #       tel_lost_track should be kept during the same cookie 
@@ -337,65 +359,112 @@ class KOSMA_translator:
         input_dict["tel_on_track"] = "N"
         input_dict["tel_lost_track"] = "N"
         if actdiff < self.obs_tolerance:
-            input_dict["tel_pos_in_range"] = "Y"
             input_dict["tel_on_track"] = "Y"
         else:
-            input_dict["tel_pos_in_range"] = "Y"
             input_dict["tel_on_track"] = "N"
             input_dict["tel_lost_track"] = "N"
 
-        # TODO check whether tel_pos_in_range should be always "Y" or it should get
-        # some info from the input side
+        # commanded and actual positions and timestamp
+        day_of_year = response["Time"]
+        year = response["Year"]
+        status_time = _get_time_from_acu_format(day_of_year, year)
+        # time stamp of the status
+        input_dict["tel_time_act"] = status_time.unix
+        input_dict["tel_mjd1"] = status_time.ut1
 
-        acu_azm_act = response["Azimuth current position"]
-        acu_elv_act = response["Elevation current position"]
-        acu_azm_cmd = response["Azimuth commanded position"]
-        acu_elv_cmd = response["Elevation commanded position"]
+        t0 = self.last_payload["start_time"]
+        pts = np.array(self.last_payload["points"])   # shape (N, 5): dt, az, el, vaz, vel
+        # time of the status since the start time of the table sent
+        t_rel = status_time - t0
+        input_dict["tel_time_del"] = t_rel
 
-        if self.last_payload is not None:
-            day_of_year = response["Time"]
-            year = response["Year"]
-            status_time = _get_datetime_from_acu_format(day_of_year, year)
+        # TODO: apply refraction correction to tel_elev_cmd
+        input_dict["tel_azm_cmd"] = np.interp(t_rel, pts[:, 0], pts[:, 1])
+        input_dict["tel_elv_cmd"] = np.interp(t_rel, pts[:, 0], pts[:, 2])
+        input_dict["tel_azm_act"] = input_dict["tel_azm_cmd"] + acu_azm_del
+        input_dict["tel_elv_act"] = input_dict["tel_elv_cmd"] + acu_elv_del
 
-            t0 = self.last_payload["start_time"]
-            pts = np.array(self.last_payload["points"])   # shape (N, 5): dt, az, el, vaz, vel
-            t_rel = status_time - t0
-            input_dict["tel_azm_cmd"] = np.interp(t_rel, pts[:, 0], pts[:, 1])
-            input_dict["tel_elv_cmd"] = np.interp(t_rel, pts[:, 0], pts[:, 2])
-            input_dict["tel_azm_act"] = input_dict["tel_azm_cmd"] + acu_azm_del
-            input_dict["tel_elv_act"] = input_dict["tel_elv_cmd"] + acu_elv_del
+        # TODO: careful check of signs and definitions
+        cmd_coord_sys_on = self.last_obs2tel["obs_coord_sys_on"]
+        if cmd_coord_sys_on == "HORIZON":
+            input_dict["tel_angle_focal_plane"] = 0.0
         else:
-            # TODO: what if there is no last_payload?
+            # calculation is needed
+            altaz_frame = AltAz(obstime=status_time, location=self.ocs.earth_location)
 
-        # tel_time_act, tel_time_del is hardcoded (wrong) - tel_time_act could be the time stampe of get_status. tel_time_del should be the time from the start time of the table sent
-        # tel_cmd, tel_act should NOT be the return from the ACU. This is the command sent (no correction, nominal) and + delta from telescope
-        # tel_mjd1 should be UT1 of the same instance to tel_time_act
+            pos = SkyCoord(
+                az=input_dict["tel_azm_cmd"], alt=input_dict["tel_azm_cmd"], unit='deg')
+
+            epsilon = 1e-3  # about 4 arcsec, small angle approximation is sufficient
+            north = _apply_offset(
+                pos.transform_to(cmd_cood_sys_map[cood_sys_on]), 0, epsilon, 'Y')
+            ).transform_to(altaz_frame)
+            
+            angle = np.arctan2(
+                north.alt.deg - pos.alt.deg,
+                (north.az.deg - pos.az.deg) * np.cos(pos.alt.rad)
+            )
+            tel_angle_focal_plane = np.rad2deg(angle) - 90.   # from second axis in degrees
+            if tel_angle_focal_plane < -180:
+                tel_angle_focal_plane += 360.
+
+            input_dict["tel_angle_focal_plane"] = tel_angle_focal_plane
+
+        self.log.info(f"on track: {input_dict['tel_on_track']} az:{input_dict['tel_azm_act']:3.2f} ele:{input_dict['tel_elv_act']:3.2f} cmd_az:{input_dict['tel_azm_cmd']:3.2f} cmd_ele:{input_dict['tel_elev_cmd']:3.2f} obs_tolerance: {self.obs_tolerance/3600.0:3.2f} deg ")        
+
+        # write KOSMA_ccdpos.sim for optical pointing
+        if float(self.last_obs2tel["obs_wavelength"]) < 10:
+            if_write_ccdpossim = True
+        else:
+            if_write_ccdpossim = False
+
+        if if_write_ccdpossim:
+            # TODO: implement this on OCS and TCS
+            response_pointing = self.ocs.get_cmd_pointing()
+            
+            spem_azm = response_pointing["SPEM correction AZ"]
+            spem_elv = response_pointing["SPEM correction EL"]
+            tilt1_azm = response_pointing["Tiltmeter Az correction AZ"]
+            tilt2_azm = response_pointing["Tiltmeter El correction AZ"]
+            tilt1_elv = response_pointing["Tiltmeter Az correction EL"]
+            tilt2_elv = response_pointing["Tiltmeter El correction EL"]
+
+            ccd_input_dict["op_azm"] = np.deg2rad(input_dict["tel_azm_cmd"])
+            ccd_input_dict["op_elv"] = np.deg2rad(input_dict["tel_elv_cmd"])
+
+            ccd_input_dict["op_oazm"] = np.deg2rad(self.last_obs2tel["obs_lam_del"])
+            ccd_input_dict["op_oelv"] = np.deg2rad(self.last_obs2tel["obs_bet_del"])
+
+            ccd_input_dict["del_tel_tot_azm"] = np.deg2rad(spem_azm + tilt1_azm + tilt2_azm)
+            ccd_input_dict["del_tel_tot_elv"] = np.deg2rad(spem_elv + tilt1_elv + tilt2_elv)
+            ccd_input_dict["del_tel_rep_azm"] = np.deg2rad(spem_azm)
+            ccd_input_dict["del_tel_rep_elv"] = np.deg2rad(spem_elv)
         
-        #
-        self.log.info(f"on track: {input_dict['tel_on_track']} az:{response['Azimuth current position']:3.2f} ele:{response['Elevation current position']:3.2f} cmd_az:{response['Azimuth commanded position']:3.2f} cmd_ele:{response['Elevation commanded position']:3.2f} obs_tolerance: {self.obs_tolerance/3600.0:3.2f} deg ")        
         fmt = "%d-%b-%Y  %H:%I:%S"
         current = time.localtime()
         input_dict["timestamp"] = time.time()
         input_dict["timestring"] = date = time.strftime(fmt, current)
-        return input_dict
+
+        if if_write_ccdpossim:
+            ccd_input_dict["timestamp"] = input_dict["timestamp"]
+            ccd_input_dict["timestring"] = input_dict["timestring"]
+
+        return input_dict, ccd_input_dict
 
     def write_tel2obs_file(self):
-        #
-        input_dict = self.set_tel2obs_dict()
-        #
-        # TODO: include also KOSMA_ccdpos.sim
-        # get tel_del from status, interpolate input table to its time stamp
-        # op_azm, op_elv,
-        # check the exact definition of op_oazm and op_oelv
-        # add del_tel_tot_azm/elv and rep_azm/elv
-        #
+        input_dict, ccd_input_dict = self.set_tel2obs_dict()
         self.log.debug(
             f"writing tel2obs file with obs cookie: {self.tel_return_cookie}"
         )
-        tel2obs_handle = open("/net/KOSMA_file_io/ReadWrite/KOSMA_tel2obs.set", "w")
+        tel2obs_handle = open(f"{self.read_write_dir}/KOSMA_tel2obs.set", "w")
         tel2obs_handle.write(self.tel2obs.format(input_dict))
         tel2obs_handle.close()
-        
+
+        if ccd_input_dict:
+            ccdpossim_handle = open(f"{self.read_write_dir}/KOSMA_ccdpos.sim", "w")
+            ccdpossim_handle.write(self.ccdpossim .format(ccd_input_dict))
+            ccdpossim_handle.close()
+
 
     def track(self):
 
@@ -630,24 +699,25 @@ class KOSMA_translator:
         }
 
         try:
-            # TODO: find out the way to pass obs_wavelength together with payload
+            # TODO: find out a way to pass obs_wavelength together with payload
             response = self.ocs.scan_pattern(
                 data=payload, stop_event=self._track_stop_event)
             body = response.json()
+            self.last_payload = payload
+            self.last_obs2tel = self.obs2tel
+            self.old_tel_return_cookie = self.tel_return_cookie
+            self.tel_return_cookie = self.next_tel_return_cookie
             if response.status_code != 200 or body.get("status") != "ok":
                 self.log.error(
                     f"scan_pattern rejected: HTTP {response.status_code}, "
                     f"status={body.get('status')}, message={body.get('message')}"
                 )
-                # TODO populate self.tel_error for the new cookie
+                self.tel_error = response.status_code
             else:
                 self.log.info(f"scan_pattern accepted: {body}")
-                self.last_payload = payload
-                self.old_tel_return_cookie = self.tel_return_cookie
-                self.tel_return_cookie = self.next_tel_return_cookie
         except Exception as e:
             self.log.error(f"Track error: {e}")
-            # TODO populate self.tel_error for the new cookie
+            self.tel_error = 1
 
     def stop_track(self):
         if self._track_thread and self._track_thread.is_alive():
@@ -791,7 +861,6 @@ def main():
             #)
             continue
         translator.read_obs2tel_file()
-        # TODO: tel_return_cookie is already updated before sending commands!
         if translator.tel_return_cookie == translator.next_tel_return_cookie:
             translator.log.info(
                 f"obs2tel cookie has not changed ({translator.tel_return_cookie}), no action taken"
