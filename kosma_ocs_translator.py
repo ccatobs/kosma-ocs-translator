@@ -91,7 +91,7 @@ def _get_time_from_acu_format(day_of_year, year):
 
     Returns
     -------
-    t : astopy.time.Time
+    t : astropy.time.Time
         Corresponding Time object of the given time
     """
 
@@ -132,7 +132,7 @@ def ImportKOSMAReadWriteIntoDictionary(files=None, variable=None, update_mod_tim
         f = open(readwrite_file_full, "r")
         lines = f.readlines()
         f.close()
-        # strip fill path from readwrite_file
+        # strip full path from readwrite_file
         readwrite_file = os.path.basename(readwrite_file_full)
         # create dictionary for each filename
         if readwrite_file not in readwrite_dict.keys():
@@ -165,7 +165,7 @@ def ImportKOSMAReadWriteIntoDictionary(files=None, variable=None, update_mod_tim
                 if result:
                     value, variable_found = result.groups()
             except:
-                result = re.search("\s+(\S+)", data).groups()
+                result = re.search("\s+(\S+)", data)
                 if result:
                     (variable_found,) = result.groups()
                 print("{0} variable found with no value ".format(variable_found))
@@ -183,16 +183,16 @@ def ImportKOSMAReadWriteIntoDictionary(files=None, variable=None, update_mod_tim
             except ValueError:
                 value = value.strip()
             except Exception as e:
-                # includ readwrite_file in error log
+                # include readwrite_file in error log
                 log.error(
                     f"error parsing value {value} for variable {variable_found} from file {readwrite_file}"
                 )
                 log.error(e)
                 continue
             #
-            if (variable != None) & (variable != variable_found):
+            if (variable is not None) and (variable != variable_found):
                 continue
-            if variable not in readwrite_dict[readwrite_file].keys():
+            if variable_found not in readwrite_dict[readwrite_file]:
                 readwrite_dict[readwrite_file][variable_found] = value
     # remove entries that just have a timestamp and no variable values
     # for
@@ -238,7 +238,6 @@ class KOSMA_translator:
         if not hasattr(self, "obs2tel_mod_time"):
             self.obs2tel_mod_time = current_mod_time
             return False
-        current_mod_time = os.path.getmtime(f"{self.read_write_dir}/KOSMA_obs2tel.set")
         if current_mod_time > self.obs2tel_mod_time:
             self.obs2tel_mod_time = current_mod_time
             return True
@@ -353,7 +352,7 @@ class KOSMA_translator:
         acu_azm_del = current_azi - cmd_azi
         acu_elv_del = current_ele - cmd_ele
 
-        actdiff = 3600 * ((acu_azm_del*np.cos(np.dec2rad(cmd_azi)))**2 + acu_elv_del**2) ** 0.5
+        actdiff = 3600 * ((acu_azm_del*np.cos(np.deg2rad(cmd_ele)))**2 + acu_elv_del**2) ** 0.5
 
         if actdiff < self.obs_tolerance:
             input_dict["tel_on_track"] = "Y"
@@ -373,7 +372,7 @@ class KOSMA_translator:
         t0 = self.last_payload["start_time"]
         pts = np.array(self.last_payload["points"])   # shape (N, 5): dt, az, el, vaz, vel
         # time of the status since the start time of the table sent
-        t_rel = status_time - t0
+        t_rel = status_time.unix - t0
         input_dict["tel_time_del"] = t_rel
 
         # TODO: apply refraction correction to tel_elev_cmd
@@ -391,11 +390,11 @@ class KOSMA_translator:
             altaz_frame = AltAz(obstime=status_time, location=self.ocs.earth_location)
 
             pos = SkyCoord(
-                az=input_dict["tel_azm_cmd"], alt=input_dict["tel_azm_cmd"], unit='deg')
+                az=input_dict["tel_azm_cmd"], alt=input_dict["tel_elv_cmd"], unit='deg')
 
             epsilon = 1e-3  # about 4 arcsec, small angle approximation is sufficient
             north = _apply_offset(
-                pos.transform_to(cmd_cood_sys_map[cood_sys_on]), 0, epsilon, 'Y')
+                pos.transform_to(coord_sys_map[cmd_coord_sys_on]), 0, epsilon, 'Y'
             ).transform_to(altaz_frame)
             
             angle = np.arctan2(
@@ -408,7 +407,7 @@ class KOSMA_translator:
 
             input_dict["tel_angle_focal_plane"] = tel_angle_focal_plane
 
-        self.log.info(f"on track: {input_dict['tel_on_track']} az:{input_dict['tel_azm_act']:3.2f} ele:{input_dict['tel_elv_act']:3.2f} cmd_az:{input_dict['tel_azm_cmd']:3.2f} cmd_ele:{input_dict['tel_elev_cmd']:3.2f} obs_tolerance: {self.obs_tolerance/3600.0:3.2f} deg ")        
+        self.log.info(f"on track: {input_dict['tel_on_track']} az:{input_dict['tel_azm_act']:3.2f} ele:{input_dict['tel_elv_act']:3.2f} cmd_az:{input_dict['tel_azm_cmd']:3.2f} cmd_ele:{input_dict['tel_elv_cmd']:3.2f} obs_tolerance: {self.obs_tolerance/3600.0:3.2f} deg ")        
 
         # write KOSMA_ccdpos.sim for optical pointing and debugging
         # if float(self.last_obs2tel["obs_wavelength"]) < 10:
@@ -442,7 +441,7 @@ class KOSMA_translator:
         ccd_input_dict["del_tel_rep_azm"] = np.deg2rad(spem_azm)
         ccd_input_dict["del_tel_rep_elv"] = np.deg2rad(spem_elv)
         
-        fmt = "%d-%b-%Y  %H:%I:%S"
+        fmt = "%d-%b-%Y  %H:%M:%S"
         current = time.localtime()
         input_dict["timestamp"] = time.time()
         input_dict["timestring"] = date = time.strftime(fmt, current)
@@ -678,14 +677,14 @@ class KOSMA_translator:
         az_velocities = np.gradient(az_array) / dt
         el_velocities = np.gradient(el_array) / dt
 
-        # program track mode, see defintion here ICD-1000000-32000-02-00 VA Webserver
+        # program track mode, see definition here ICD-1000000-32000-02-00 VA Webserver
         # - Remote Protocol
         mode = 0  #
         mode_arr = np.full_like(az_array, mode)
         # Assuming all arrays are 1D and of the same length
         points = np.column_stack(
             [
-                time_array.unix - time_array.unix[0],  # time in seconds since 1970
+                time_array.unix - time_array.unix[0],  # time offset in seconds since start of track
                 az_array,
                 el_array,
                 az_velocities,
