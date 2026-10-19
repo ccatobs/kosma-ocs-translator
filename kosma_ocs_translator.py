@@ -337,13 +337,14 @@ class KOSMA_translator:
         input_dict["tel_altitude"] = self.ocs.earth_location.height.to(u.m).value
         input_dict["tel_telescope"] = "CCAT"
         input_dict["tel_supports_ephemeris"] = "N"
+        input_dict["tel_plate_scale"] = "13.89"
+        # TODO: for the moment put the default constant value tel_plate_scale 
+        #       follow-up how this is used in combination of 
+        #       instrument plate scale factor
 
         # values set elsewhere
         input_dict["tel_return_cookie"] = self.tel_return_cookie
         input_dict["tel_error"] = self.tel_error
-
-        # TODO check where tel_plate_scale comes from and whether it is constant for CCAT
-        input_dict["tel_plate_scale"] = "1"
 
         current_azi = response["Azimuth current position"]
         current_ele = response["Elevation current position"]
@@ -409,42 +410,45 @@ class KOSMA_translator:
 
         self.log.info(f"on track: {input_dict['tel_on_track']} az:{input_dict['tel_azm_act']:3.2f} ele:{input_dict['tel_elv_act']:3.2f} cmd_az:{input_dict['tel_azm_cmd']:3.2f} cmd_ele:{input_dict['tel_elev_cmd']:3.2f} obs_tolerance: {self.obs_tolerance/3600.0:3.2f} deg ")        
 
-        # write KOSMA_ccdpos.sim for optical pointing
-        if float(self.last_obs2tel["obs_wavelength"]) < 10:
-            if_write_ccdpossim = True
-        else:
-            if_write_ccdpossim = False
+        # write KOSMA_ccdpos.sim for optical pointing and debugging
+        # if float(self.last_obs2tel["obs_wavelength"]) < 10:
+        #     if_optical_pointing = True
+        # else:
+        #     if_optical_pointing = False
 
-        if if_write_ccdpossim:
-            # TODO: implement this on OCS and TCS
-            response_pointing = self.ocs.get_cmd_pointing()
+        # TODO: implement this on OCS and TCS
+        response_pointing = self.ocs.get_cmd_pointing()
             
-            spem_azm = response_pointing["SPEM correction AZ"]
-            spem_elv = response_pointing["SPEM correction EL"]
-            tilt1_azm = response_pointing["Tiltmeter Az correction AZ"]
-            tilt2_azm = response_pointing["Tiltmeter El correction AZ"]
-            tilt1_elv = response_pointing["Tiltmeter Az correction EL"]
-            tilt2_elv = response_pointing["Tiltmeter El correction EL"]
+        spem_azm = response_pointing["SPEM correction AZ"]
+        spem_elv = response_pointing["SPEM correction EL"]
+        tilt1_azm = response_pointing["Tiltmeter Az correction AZ"]
+        tilt2_azm = response_pointing["Tiltmeter El correction AZ"]
+        tilt1_elv = response_pointing["Tiltmeter Az correction EL"]
+        tilt2_elv = response_pointing["Tiltmeter El correction EL"]
 
-            ccd_input_dict["op_azm"] = np.deg2rad(input_dict["tel_azm_cmd"])
-            ccd_input_dict["op_elv"] = np.deg2rad(input_dict["tel_elv_cmd"])
+        ccd_input_dict["op_azm"] = np.deg2rad(input_dict["tel_azm_cmd"])
+        ccd_input_dict["op_elv"] = np.deg2rad(input_dict["tel_elv_cmd"])
 
+        if self.last_obs2tel["obs_coord_sys_on"] == "HORIZON":
             ccd_input_dict["op_oazm"] = np.deg2rad(self.last_obs2tel["obs_lam_del"])
             ccd_input_dict["op_oelv"] = np.deg2rad(self.last_obs2tel["obs_bet_del"])
+        else:
+            # these values are irrelevant if not Horizon
+            ccd_input_dict["op_oazm"] = 0
+            ccd_input_dict["op_oelv"] = 0
 
-            ccd_input_dict["del_tel_tot_azm"] = np.deg2rad(spem_azm + tilt1_azm + tilt2_azm)
-            ccd_input_dict["del_tel_tot_elv"] = np.deg2rad(spem_elv + tilt1_elv + tilt2_elv)
-            ccd_input_dict["del_tel_rep_azm"] = np.deg2rad(spem_azm)
-            ccd_input_dict["del_tel_rep_elv"] = np.deg2rad(spem_elv)
+        ccd_input_dict["del_tel_tot_azm"] = np.deg2rad(spem_azm + tilt1_azm + tilt2_azm)
+        ccd_input_dict["del_tel_tot_elv"] = np.deg2rad(spem_elv + tilt1_elv + tilt2_elv)
+        ccd_input_dict["del_tel_rep_azm"] = np.deg2rad(spem_azm)
+        ccd_input_dict["del_tel_rep_elv"] = np.deg2rad(spem_elv)
         
         fmt = "%d-%b-%Y  %H:%I:%S"
         current = time.localtime()
         input_dict["timestamp"] = time.time()
         input_dict["timestring"] = date = time.strftime(fmt, current)
 
-        if if_write_ccdpossim:
-            ccd_input_dict["timestamp"] = input_dict["timestamp"]
-            ccd_input_dict["timestring"] = input_dict["timestring"]
+        ccd_input_dict["timestamp"] = input_dict["timestamp"]
+        ccd_input_dict["timestring"] = input_dict["timestring"]
 
         return input_dict, ccd_input_dict
 
