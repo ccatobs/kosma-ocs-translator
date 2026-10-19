@@ -390,7 +390,8 @@ class KOSMA_translator:
             altaz_frame = AltAz(obstime=status_time, location=self.ocs.earth_location)
 
             pos = SkyCoord(
-                az=input_dict["tel_azm_cmd"], alt=input_dict["tel_elv_cmd"], unit='deg')
+                az=input_dict["tel_azm_cmd"], alt=input_dict["tel_elv_cmd"],
+                unit='deg', frame=altaz_frame)
 
             epsilon = 1e-3  # about 4 arcsec, small angle approximation is sufficient
             north = _apply_offset(
