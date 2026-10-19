@@ -217,6 +217,7 @@ class KOSMA_translator:
         self.old_tel_return_cookie = 0
         self.next_tel_return_cookie = 0
         self.tel_error = 0
+        self.tel_lost_track = "N"
         self.read_obs2tel_file()
         # get the telescope position from the ocs
         self.ocs.get_telescope_position()
@@ -351,18 +352,14 @@ class KOSMA_translator:
         acu_azm_del = current_azi - cmd_azi
         acu_elv_del = current_ele - cmd_ele
 
-        actdiff = 3600 * ((acu_azm_del*np.cos(np.dec2rad(cmd_azi))**2 + acu_elv_del**2) ** 0.5
+        actdiff = 3600 * ((acu_azm_del*np.cos(np.dec2rad(cmd_azi)))**2 + acu_elv_del**2) ** 0.5
 
-        # TODO: initialization does not make sense
-        #       tel_lost_track should be kept during the same cookie 
-        #       initialize to "N" only after cookie changes
-        input_dict["tel_on_track"] = "N"
-        input_dict["tel_lost_track"] = "N"
         if actdiff < self.obs_tolerance:
             input_dict["tel_on_track"] = "Y"
         else:
             input_dict["tel_on_track"] = "N"
-            input_dict["tel_lost_track"] = "N"
+            self.tel_lost_track = "Y"
+        input_dict["tel_lost_track"] = self.tel_lost_track
 
         # commanded and actual positions and timestamp
         day_of_year = response["Time"]
@@ -707,6 +704,7 @@ class KOSMA_translator:
             self.last_obs2tel = self.obs2tel
             self.old_tel_return_cookie = self.tel_return_cookie
             self.tel_return_cookie = self.next_tel_return_cookie
+            self.tel_lost_track = "N"    # initialize for the new cookie
             if response.status_code != 200 or body.get("status") != "ok":
                 self.log.error(
                     f"scan_pattern rejected: HTTP {response.status_code}, "
