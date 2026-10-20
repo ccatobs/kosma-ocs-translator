@@ -316,20 +316,13 @@ class KOSMA_translator:
         {0[del_tel_rep_elv]}   del_tel_rep_elv   ! elevation pointing offset [rad] from telescope pointing model (only repeatable terms)
         """
 
-    def set_tel2obs_dict(self):
+    def _build_tel2obs_params(self, response) -> dict:
         """
-        Set dictionary of KOSMA_tel2obs and KOSMA_ccdpos.sim
+        Derive the KOSMA_tel2obs parameter dictionary from a single ACU status response.
         """
-
-        if self.last_payload is None or self.last_obs2tel is None:
-            self.log.info('No record of successfully sent command to telescope. Wait...')
-            return
-
-        response = self.ocs.get_status()
         input_dict = {}
-        ccd_input_dict = {}
 
-        # Fixed values 
+        # Fixed values
         input_dict["tel_pos_in_range"] = "Y"     # practically not used
         input_dict["tel_latitude"] = self.ocs.earth_location.lat.deg
         input_dict["tel_longitude"] = self.ocs.earth_location.lon.deg
@@ -337,8 +330,8 @@ class KOSMA_translator:
         input_dict["tel_telescope"] = "CCAT"
         input_dict["tel_supports_ephemeris"] = "N"
         input_dict["tel_plate_scale"] = "13.89"
-        # TODO: for the moment put the default constant value tel_plate_scale 
-        #       follow-up how this is used in combination of 
+        # TODO: for the moment put the default constant value tel_plate_scale
+        #       follow-up how this is used in combination of
         #       instrument plate scale factor
 
         # values set elsewhere
@@ -397,7 +390,7 @@ class KOSMA_translator:
             north = _apply_offset(
                 pos.transform_to(coord_sys_map[cmd_coord_sys_on]), 0, epsilon, 'Y'
             ).transform_to(altaz_frame)
-            
+
             angle = np.arctan2(
                 north.alt.deg - pos.alt.deg,
                 (north.az.deg - pos.az.deg) * np.cos(pos.alt.rad)
@@ -408,17 +401,21 @@ class KOSMA_translator:
 
             input_dict["tel_angle_focal_plane"] = tel_angle_focal_plane
 
-        self.log.info(f"on track: {input_dict['tel_on_track']} az:{input_dict['tel_azm_act']:3.2f} ele:{input_dict['tel_elv_act']:3.2f} cmd_az:{input_dict['tel_azm_cmd']:3.2f} cmd_ele:{input_dict['tel_elv_cmd']:3.2f} obs_tolerance: {self.obs_tolerance/3600.0:3.2f} deg ")        
+        self.log.info(f"on track: {input_dict['tel_on_track']} az:{input_dict['tel_azm_act']:3.2f} ele:{input_dict['tel_elv_act']:3.2f} cmd_az:{input_dict['tel_azm_cmd']:3.2f} cmd_ele:{input_dict['tel_elv_cmd']:3.2f} obs_tolerance: {self.obs_tolerance/3600.0:3.2f} deg ")
 
-        # write KOSMA_ccdpos.sim for optical pointing and debugging
-        # if float(self.last_obs2tel["obs_wavelength"]) < 10:
-        #     if_optical_pointing = True
-        # else:
-        #     if_optical_pointing = False
+        fmt = "%d-%b-%Y  %H:%M:%S"
+        current = time.localtime()
+        input_dict["timestamp"] = time.time()
+        input_dict["timestring"] = time.strftime(fmt, current)
 
-        # TODO: implement this on OCS and TCS
-        response_pointing = self.ocs.get_cmd_pointing()
-            
+        return input_dict
+
+    def _build_ccdpos_params(self, input_dict: dict, response_pointing: dict) -> dict:
+        """
+        Derive the KOSMA_ccdpos.sim parameter dictionary.
+        Reuses tel_azm_cmd / tel_elv_cmd from the already-computed input_dict,
+        as well as timestamp and timestring
+        """
         spem_azm = response_pointing["SPEM correction AZ"]
         spem_elv = response_pointing["SPEM correction EL"]
         tilt1_azm = response_pointing["Tiltmeter Az correction AZ"]
@@ -426,6 +423,7 @@ class KOSMA_translator:
         tilt1_elv = response_pointing["Tiltmeter Az correction EL"]
         tilt2_elv = response_pointing["Tiltmeter El correction EL"]
 
+        ccd_input_dict = {}
         ccd_input_dict["op_azm"] = np.deg2rad(input_dict["tel_azm_cmd"])
         ccd_input_dict["op_elv"] = np.deg2rad(input_dict["tel_elv_cmd"])
 
@@ -441,14 +439,26 @@ class KOSMA_translator:
         ccd_input_dict["del_tel_tot_elv"] = np.deg2rad(spem_elv + tilt1_elv + tilt2_elv)
         ccd_input_dict["del_tel_rep_azm"] = np.deg2rad(spem_azm)
         ccd_input_dict["del_tel_rep_elv"] = np.deg2rad(spem_elv)
-        
-        fmt = "%d-%b-%Y  %H:%M:%S"
-        current = time.localtime()
-        input_dict["timestamp"] = time.time()
-        input_dict["timestring"] = date = time.strftime(fmt, current)
 
         ccd_input_dict["timestamp"] = input_dict["timestamp"]
         ccd_input_dict["timestring"] = input_dict["timestring"]
+
+        return ccd_input_dict
+
+    def set_tel2obs_dict(self):
+        """
+        Set dictionary of KOSMA_tel2obs and KOSMA_ccdpos.sim
+        """
+        if self.last_payload is None or self.last_obs2tel is None:
+            self.log.info('No record of successfully sent command to telescope. Wait...')
+            return
+
+        response = self.ocs.get_status()
+        input_dict = self._build_tel2obs_params(response)
+
+        # TODO: implement this get command on OCS and TCS
+        response_pointing = self.ocs.get_cmd_pointing()
+        ccd_input_dict = self._build_ccdpos_params(input_dict, response_pointing)
 
         return input_dict, ccd_input_dict
 
