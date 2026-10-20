@@ -4,7 +4,7 @@ import random
 import logging
 import os, glob, re
 from ocs import observatory_control_system
-from astropy.coordinates import SkyCoord, EarthLocation, AltAz
+from astropy.coordinates import SkyCoord, EarthLocation, AltAz, Distance
 from astropy import units as u
 from astropy.time import Time
 import numpy as np
@@ -17,7 +17,11 @@ try:
 except:
     print("roof_mount package not found, make sure it is installed and in the PYTHONPATH")
     print("install from git@git.ph1.uni-koeln.de:receiver/pointing-camera-rpi.git")
-    
+# sun avoidance
+try:
+    from sun_avoidance.telescope import get_overtop_altaz_from_nominal
+except:
+    print("sun-avoidance not found. Install from git@github.com:ccatobs/sun-avoidance.git")
 
 coord_sys_map = {
     "J2000": "icrs",
@@ -25,6 +29,76 @@ coord_sys_map = {
     "GALACTIC": "galactic",
     "HORIZON": "altaz",
 }
+
+# Proper-motion keyword names in astropy SkyCoord differ by frame
+_frame_pm_keys = {
+    "icrs":     ("pm_ra_cosdec", "pm_dec"),
+    "fk4":      ("pm_ra_cosdec", "pm_dec"),
+    "galactic": ("pm_l_cosb",    "pm_b"),
+}
+
+# Reference epoch for catalogue coordinates by frame
+# only matters for proper motion correction
+_frame_epochs = {
+    "icrs":     Time("J2000"),
+    "fk4":      Time(1950.0, format="byear"),
+    "galactic": Time("J2000"),
+}
+
+
+def _apply_offset(coord, d_lam_arcsec, d_bet_arcsec, true_angle):
+    """
+    Apply a sky offset to a SkyCoord.
+
+    Parameters
+    ----------
+    coord: astropy.SkyCoord
+        Coordinates of the central position
+    d_lam_arcsec, d_bet_arcsec: float
+        offset to be added in the coordinate system given for coord in unit of arcsec.
+    true_angle : str
+        If 'Y', longitude requires cos(lat) correction. Use spherical_offsets_by
+        If anything else, direct coordinate addition is applied.
+
+    Returns
+    -------
+    The updated position : astropy.SkyCoord
+    """
+
+    if true_angle == "Y":
+        return coord.spherical_offsets_by(
+            d_lam_arcsec * u.arcsec, d_bet_arcsec * u.arcsec)
+    return SkyCoord(
+        coord.data.lon + d_lam_arcsec * u.arcsec,
+        coord.data.lat + d_bet_arcsec * u.arcsec,
+        frame=coord.frame,
+    )
+
+
+def _get_time_from_acu_format(day_of_year, year):
+    """
+    Convert the ACU provided time-related variables to datetime.
+    Input is assumed to be in UTC.
+    Used the same logic as housekeeping/monitors/acu/monitorAcu.py
+    but with astropy.time instead of datetime
+
+    Parameters
+    ----------
+    day_of_year : float
+        Unit in sec
+    year : int
+        Year
+
+    Returns
+    -------
+    t : astropy.time.Time
+        Corresponding Time object of the given time
+    """
+
+    t = Time(f"{year}-01-01", format="iso", scale="utc") + (day_of_year - 1) * u.day
+ 
+    return t
+
 
 def ImportKOSMAReadWriteIntoDictionary(files=None, variable=None, update_mod_time=True):
     log = logging.getLogger("kosma-ocs-translator")
@@ -58,7 +132,7 @@ def ImportKOSMAReadWriteIntoDictionary(files=None, variable=None, update_mod_tim
         f = open(readwrite_file_full, "r")
         lines = f.readlines()
         f.close()
-        # strip fill path from readwrite_file
+        # strip full path from readwrite_file
         readwrite_file = os.path.basename(readwrite_file_full)
         # create dictionary for each filename
         if readwrite_file not in readwrite_dict.keys():
@@ -91,7 +165,7 @@ def ImportKOSMAReadWriteIntoDictionary(files=None, variable=None, update_mod_tim
                 if result:
                     value, variable_found = result.groups()
             except:
-                result = re.search("\s+(\S+)", data).groups()
+                result = re.search("\s+(\S+)", data)
                 if result:
                     (variable_found,) = result.groups()
                 print("{0} variable found with no value ".format(variable_found))
@@ -109,16 +183,16 @@ def ImportKOSMAReadWriteIntoDictionary(files=None, variable=None, update_mod_tim
             except ValueError:
                 value = value.strip()
             except Exception as e:
-                # includ readwrite_file in error log
+                # include readwrite_file in error log
                 log.error(
                     f"error parsing value {value} for variable {variable_found} from file {readwrite_file}"
                 )
                 log.error(e)
                 continue
             #
-            if (variable != None) & (variable != variable_found):
+            if (variable is not None) and (variable != variable_found):
                 continue
-            if variable not in readwrite_dict[readwrite_file].keys():
+            if variable_found not in readwrite_dict[readwrite_file]:
                 readwrite_dict[readwrite_file][variable_found] = value
     # remove entries that just have a timestamp and no variable values
     # for
@@ -137,9 +211,13 @@ class KOSMA_translator:
         self.log.info(f"Using KOSMA ReadWrite directory: {self.read_write_dir}")
         #
         self.load_tel2obs_template()
+        self.load_ccdpossim_template()
         #
         self.tel_return_cookie = 0
         self.old_tel_return_cookie = 0
+        self.next_tel_return_cookie = 0
+        self.tel_error = 0
+        self.tel_lost_track = "N"
         self.read_obs2tel_file()
         # get the telescope position from the ocs
         self.ocs.get_telescope_position()
@@ -148,6 +226,9 @@ class KOSMA_translator:
         # Add tracking thread management
         self._track_thread = None
         self._track_stop_event = threading.Event()
+        # Keep the record of the last payload and corresponding obs2tel
+        self.last_payload = None
+        self.last_obs2tel = None
 
     def check_for_obs2tel_update(self):
         # check modification time of obs2tel file and store
@@ -157,7 +238,6 @@ class KOSMA_translator:
         if not hasattr(self, "obs2tel_mod_time"):
             self.obs2tel_mod_time = current_mod_time
             return False
-        current_mod_time = os.path.getmtime(f"{self.read_write_dir}/KOSMA_obs2tel.set")
         if current_mod_time > self.obs2tel_mod_time:
             self.obs2tel_mod_time = current_mod_time
             return True
@@ -172,94 +252,220 @@ class KOSMA_translator:
         )
         self.obs_tolerance = self.kio_files["KOSMA_obs2tel.set"]["obs_tolerance"]
         self.log.info(f"obs_tolerance set to {self.obs_tolerance} arcseconds")
-        self.old_tel_return_cookie = self.tel_return_cookie
-        self.tel_return_cookie = self.kio_files["KOSMA_obs2tel.set"]["obs_cookie"]
+        self.next_tel_return_cookie = self.kio_files["KOSMA_obs2tel.set"]["obs_cookie"]
         self.obs_tel_info_update_time = self.kio_files["KOSMA_obs2tel.set"][
             "obs_tel_info_update_time"
         ]
         # read all variables from obs2tel file into the object
         self.obs2tel = self.kio_files["KOSMA_obs2tel.set"]
 
+        # check all keys exist
+        required_keys = [
+            "obs_lam_on", "obs_bet_on",
+            "obs_pm_lam", "obs_pm_bet", "obs_paralx",
+            "obs_extended_elevation_range",
+            "obs_lam_del", "obs_bet_del", "obs_coord_sys_del", "obs_true_angle_del",
+            "obs_lam_vel", "obs_bet_vel", "obs_otf_mode",
+            "obs_lam_off", "obs_bet_off", "obs_coord_sys_off", "obs_true_angle_off",
+            "obs_x_focal_plane", "obs_y_focal_plane",
+            "obs_wavelength",
+            "obs_track_duration",
+        ]
+        missing = [k for k in required_keys if k not in self.obs2tel]
+        if missing:
+            self.log.error(f"Missing required obs2tel keys: {missing}")
+            raise KeyError(f"Missing required obs2tel keys: {missing}")
+
     def load_tel2obs_template(self):
         self.tel2obs = """
         {0[timestring]}  {0[timestamp]}   File update time stamp   ! ccat_translator (test_computer:1000)
-        EMU_   tel_telescope   ! Telescope Identifier (for display and backend_name in FITS header)
+        {0[tel_telescope]}   tel_telescope   ! Telescope Identifier (for display and backend_name in FITS header)
         {0[tel_on_track]}   tel_on_track   ! Y if tracking on commanded position/track within tolerance [Y/N]
         {0[tel_lost_track]}   tel_lost_track   ! Y if tracking got beyond tolerance since start of track [Y/N]
         {0[tel_pos_in_range]}   tel_pos_in_range   ! Y if commanded position is within telescope range [Y/N]
-                0   tel_error   ! flags telescope command syntax/consistency and functional errors (=0: ok)
+        {0[tel_error]}   tel_error   ! flags telescope command syntax/consistency and functional errors (=0: ok)
         NONE   tel_error_string   ! Error message associated with telescope command (=NONE: OK)
-                5   tel_error_level   ! Error level for message in tel_error_string [1: trace, 2: debug, 4: info, 5: message, 7: warn, 8: error, 9: fatal]
+        5   tel_error_level   ! Error level for message in tel_error_string [1: trace, 2: debug, 4: info, 5: message, 7: warn, 8: error, 9: fatal]
             {0[tel_return_cookie]}  tel_return_cookie   ! return cookie to identify proper observation
             {0[tel_plate_scale]}  tel_plate_scale   ! plate scale of focal plane [arcsec/mm]
             {0[tel_latitude]}   tel_latitude   ! latitude of observatory (needed for Doppler correction) [degree]
             {0[tel_longitude]}  tel_longitude   ! longitude of observatory (needed for Doppler correction) [degree, +west (astronomical notation)]
             {0[tel_altitude]}  tel_altitude   ! height above sea level (needed for Doppler correction) [meter]
             {0[tel_angle_focal_plane]}   tel_angle_focal_plane   ! ccw angle from second coordinate of the telescope reference coordinate system (TARF,HORIZON) to second coordinate of obs_coord_sys_del [degree]
-        #           0   tel_los_act   ! actual los-angle [degree]
-        #    1557237163.99149   tel_time_act   ! time when status data were valid [seconds since 1970 UTC]
-        #   87.091738   tel_time_del   ! time since start of track (may be negative, if start in the future) [seconds]
+                 0   tel_los_act   ! actual los-angle [degree]
+        {0[tel_time_act]}   tel_time_act   ! time when status data were valid [seconds since 1970 UTC]
+        {0[tel_time_del]}   tel_time_del   ! time since start of track (may be negative, if start in the future) [seconds]
         {0[tel_azm_cmd]:3.4f}   tel_azm_cmd   ! commanded azimuth (for tracking display) [degree,cw toward east]
         {0[tel_elv_cmd]:3.4f}   tel_elv_cmd   ! commanded elevation (for tracking display and for atmospheric calibration) [degree]
         {0[tel_azm_act]:3.4f}   tel_azm_act   ! actual azimuth (for tracking display) [degree,cw toward east]
         {0[tel_elv_act]:3.4f}   tel_elv_act   ! actual elevation (for tracking display) [degree]
         {0[tel_supports_ephemeris]}   tel_supports_ephemeris   ! Telescope supports ephemeris tracking [Y/N] !
-        0.0    tel_mjd1 ! MJD of integer part of current time [days] 
+        {0[tel_mjd1]}    tel_mjd1 ! MJD of integer part of current time [days] 
+        """
+
+    def load_ccdpossim_template(self):
+        self.ccdpossim = """
+        {0[timestring]}  {0[timestamp]}   File update time stamp   ! ccat_translator (test_computer:1000)
+        {0[op_azm]}  op_azm   ! azimuth [radian] for optical pointing (commanded to telescope, without pointing model corrections)
+        {0[op_elv]}  op_elv   ! elevatin [radian] for optical pointing (commanded to telescope, without pointing model corrections)
+        {0[op_oazm]}  op_oazm   ! azimuth pointing offset [rad]; optical pointing (HORIZON system)
+        {0[op_oelv]}  op_oelv   ! elevation pointing offset [rad]; optical pointing (HORIZON system)
+        {0[del_tel_tot_azm]}   del_tel_tot_azm   ! azimuth  pointing offset [rad] from telescope pointing model (including non repeatable terms)
+        {0[del_tel_tot_elv]}   del_tel_tot_elv   ! elevation pointing offset [rad] from telescope pointing model (including non repeatable terms)
+        {0[del_tel_rep_azm]}   del_tel_rep_azm   ! azimuth  pointing offset [rad] from telescope pointing model (only repeatable terms)
+        {0[del_tel_rep_elv]}   del_tel_rep_elv   ! elevation pointing offset [rad] from telescope pointing model (only repeatable terms)
         """
 
     def set_tel2obs_dict(self):
+        """
+        Set dictionary of KOSMA_tel2obs and KOSMA_ccdpos.sim
+        """
+
+        if self.last_payload is None or self.last_obs2tel is None:
+            self.log.info('No record of successfully sent command to telescope. Wait...')
+            return
+
         response = self.ocs.get_status()
         input_dict = {}
-        input_dict["tel_azm_act"] = response["Azimuth current position"]
-        input_dict["tel_elv_act"] = response["Elevation current position"]
-        input_dict["tel_azm_cmd"] = response["Azimuth commanded position"]
-        input_dict["tel_elv_cmd"] = response["Elevation commanded position"]
+        ccd_input_dict = {}
+
+        # Fixed values 
+        input_dict["tel_pos_in_range"] = "Y"     # practically not used
         input_dict["tel_latitude"] = self.ocs.earth_location.lat.deg
         input_dict["tel_longitude"] = self.ocs.earth_location.lon.deg
         input_dict["tel_altitude"] = self.ocs.earth_location.height.to(u.m).value
         input_dict["tel_telescope"] = "CCAT"
-        input_dict["tel_plate_scale"] = "1"
-        input_dict["tel_angle_focal_plane"] = 0.0
-        input_dict["tel_on_track"] = "N"
-        input_dict["tel_lost_track"] = "N"
-        input_dict["tel_return_cookie"] = self.tel_return_cookie
-        input_dict["tel_error"] = "0"
         input_dict["tel_supports_ephemeris"] = "N"
-        #
+        input_dict["tel_plate_scale"] = "13.89"
+        # TODO: for the moment put the default constant value tel_plate_scale 
+        #       follow-up how this is used in combination of 
+        #       instrument plate scale factor
+
+        # values set elsewhere
+        input_dict["tel_return_cookie"] = self.tel_return_cookie
+        input_dict["tel_error"] = self.tel_error
+
         current_azi = response["Azimuth current position"]
         current_ele = response["Elevation current position"]
         cmd_azi = response["Azimuth commanded position"]
         cmd_ele = response["Elevation commanded position"]
-        actdiff = (
-            3600 * ((current_azi - cmd_azi) ** 2 + (current_ele - cmd_ele) ** 2) ** 0.5
-        )
+        acu_azm_del = current_azi - cmd_azi
+        acu_elv_del = current_ele - cmd_ele
+
+        actdiff = 3600 * ((acu_azm_del*np.cos(np.deg2rad(cmd_ele)))**2 + acu_elv_del**2) ** 0.5
+
         if actdiff < self.obs_tolerance:
-            input_dict["tel_pos_in_range"] = "Y"
             input_dict["tel_on_track"] = "Y"
         else:
-            input_dict["tel_pos_in_range"] = "Y"
             input_dict["tel_on_track"] = "N"
-            input_dict["tel_lost_track"] = "N"
-    
-        #
-        self.log.info(f"on track: {input_dict['tel_on_track']} az:{response['Azimuth current position']:3.2f} ele:{response['Elevation current position']:3.2f} cmd_az:{response['Azimuth commanded position']:3.2f} cmd_ele:{response['Elevation commanded position']:3.2f} obs_tolerance: {self.obs_tolerance/3600.0:3.2f} deg ")        
-        fmt = "%d-%b-%Y  %H:%I:%S"
+            self.tel_lost_track = "Y"
+        input_dict["tel_lost_track"] = self.tel_lost_track
+
+        # commanded and actual positions and timestamp
+        day_of_year = response["Time"]
+        year = response["Year"]
+        status_time = _get_time_from_acu_format(day_of_year, year)
+        # time stamp of the status
+        input_dict["tel_time_act"] = status_time.unix
+        input_dict["tel_mjd1"] = status_time.ut1
+
+        t0 = self.last_payload["start_time"]
+        pts = np.array(self.last_payload["points"])   # shape (N, 5): dt, az, el, vaz, vel
+        # time of the status since the start time of the table sent
+        t_rel = status_time.unix - t0
+        input_dict["tel_time_del"] = t_rel
+
+        # TODO: apply refraction correction to tel_elev_cmd
+        input_dict["tel_azm_cmd"] = np.interp(t_rel, pts[:, 0], pts[:, 1])
+        input_dict["tel_elv_cmd"] = np.interp(t_rel, pts[:, 0], pts[:, 2])
+        input_dict["tel_azm_act"] = input_dict["tel_azm_cmd"] + acu_azm_del
+        input_dict["tel_elv_act"] = input_dict["tel_elv_cmd"] + acu_elv_del
+
+        # TODO: careful check of signs and definitions
+        cmd_coord_sys_on = self.last_obs2tel["obs_coord_sys_on"]
+        if cmd_coord_sys_on == "HORIZON":
+            input_dict["tel_angle_focal_plane"] = 0.0
+        else:
+            # calculation is needed
+            altaz_frame = AltAz(obstime=status_time, location=self.ocs.earth_location)
+
+            pos = SkyCoord(
+                az=input_dict["tel_azm_cmd"], alt=input_dict["tel_elv_cmd"],
+                unit='deg', frame=altaz_frame)
+
+            epsilon = 1e-3  # about 4 arcsec, small angle approximation is sufficient
+            north = _apply_offset(
+                pos.transform_to(coord_sys_map[cmd_coord_sys_on]), 0, epsilon, 'Y'
+            ).transform_to(altaz_frame)
+            
+            angle = np.arctan2(
+                north.alt.deg - pos.alt.deg,
+                (north.az.deg - pos.az.deg) * np.cos(pos.alt.rad)
+            )
+            tel_angle_focal_plane = np.rad2deg(angle) - 90.   # from second axis in degrees
+            if tel_angle_focal_plane < -180:
+                tel_angle_focal_plane += 360.
+
+            input_dict["tel_angle_focal_plane"] = tel_angle_focal_plane
+
+        self.log.info(f"on track: {input_dict['tel_on_track']} az:{input_dict['tel_azm_act']:3.2f} ele:{input_dict['tel_elv_act']:3.2f} cmd_az:{input_dict['tel_azm_cmd']:3.2f} cmd_ele:{input_dict['tel_elv_cmd']:3.2f} obs_tolerance: {self.obs_tolerance/3600.0:3.2f} deg ")        
+
+        # write KOSMA_ccdpos.sim for optical pointing and debugging
+        # if float(self.last_obs2tel["obs_wavelength"]) < 10:
+        #     if_optical_pointing = True
+        # else:
+        #     if_optical_pointing = False
+
+        # TODO: implement this on OCS and TCS
+        response_pointing = self.ocs.get_cmd_pointing()
+            
+        spem_azm = response_pointing["SPEM correction AZ"]
+        spem_elv = response_pointing["SPEM correction EL"]
+        tilt1_azm = response_pointing["Tiltmeter Az correction AZ"]
+        tilt2_azm = response_pointing["Tiltmeter El correction AZ"]
+        tilt1_elv = response_pointing["Tiltmeter Az correction EL"]
+        tilt2_elv = response_pointing["Tiltmeter El correction EL"]
+
+        ccd_input_dict["op_azm"] = np.deg2rad(input_dict["tel_azm_cmd"])
+        ccd_input_dict["op_elv"] = np.deg2rad(input_dict["tel_elv_cmd"])
+
+        if self.last_obs2tel["obs_coord_sys_on"] == "HORIZON":
+            ccd_input_dict["op_oazm"] = np.deg2rad(self.last_obs2tel["obs_lam_del"])
+            ccd_input_dict["op_oelv"] = np.deg2rad(self.last_obs2tel["obs_bet_del"])
+        else:
+            # these values are irrelevant if not Horizon
+            ccd_input_dict["op_oazm"] = 0
+            ccd_input_dict["op_oelv"] = 0
+
+        ccd_input_dict["del_tel_tot_azm"] = np.deg2rad(spem_azm + tilt1_azm + tilt2_azm)
+        ccd_input_dict["del_tel_tot_elv"] = np.deg2rad(spem_elv + tilt1_elv + tilt2_elv)
+        ccd_input_dict["del_tel_rep_azm"] = np.deg2rad(spem_azm)
+        ccd_input_dict["del_tel_rep_elv"] = np.deg2rad(spem_elv)
+        
+        fmt = "%d-%b-%Y  %H:%M:%S"
         current = time.localtime()
         input_dict["timestamp"] = time.time()
         input_dict["timestring"] = date = time.strftime(fmt, current)
-        return input_dict
+
+        ccd_input_dict["timestamp"] = input_dict["timestamp"]
+        ccd_input_dict["timestring"] = input_dict["timestring"]
+
+        return input_dict, ccd_input_dict
 
     def write_tel2obs_file(self):
-        #
-        input_dict = self.set_tel2obs_dict()
-        #
+        input_dict, ccd_input_dict = self.set_tel2obs_dict()
         self.log.debug(
             f"writing tel2obs file with obs cookie: {self.tel_return_cookie}"
         )
-        tel2obs_handle = open("/net/KOSMA_file_io/ReadWrite/KOSMA_tel2obs.set", "w")
+        tel2obs_handle = open(f"{self.read_write_dir}/KOSMA_tel2obs.set", "w")
         tel2obs_handle.write(self.tel2obs.format(input_dict))
         tel2obs_handle.close()
-        
+
+        if ccd_input_dict:
+            ccdpossim_handle = open(f"{self.read_write_dir}/KOSMA_ccdpos.sim", "w")
+            ccdpossim_handle.write(self.ccdpossim .format(ccd_input_dict))
+            ccdpossim_handle.close()
+
 
     def track(self):
 
@@ -279,46 +485,209 @@ class KOSMA_translator:
         self._track_thread.start()
 
     def _track_loop(self):
+        """
+        This routine is called every time when KOSMA_obs2tel.set is updated. If a 
+        track is already running, the previous one is stopped and the new one starts.
+        Therefore practically the duration of the track in this routine is overwritten
+        by a new track triggered by the KOSMA_obs2tel update.
+        This justifies to use the fixed obs_x/y_focal_plane, which is a function of
+        elevation and changes over time: once the value changes more than a tolerance,
+        a new track is triggered with updated obs_x/y_focal_plane values.
+        """
+
         # commanded position
         cmd_lam = self.obs2tel["obs_lam_on"]
         cmd_bet = self.obs2tel["obs_bet_on"]
         cmd_coord_sys_on = self.obs2tel["obs_coord_sys_on"]
+
+        # sky/map offsets (arcsec, applied before AltAz transform unless HORIZON frame)
+        lam_del = self.obs2tel["obs_lam_del"]
+        bet_del = self.obs2tel["obs_bet_del"]
+        coord_sys_del = self.obs2tel["obs_coord_sys_del"]
+        true_angle_del = self.obs2tel["obs_true_angle_del"]  # Y/N
+
+        # off-position offsets (arcsec, applied before AltAz transform unless HORIZON frame)
+        lam_off = self.obs2tel["obs_lam_off"]
+        bet_off = self.obs2tel["obs_bet_off"]
+        coord_sys_off = self.obs2tel["obs_coord_sys_off"]
+        true_angle_off = self.obs2tel["obs_true_angle_off"]  # Y/N
+
+        # focal plane offsets (arcsec, always applied after AltAz transform,
+        # and always apply cos-correction (corresponding true_angle=Y).
+        # for CCAT obs_coord_sys_focal_plane is always set to HORIZON
+        focal_plane_az = self.obs2tel["obs_x_focal_plane"]
+        focal_plane_el = self.obs2tel["obs_y_focal_plane"]
+
+        # proper motion (arcsec/yr) and parallax (arcsec) of the source
+        # obs_pm_lam/obs_pm_bet are raw coordinate rates dlam/dt, not cos(bet)*dlam/dt;
+        # slalib h2fk5.c note 1: "proper motions in RA are dRA/dt 
+        #                         rather than cos(Dec)*dRA/dt"
+        pm_lam = self.obs2tel["obs_pm_lam"]
+        pm_bet = self.obs2tel["obs_pm_bet"]
+        paralx = self.obs2tel["obs_paralx"]
+
+        # extended elevation range
+        if self.obs2tel["obs_extended_elevation_range"] == "Y":
+            if_extended = True
+        else:
+            if_extended = False
+
+        # obs wavelength (needs to be passed for refraction correction)
+        obs_wavelength = self.obs2tel["obs_wavelength"]
+
+        # validate coordinate systems
+        for label, csys in [
+            ("obs_coord_sys_on", cmd_coord_sys_on),
+            ("obs_coord_sys_del", coord_sys_del),
+            ("obs_coord_sys_off", coord_sys_off),
+        ]:
+            if csys not in coord_sys_map:
+                msg = f"Unknown coordinate system {label}={csys!r}, must be one of {list(coord_sys_map)}"
+                self.log.error(msg)
+                raise ValueError(msg)
+
         # track details
         track_duration = 600  # seconds
-        # make into an astropy coordinate object
         frame = coord_sys_map[cmd_coord_sys_on]
-        coord = SkyCoord(cmd_lam * u.deg, cmd_bet * u.deg, frame=frame)
-        #
-        self.log.info(f"tracking to {cmd_lam} {cmd_bet} in {cmd_coord_sys_on} frame")
-        # 
+
+        # If coordinate system of ON is Horizon, use move-to.
+        # For this case, it does not make much sense if map or off offset is given
+        # by other coordinate system but such a case is also covered below.
         if frame.lower() == "altaz":
-            self.ocs.move_to(cmd_lam, cmd_bet)
+            now_frame = AltAz(obstime=Time.now(), location=self.ocs.earth_location)
+            coord = SkyCoord(cmd_lam * u.deg, cmd_bet * u.deg, frame=now_frame)
+            if lam_del != 0.0 or bet_del != 0.0:
+                if coord_sys_del == "HORIZON":
+                    coord = _apply_offset(coord, lam_del, bet_del, true_angle_del)
+                else:
+                    coord = _apply_offset(
+                        coord.transform_to(coord_sys_map[coord_sys_del]),
+                        lam_del, bet_del, true_angle_del,
+                    ).transform_to(now_frame)
+            if lam_off != 0.0 or bet_off != 0.0:
+                if coord_sys_off == "HORIZON":
+                    coord = _apply_offset(coord, lam_off, bet_off, true_angle_off)
+                else:
+                    coord = _apply_offset(
+                        coord.transform_to(coord_sys_map[coord_sys_off]),
+                        lam_off, bet_off, true_angle_off,
+                    ).transform_to(now_frame)
+
+            self.log.info(
+                f"tracking to {coord.az.deg} {coord.alt.deg} in {cmd_coord_sys_on} frame"
+            )
+
+            # Apply focal plane offsets
+            if focal_plane_az != 0.0 or focal_plane_el != 0.0:
+                coord = _apply_offset(coord, focal_plane_az, focal_plane_el, "Y")
+
+            # command move-to
+            if if_extended:
+                cmd_az, cmd_el = get_overtop_altaz_from_nominal(
+                    coord.az.deg, coord.alt.deg)
+            else:
+                cmd_az = coord.az.deg
+                cmd_el = coord.alt.deg
+            self.ocs.move_to(cmd_az, cmd_el)
+
+            # include the response check and update cookie/cmd values recording
+
             return
-        # make an array of times from now to now + track_duration, with 1 second steps
+
+        # non-HORIZON source: make into an astropy coordinate object,
+        # applying proper motion and parallax propagation when non-zero.
+        if pm_lam != 0.0 or pm_bet != 0.0 or paralx != 0.0:
+            # Convert raw coordinate rate to true angular rate for astropy 
+            # (multiply by cos(beta))
+            cos_bet = np.cos(np.deg2rad(cmd_bet))
+            pm_lon_key, pm_lat_key = _frame_pm_keys[frame]
+            pm_kwargs = {
+                pm_lon_key: pm_lam * cos_bet * u.arcsec/u.yr,
+                pm_lat_key: pm_bet * u.arcsec/u.yr,
+                "obstime": _frame_epochs[frame],
+            }
+            if paralx != 0.0:
+                pm_kwargs["distance"] = Distance(parallax=paralx * u.arcsec)
+            coord_with_pm = SkyCoord(
+                cmd_lam * u.deg, cmd_bet * u.deg, frame=frame, **pm_kwargs)
+            # Propagate to current epoch; proper motion over the 600 s track window is
+            # negligible so one propagation at the start of the window suffices
+            propagated = coord_with_pm.apply_space_motion(new_obstime=Time.now())
+            coord = SkyCoord(propagated.data.lon, propagated.data.lat, frame=frame)
+        else:
+            coord = SkyCoord(cmd_lam * u.deg, cmd_bet * u.deg, frame=frame)
+
+        # Apply (non-Horizon) sky/map offsets in obs_coord_sys_del frame 
+        # before AltAz transform
+        if coord_sys_del != "HORIZON" and (lam_del != 0.0 or bet_del != 0.0):
+            if coord_sys_del == cmd_coord_sys_on:
+                coord = _apply_offset(coord, lam_del, bet_del, true_angle_del)
+            else:
+                coord = _apply_offset(
+                    coord.transform_to(coord_sys_map[coord_sys_del]),
+                    lam_del, bet_del, true_angle_del,
+                ).transform_to(frame)
+
+        # Apply (non-Horizon) off-position offsets in obs_coord_sys_off frame 
+        # before AltAz transform
+        if coord_sys_off != "HORIZON" and (lam_off != 0.0 or bet_off != 0.0):
+            if coord_sys_off == cmd_coord_sys_on:
+                coord = _apply_offset(coord, lam_off, bet_off, true_angle_off)
+            else:
+                coord = _apply_offset(
+                    coord.transform_to(coord_sys_map[coord_sys_off]),
+                    lam_off, bet_off, true_angle_off,
+                ).transform_to(frame)
+
+        self.log.info(
+            f"tracking to {coord.data.lon.deg} {coord.data.lat.deg} in {cmd_coord_sys_on} frame"
+        )
+
+        # make an array of times from now + overhead to now + overhead + track_duration,
+        # with 1 second steps
+        track_overhead = 3  # seconds, to account for computation and communication delay
         n_steps = int(track_duration) + 1
-        time_array = Time.now() + np.linspace(0, track_duration, n_steps) * u.second
+        time_array = Time.now() + track_overhead * u.second + np.linspace(
+            0, track_duration, n_steps) * u.second
+
         # calculate the altaz coordinates for each time step
         altaz_frames = AltAz(obstime=time_array, location=self.ocs.earth_location)
         altaz = coord.transform_to(altaz_frames)
-        # add in focal plane offset from obs2tel file, convert from arcseconds to degrees
-        focal_plane_offset_az = self.obs2tel.get("obs_x_focal_plane") / 3600.0
-        focal_plane_offset_el = self.obs2tel.get("obs_y_focal_plane") / 3600.0
-        # add to altaz coordinates
-        az_with_focal_plane_offset = altaz.az.deg + focal_plane_offset_az
-        el_with_focal_plane_offset = altaz.alt.deg + focal_plane_offset_el
+
+        # Apply HORIZON-frame sky/map offsets after AltAz transform
+        if coord_sys_del == "HORIZON" and (lam_del != 0.0 or bet_del != 0.0):
+            altaz = _apply_offset(altaz, lam_del, bet_del, true_angle_del)
+
+        # Apply HORIZON-frame off-position offsets after AltAz transform
+        if coord_sys_off == "HORIZON" and (lam_off != 0.0 or bet_off != 0.0):
+            altaz = _apply_offset(altaz, lam_off, bet_off, true_angle_off)
+
+        # Apply focal plane offsets
+        if focal_plane_az != 0.0 or focal_plane_el != 0.0:
+            altaz = _apply_offset(altaz, focal_plane_az, focal_plane_el, "Y")
+
+        if if_extended:
+            az_array, el_array = get_overtop_altaz_from_nominal(
+                altaz.az.deg, altaz.alt.deg)
+        else:
+            az_array = altaz.az.deg
+            el_array = altaz.alt.deg
+
         # calculate the velocities in azimuth and elevation using np.gradient
         dt = np.gradient(time_array.unix)
-        az_velocities = np.gradient(az_with_focal_plane_offset) / dt
-        el_velocities = np.gradient(el_with_focal_plane_offset) / dt
-        # program track mode, see defintion here ICD-1000000-32000-02-00 VA Webserver - Remote Protocol
+        az_velocities = np.gradient(az_array) / dt
+        el_velocities = np.gradient(el_array) / dt
+
+        # program track mode, see definition here ICD-1000000-32000-02-00 VA Webserver
+        # - Remote Protocol
         mode = 0  #
-        mode_arr = np.full_like(az_with_focal_plane_offset, mode)
+        mode_arr = np.full_like(az_array, mode)
         # Assuming all arrays are 1D and of the same length
         points = np.column_stack(
             [
-                time_array.unix - time_array.unix[0],  # time in seconds since 1970
-                az_with_focal_plane_offset,
-                el_with_focal_plane_offset,
+                time_array.unix - time_array.unix[0],  # time offset in seconds since start of track
+                az_array,
+                el_array,
                 az_velocities,
                 el_velocities,
             ]
@@ -329,13 +698,28 @@ class KOSMA_translator:
             "coordsys": "Horizon",
             "points": points_list,
         }
-        #
+
         try:
-            response = self.ocs.scan_pattern(data=payload, stop_event=self._track_stop_event)
-            self.log.info(f"scan pattern response: {response}")
+            # TODO: find out a way to pass obs_wavelength together with payload
+            response = self.ocs.scan_pattern(
+                data=payload, stop_event=self._track_stop_event)
+            body = response.json()
+            self.last_payload = payload
+            self.last_obs2tel = self.obs2tel
+            self.old_tel_return_cookie = self.tel_return_cookie
+            self.tel_return_cookie = self.next_tel_return_cookie
+            self.tel_lost_track = "N"    # initialize for the new cookie
+            if response.status_code != 200 or body.get("status") != "ok":
+                self.log.error(
+                    f"scan_pattern rejected: HTTP {response.status_code}, "
+                    f"status={body.get('status')}, message={body.get('message')}"
+                )
+                self.tel_error = response.status_code
+            else:
+                self.log.info(f"scan_pattern accepted: {body}")
         except Exception as e:
             self.log.error(f"Track error: {e}")
-
+            self.tel_error = 1
 
     def stop_track(self):
         if self._track_thread and self._track_thread.is_alive():
@@ -348,6 +732,7 @@ class KOSMA_translator:
             self.log.info("Track thread stopped")
 
             self._track_thread = None
+
 
 def setup_logging(log_level):
     # setup logging to file and to screen
@@ -478,7 +863,7 @@ def main():
             #)
             continue
         translator.read_obs2tel_file()
-        if translator.tel_return_cookie == translator.old_tel_return_cookie:
+        if translator.tel_return_cookie == translator.next_tel_return_cookie:
             translator.log.info(
                 f"obs2tel cookie has not changed ({translator.tel_return_cookie}), no action taken"
             )

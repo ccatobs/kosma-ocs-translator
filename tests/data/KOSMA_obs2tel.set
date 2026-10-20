@@ -1,0 +1,26 @@
+19-Oct-2026  14:00:00   1729339200.000   File update time stamp   ! test
+3600   obs_tolerance   ! obs tolerance [arcsec]
+1   obs_cookie   ! cookie to identify observation
+1.0   obs_tel_info_update_time   ! update time [sec]
+J2000   obs_coord_sys_on   ! coordinate system of ON position
+83.8221   obs_lam_on   ! commanded longitude [deg] (RA for J2000) -- Orion A
+-5.3911   obs_bet_on   ! commanded latitude [deg] (Dec for J2000) -- Orion A
+0.0   obs_pm_lam   ! proper motion in lambda [arcsec/yr]
+0.0   obs_pm_bet   ! proper motion in beta [arcsec/yr]
+0.0   obs_paralx   ! parallax [arcsec]
+N   obs_extended_elevation_range   ! extended elevation range [Y/N]
+0.0   obs_lam_del   ! map offset in lambda [arcsec]
+0.0   obs_bet_del   ! map offset in beta [arcsec]
+J2000   obs_coord_sys_del   ! coordinate system of map offset
+Y   obs_true_angle_del   ! true angle correction for map offset [Y/N]
+0.0   obs_lam_vel   ! scan velocity in lambda [arcsec/s]
+0.0   obs_bet_vel   ! scan velocity in beta [arcsec/s]
+N   obs_otf_mode   ! OTF mode [N: track, C: cross-scan, P: pattern]
+0.0   obs_lam_off   ! off-position offset in lambda [arcsec]
+0.0   obs_bet_off   ! off-position offset in beta [arcsec]
+J2000   obs_coord_sys_off   ! coordinate system of off-position
+Y   obs_true_angle_off   ! true angle correction for off-position [Y/N]
+0.0   obs_x_focal_plane   ! focal plane x offset [arcsec]
+0.0   obs_y_focal_plane   ! focal plane y offset [arcsec]
+850.0   obs_wavelength   ! wavelength [micron]
+600   obs_track_duration   ! track duration [sec]
