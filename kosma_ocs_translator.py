@@ -66,8 +66,19 @@ def _apply_offset(coord, d_lam_arcsec, d_bet_arcsec, true_angle):
     """
 
     if true_angle == "Y":
+        # if required to be faster or completely consistent with KOSMA calculation,
+        # use the following simple delta calculation
+        # cos_lat = np.cos(coord.data.lat.rad)
+        # return SkyCoord(
+        #     coord.data.lon + (d_lam_arcsec / cos_lat) * u.arcsec,
+        #     coord.data.lat + d_bet_arcsec * u.arcsec,
+        #     frame=coord.frame,
+        # )
+
+        # spherical_offset_by is a full precision position angle
         return coord.spherical_offsets_by(
             d_lam_arcsec * u.arcsec, d_bet_arcsec * u.arcsec)
+
     return SkyCoord(
         coord.data.lon + d_lam_arcsec * u.arcsec,
         coord.data.lat + d_bet_arcsec * u.arcsec,
@@ -143,7 +154,7 @@ def ImportKOSMAReadWriteIntoDictionary(files=None, variable=None, update_mod_tim
         for i, line in enumerate(lines):
             # check for timestamp in header
             if re.match(".+File update time stamp.+", line):
-                timestamp = re.search(".+\s(\d+\.\d+)\s+\S+.+", line).groups()[0]
+                timestamp = re.search(r".+\s(\d+\.\d+)\s+\S+.+", line).groups()[0]
                 # if 'timestamp' not in readwrite_dict[readwrite_file].keys():
                 readwrite_dict[readwrite_file]["timestamp"] = timestamp
                 continue
@@ -161,11 +172,11 @@ def ImportKOSMAReadWriteIntoDictionary(files=None, variable=None, update_mod_tim
                 ]["file_timestamp"]
             # populate dictionary
             try:
-                result = re.search("(\S+)\s+(\S+)", data)
+                result = re.search(r"(\S+)\s+(\S+)", data)
                 if result:
                     value, variable_found = result.groups()
             except:
-                result = re.search("\s+(\S+)", data)
+                result = re.search(r"\s+(\S+)", data)
                 if result:
                     (variable_found,) = result.groups()
                 print("{0} variable found with no value ".format(variable_found))
@@ -259,8 +270,10 @@ class KOSMA_translator:
         # read all variables from obs2tel file into the object
         self.obs2tel = self.kio_files["KOSMA_obs2tel.set"]
 
-        # check all keys exist
+        # explicitly checks that the all required keys exist. Do not use a fallback to
+        # an arbitrary default value
         required_keys = [
+            "obs_cookie", "obs_coord_sys_on",
             "obs_lam_on", "obs_bet_on",
             "obs_pm_lam", "obs_pm_bet", "obs_paralx",
             "obs_extended_elevation_range",
@@ -268,7 +281,7 @@ class KOSMA_translator:
             "obs_lam_vel", "obs_bet_vel", "obs_otf_mode",
             "obs_lam_off", "obs_bet_off", "obs_coord_sys_off", "obs_true_angle_off",
             "obs_x_focal_plane", "obs_y_focal_plane",
-            "obs_wavelength",
+            "obs_wavelength", "obs_tolerance",
             "obs_track_duration",
         ]
         missing = [k for k in required_keys if k not in self.obs2tel]
@@ -277,8 +290,8 @@ class KOSMA_translator:
             raise KeyError(f"Missing required obs2tel keys: {missing}")
 
     def load_tel2obs_template(self):
-        self.tel2obs = """
-        {0[timestring]}  {0[timestamp]}   File update time stamp   ! ccat_translator (test_computer:1000)
+        self.tel2obs = """\
+        {0[timestring]}  {0[timestamp]}   File update time stamp   ! ccat_translator
         {0[tel_telescope]}   tel_telescope   ! Telescope Identifier (for display and backend_name in FITS header)
         {0[tel_on_track]}   tel_on_track   ! Y if tracking on commanded position/track within tolerance [Y/N]
         {0[tel_lost_track]}   tel_lost_track   ! Y if tracking got beyond tolerance since start of track [Y/N]
@@ -286,13 +299,13 @@ class KOSMA_translator:
         {0[tel_error]}   tel_error   ! flags telescope command syntax/consistency and functional errors (=0: ok)
         NONE   tel_error_string   ! Error message associated with telescope command (=NONE: OK)
         5   tel_error_level   ! Error level for message in tel_error_string [1: trace, 2: debug, 4: info, 5: message, 7: warn, 8: error, 9: fatal]
-            {0[tel_return_cookie]}  tel_return_cookie   ! return cookie to identify proper observation
-            {0[tel_plate_scale]}  tel_plate_scale   ! plate scale of focal plane [arcsec/mm]
-            {0[tel_latitude]}   tel_latitude   ! latitude of observatory (needed for Doppler correction) [degree]
-            {0[tel_longitude]}  tel_longitude   ! longitude of observatory (needed for Doppler correction) [degree, +west (astronomical notation)]
-            {0[tel_altitude]}  tel_altitude   ! height above sea level (needed for Doppler correction) [meter]
-            {0[tel_angle_focal_plane]}   tel_angle_focal_plane   ! ccw angle from second coordinate of the telescope reference coordinate system (TARF,HORIZON) to second coordinate of obs_coord_sys_del [degree]
-                 0   tel_los_act   ! actual los-angle [degree]
+        {0[tel_return_cookie]}  tel_return_cookie   ! return cookie to identify proper observation
+        {0[tel_plate_scale]}  tel_plate_scale   ! plate scale of focal plane [arcsec/mm]
+        {0[tel_latitude]}   tel_latitude   ! latitude of observatory (needed for Doppler correction) [degree]
+        {0[tel_longitude]}  tel_longitude   ! longitude of observatory (needed for Doppler correction) [degree, +west (astronomical notation)]
+        {0[tel_altitude]}  tel_altitude   ! height above sea level (needed for Doppler correction) [meter]
+        {0[tel_angle_focal_plane]}   tel_angle_focal_plane   ! ccw angle from second coordinate of the telescope reference coordinate system (TARF,HORIZON) to second coordinate of obs_coord_sys_del [degree]
+        0   tel_los_act   ! actual los-angle [degree]
         {0[tel_time_act]}   tel_time_act   ! time when status data were valid [seconds since 1970 UTC]
         {0[tel_time_del]}   tel_time_del   ! time since start of track (may be negative, if start in the future) [seconds]
         {0[tel_azm_cmd]:3.4f}   tel_azm_cmd   ! commanded azimuth (for tracking display) [degree,cw toward east]
@@ -300,11 +313,11 @@ class KOSMA_translator:
         {0[tel_azm_act]:3.4f}   tel_azm_act   ! actual azimuth (for tracking display) [degree,cw toward east]
         {0[tel_elv_act]:3.4f}   tel_elv_act   ! actual elevation (for tracking display) [degree]
         {0[tel_supports_ephemeris]}   tel_supports_ephemeris   ! Telescope supports ephemeris tracking [Y/N] !
-        {0[tel_mjd1]}    tel_mjd1 ! MJD of integer part of current time [days] 
+        {0[tel_mjd1]}    tel_mjd1 ! modified Julian Date UT1 [days]
         """
 
     def load_ccdpossim_template(self):
-        self.ccdpossim = """
+        self.ccdpossim = """\
         {0[timestring]}  {0[timestamp]}   File update time stamp   ! ccat_translator (test_computer:1000)
         {0[op_azm]}  op_azm   ! azimuth [radian] for optical pointing (commanded to telescope, without pointing model corrections)
         {0[op_elv]}  op_elv   ! elevatin [radian] for optical pointing (commanded to telescope, without pointing model corrections)
@@ -360,7 +373,7 @@ class KOSMA_translator:
         status_time = _get_time_from_acu_format(day_of_year, year)
         # time stamp of the status
         input_dict["tel_time_act"] = status_time.unix
-        input_dict["tel_mjd1"] = status_time.ut1
+        input_dict["tel_mjd1"] = status_time.ut1.mjd
 
         t0 = self.last_payload["start_time"]
         pts = np.array(self.last_payload["points"])   # shape (N, 5): dt, az, el, vaz, vel

@@ -5,10 +5,8 @@ Adding a new scenario is a one-liner: append a Case to CASES with only the
 fields that differ from the defaults in helpers.py.  The parametrised test
 function handles the rest.
 
-NOTE: test_tel_angle_focal_plane_j2000_matches_reference will currently fail
-because set_tel2obs_dict creates the SkyCoord for *pos* without passing
-frame=altaz_frame.  Fix that line first, then this test should pass.
 """
+from pathlib import Path
 import pytest
 import numpy as np
 from dataclasses import dataclass, field
@@ -215,9 +213,6 @@ def test_tel_angle_focal_plane_j2000_matches_reference(translator_factory, mock_
     reference calculation (same geometry, implemented directly in astropy)
     to within 0.1 degrees.
 
-    NOTE: this test currently fails because set_tel2obs_dict creates pos =
-    SkyCoord(az=..., alt=...) without passing frame=altaz_frame.  Add that
-    argument and the test will pass.
     """
     az_cmd, el_cmd = 180.0, 45.0
 
@@ -249,3 +244,28 @@ def test_tel_angle_focal_plane_j2000_matches_reference(translator_factory, mock_
         f"tel_angle_focal_plane={computed:.3f} deg, "
         f"reference={ref_angle:.3f} deg, diff={abs(computed - ref_angle):.3f} deg"
     )
+
+
+# ---------------------------------------------------------------------------
+# Output file format inspection
+# ---------------------------------------------------------------------------
+
+def test_write_tel2obs_file_produces_output(translator_factory, tmp_path):
+    """
+    Write KOSMA_tel2obs.set and KOSMA_ccdpos.sim to tests/output/ for format inspection.
+    Files are also written under pytest's tmp_path (the translator's working directory).
+    """
+    output_dir = Path(__file__).parent / "output"
+    output_dir.mkdir(exist_ok=True)
+
+    t = translator_factory()
+    t.write_tel2obs_file()
+
+    tel2obs_path = tmp_path / "KOSMA_tel2obs.set"
+    ccdpos_path = tmp_path / "KOSMA_ccdpos.sim"
+
+    assert tel2obs_path.exists(), "KOSMA_tel2obs.set was not written"
+    assert ccdpos_path.exists(), "KOSMA_ccdpos.sim was not written"
+
+    (output_dir / "KOSMA_tel2obs.set").write_text(tel2obs_path.read_text())
+    (output_dir / "KOSMA_ccdpos.sim").write_text(ccdpos_path.read_text())
