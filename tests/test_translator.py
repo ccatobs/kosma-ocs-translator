@@ -247,6 +247,65 @@ def test_tel_angle_focal_plane_j2000_matches_reference(translator_factory, mock_
 
 
 # ---------------------------------------------------------------------------
+# Dedicated test: tel_angle_focal_plane equals parallactic angle for J2000
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("az_cmd,el_cmd", [
+    pytest.param(180.0, 45.0, id="south_midsky"),
+    pytest.param( 90.0, 30.0, id="east_low"),    # rising:  HA < 0 → q < 0
+    pytest.param(270.0, 30.0, id="west_low"),    # setting: HA > 0 → q > 0
+    pytest.param(  0.0, 60.0, id="north_high"),  # north of zenith at CCAT lat=-23°
+    pytest.param(180.0, 20.0, id="south_low"),
+])
+def test_tel_angle_focal_plane_equals_parallactic_angle_j2000(
+    translator_factory, mock_ocs, az_cmd, el_cmd
+):
+    """
+    For J2000 coord_sys_on, tel_angle_focal_plane equals the parallactic angle
+    q = arctan2(sin H, tan φ · cos δ − sin δ · cos H)
+    at each commanded az/el position, verifying magnitude and sign.
+
+    The reference derives RA/Dec from the commanded az/el (the same position
+    the code uses), so the comparison is independent of obs_lam_on/obs_bet_on.
+    """
+    t = translator_factory(
+        obs2tel_overrides={"obs_coord_sys_on": "J2000"},
+        status_overrides={
+            "Azimuth commanded position": az_cmd,
+            "Elevation commanded position": el_cmd,
+            "Azimuth current position": az_cmd,
+            "Elevation current position": el_cmd,
+        },
+    )
+    result, _ = t.set_tel2obs_dict()
+    computed = result["tel_angle_focal_plane"]
+
+    status = mock_ocs.get_status.return_value
+    obstime = _get_time_from_acu_format(status["Time"], status["Year"])
+    altaz_frame = AltAz(obstime=obstime, location=CCAT_LOCATION)
+
+    pos_icrs = SkyCoord(
+        az=az_cmd * u.deg, alt=el_cmd * u.deg, frame=altaz_frame
+    ).transform_to("icrs")
+
+    lst = obstime.sidereal_time("apparent", longitude=CCAT_LOCATION.lon)
+    ha_rad = (lst - pos_icrs.ra).wrap_at(180 * u.deg).rad
+    lat_rad = CCAT_LOCATION.lat.rad
+    dec_rad = pos_icrs.dec.rad
+
+    para = np.rad2deg(np.arctan2(
+        np.sin(ha_rad),
+        np.tan(lat_rad) * np.cos(dec_rad) - np.sin(dec_rad) * np.cos(ha_rad),
+    ))
+
+    assert abs(computed - para) < 0.1, (
+        f"az={az_cmd}, el={el_cmd}: "
+        f"tel_angle_focal_plane={computed:.3f} deg, "
+        f"parallactic_angle={para:.3f} deg, diff={abs(computed - para):.3f} deg"
+    )
+
+
+# ---------------------------------------------------------------------------
 # Output file format inspection
 # ---------------------------------------------------------------------------
 

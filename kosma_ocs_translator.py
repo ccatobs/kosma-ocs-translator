@@ -3,6 +3,7 @@ import time, datetime
 import random
 import logging
 import os, glob, re
+import socket
 from ocs import observatory_control_system
 from astropy.coordinates import SkyCoord, EarthLocation, AltAz, Distance
 from astropy import units as u
@@ -215,6 +216,7 @@ class KOSMA_translator:
         self.ocs = ocs
         #
         self.log = logging.getLogger("kosma-ocs-translator")
+        self._host_pid = f"({socket.gethostname()}:{os.getpid()})"
         #
         self.read_write_dir = os.environ.get(
             "WRITE_DIR", "/net/KOSMA_file_io/ReadWrite/"
@@ -230,8 +232,12 @@ class KOSMA_translator:
         self.tel_error = 0
         self.tel_lost_track = "N"
         self.read_obs2tel_file()
-        # get the telescope position from the ocs
-        self.ocs.get_telescope_position()
+        # For now, ocs.get_telescope_position() always fall back to
+        # a hard coded earth_location.
+        # If this is solved on the OCS side and wants to use values
+        # read from the ACU is prefered, use get_telescope_position
+        # instead of ocs.earth_location
+        # self.ocs.get_telescope_position()
         self.location = ocs.earth_location
         self.log.info(f"Telescope location: {self.location}")
         # Add tracking thread management
@@ -291,7 +297,7 @@ class KOSMA_translator:
 
     def load_tel2obs_template(self):
         self.tel2obs = """\
-        {0[timestring]}  {0[timestamp]}   File update time stamp   ! ccat_translator
+        {0[timestring]}  {0[timestamp]}   File update time stamp   ! ccat_translator {0[host_pid]}
         {0[tel_telescope]}   tel_telescope   ! Telescope Identifier (for display and backend_name in FITS header)
         {0[tel_on_track]}   tel_on_track   ! Y if tracking on commanded position/track within tolerance [Y/N]
         {0[tel_lost_track]}   tel_lost_track   ! Y if tracking got beyond tolerance since start of track [Y/N]
@@ -318,7 +324,7 @@ class KOSMA_translator:
 
     def load_ccdpossim_template(self):
         self.ccdpossim = """\
-        {0[timestring]}  {0[timestamp]}   File update time stamp   ! ccat_translator (test_computer:1000)
+        {0[timestring]}  {0[timestamp]}   File update time stamp   ! ccat_translator {0[host_pid]}
         {0[op_azm]}  op_azm   ! azimuth [radian] for optical pointing (commanded to telescope, without pointing model corrections)
         {0[op_elv]}  op_elv   ! elevatin [radian] for optical pointing (commanded to telescope, without pointing model corrections)
         {0[op_oazm]}  op_oazm   ! azimuth pointing offset [rad]; optical pointing (HORIZON system)
@@ -337,9 +343,9 @@ class KOSMA_translator:
 
         # Fixed values
         input_dict["tel_pos_in_range"] = "Y"     # practically not used
-        input_dict["tel_latitude"] = self.ocs.earth_location.lat.deg
-        input_dict["tel_longitude"] = self.ocs.earth_location.lon.deg
-        input_dict["tel_altitude"] = self.ocs.earth_location.height.to(u.m).value
+        input_dict["tel_latitude"] = self.location.lat.deg
+        input_dict["tel_longitude"] = self.location.lon.deg
+        input_dict["tel_altitude"] = self.location.height.to(u.m).value
         input_dict["tel_telescope"] = "CCAT"
         input_dict["tel_supports_ephemeris"] = "N"
         input_dict["tel_plate_scale"] = "13.89"
@@ -393,7 +399,7 @@ class KOSMA_translator:
             input_dict["tel_angle_focal_plane"] = 0.0
         else:
             # calculation is needed
-            altaz_frame = AltAz(obstime=status_time, location=self.ocs.earth_location)
+            altaz_frame = AltAz(obstime=status_time, location=self.location)
 
             pos = SkyCoord(
                 az=input_dict["tel_azm_cmd"], alt=input_dict["tel_elv_cmd"],
@@ -420,6 +426,7 @@ class KOSMA_translator:
         current = time.localtime()
         input_dict["timestamp"] = time.time()
         input_dict["timestring"] = time.strftime(fmt, current)
+        input_dict["host_pid"] = self._host_pid
 
         return input_dict
 
@@ -455,6 +462,7 @@ class KOSMA_translator:
 
         ccd_input_dict["timestamp"] = input_dict["timestamp"]
         ccd_input_dict["timestring"] = input_dict["timestring"]
+        ccd_input_dict["host_pid"] = input_dict["host_pid"]
 
         return ccd_input_dict
 
@@ -577,7 +585,7 @@ class KOSMA_translator:
         # For this case, it does not make much sense if map or off offset is given
         # by other coordinate system but such a case is also covered below.
         if frame.lower() == "altaz":
-            now_frame = AltAz(obstime=Time.now(), location=self.ocs.earth_location)
+            now_frame = AltAz(obstime=Time.now(), location=self.location)
             coord = SkyCoord(cmd_lam * u.deg, cmd_bet * u.deg, frame=now_frame)
             if lam_del != 0.0 or bet_del != 0.0:
                 if coord_sys_del == "HORIZON":
@@ -674,7 +682,7 @@ class KOSMA_translator:
             0, track_duration, n_steps) * u.second
 
         # calculate the altaz coordinates for each time step
-        altaz_frames = AltAz(obstime=time_array, location=self.ocs.earth_location)
+        altaz_frames = AltAz(obstime=time_array, location=self.location)
         altaz = coord.transform_to(altaz_frames)
 
         # Apply HORIZON-frame sky/map offsets after AltAz transform
@@ -812,6 +820,11 @@ def parse_arguments():
         action="store_true",
         help="Use roof mount connection instead of OCS connection. Default is False.",
     )
+    parser.add_argument(
+        "--use-local-dev",
+        action="store_true",
+        help="Connect to the OCS of the local development setup (127.0.0.1:5600). Default is False.",
+    )
     return parser.parse_args()
 
 
@@ -821,19 +834,35 @@ def run_write_tel2obs_file_in_background(translator):
         time.sleep(translator.obs_tel_info_update_time)
 
 
-ocs_host = "127.0.0.1"
-ocs_port = 5600
-# certificates_path = "../observatory-control-system/tls"
-certificates_path = None
-ocs = None
+def setup_ocs(use_roof_mount=False, use_local_dev=False, certificates_path=None,
+              logger=None):
+    """
+    Set up the connection to the telescope control (OCS or roof mount).
+    Can be imported by other scripts to share the same connection treatment.
 
+    Parameters
+    ----------
+    use_roof_mount : bool
+        If True, connect to the roof mount instead of OCS.
+    use_local_dev : bool
+        If True, connect to the OCS of the local development setup.
+        If neither use_roof_mount nor use_local_dev is True, connect to the
+        OCS at the observatory.
+    certificates_path : str
+        Path to the directory with the OCS TLS certificates.
+        Required when use_roof_mount is False.
+    logger : logging.Logger, optional
+        Logger to use. Defaults to the "kosma-ocs-translator" logger.
 
-def main():
-    args = parse_arguments()
-    certificates_path = args.certificates_path
-    log_level = getattr(logging, args.log_level)
-    logger = setup_logging(log_level)
-    if args.use_roof_mount:
+    Returns
+    -------
+    ocs : observatory_control_system or RoofMount
+    """
+    if logger is None:
+        logger = logging.getLogger("kosma-ocs-translator")
+    if use_roof_mount and use_local_dev:
+        raise ValueError("use_roof_mount and use_local_dev cannot both be set")
+    if use_roof_mount:
         logger.info("Using roof mount connection")
         roof_mount_host = "134.95.46.51"
         roof_mount_port = 2000
@@ -845,7 +874,15 @@ def main():
         os.system(f"Kset_master master_obs_tolerance {obs_tolerance}")
         os.system(f"KOSMA_track")
     else:
-        logger.info("Using OCS connection")    
+        if use_local_dev:
+            logger.info("Using OCS connection (local development)")
+            ocs_host = "127.0.0.1"
+            ocs_port = 5600
+        else:
+            logger.info("Using OCS connection at the observatory")
+            # TODO: placeholder, replace with the actual OCS host and port
+            ocs_host = "ocs.example.invalid"
+            ocs_port = 5600
         print(f"Using certificates path: {certificates_path}")
         ocs = observatory_control_system(
             url=f"https://{ocs_host}:{ocs_port}",
@@ -853,6 +890,19 @@ def main():
             client_cert=f"{certificates_path}/client.cert.pem",
             client_key=f"{certificates_path}/client.key.pem",
         )
+    return ocs
+
+
+def main():
+    args = parse_arguments()
+    log_level = getattr(logging, args.log_level)
+    logger = setup_logging(log_level)
+    ocs = setup_ocs(
+        use_roof_mount=args.use_roof_mount,
+        use_local_dev=args.use_local_dev,
+        certificates_path=args.certificates_path,
+        logger=logger,
+    )
     translator = KOSMA_translator(ocs)
     background_thread = threading.Thread(
         target=run_write_tel2obs_file_in_background, args=(translator,)
