@@ -54,6 +54,8 @@ DEFAULT_STATUS = {
     "Elevation current position": 45.0,
     "Azimuth commanded position": 180.0,
     "Elevation commanded position": 45.0,
+    "Azimuth current velocity": 0.0,     # deg/s
+    "Elevation current velocity": 0.0,   # deg/s
     "Time": 292.5,   # day 292.5 of 2026 ≈ 2026-10-19 12:00 UTC
     "Year": 2026,
 }

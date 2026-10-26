@@ -41,7 +41,7 @@ CASES = [
     # ---- coordinate systems ------------------------------------------------
     Case(
         id="horizon_tel_angle_focal_plane_is_zero",
-        obs2tel={"obs_coord_sys_on": "HORIZON", "obs_lam_on": 180.0, "obs_bet_on": 45.0},
+        obs2tel={"obs_coord_sys_del": "HORIZON", "obs_lam_on": 180.0, "obs_bet_on": 45.0},
         status={"Azimuth commanded position": 180.0, "Elevation commanded position": 45.0},
         checks={"tel_angle_focal_plane": 0.0},
     ),
@@ -239,6 +239,7 @@ def test_tel_angle_focal_plane_j2000_matches_reference(translator_factory, mock_
     ref_angle = np.rad2deg(np.arctan2(dalt, daz)) - 90.0
     if ref_angle < -180.0:
         ref_angle += 360.0
+    ref_angle *= -1  # KOSMA convention: ccw from the reference system's second axis
 
     assert abs(computed - ref_angle) < 0.1, (
         f"tel_angle_focal_plane={computed:.3f} deg, "
@@ -261,15 +262,17 @@ def test_tel_angle_focal_plane_equals_parallactic_angle_j2000(
     translator_factory, mock_ocs, az_cmd, el_cmd
 ):
     """
-    For J2000 coord_sys_on, tel_angle_focal_plane equals the parallactic angle
-    q = arctan2(sin H, tan φ · cos δ − sin δ · cos H)
-    at each commanded az/el position, verifying magnitude and sign.
+    For J2000 coord_sys_del, tel_angle_focal_plane equals the parallactic angle
+    (angle between the zenith direction and celestial north at each commanded
+    az/el position), verifying magnitude and sign. Here "north" is the ICRS
+    pole, which is what J2000 means; it differs from the north pole of date
+    (the textbook parallactic angle) by up to ~0.4 deg at the current epoch.
 
-    The reference derives RA/Dec from the commanded az/el (the same position
-    the code uses), so the comparison is independent of obs_lam_on/obs_bet_on.
+    The reference is the spherical bearing from the commanded az/el to the
+    ICRS pole, so the comparison is independent of obs_lam_on/obs_bet_on.
     """
     t = translator_factory(
-        obs2tel_overrides={"obs_coord_sys_on": "J2000"},
+        obs2tel_overrides={"obs_coord_sys_del": "J2000"},
         status_overrides={
             "Azimuth commanded position": az_cmd,
             "Elevation commanded position": el_cmd,
@@ -284,25 +287,48 @@ def test_tel_angle_focal_plane_equals_parallactic_angle_j2000(
     obstime = _get_time_from_acu_format(status["Time"], status["Year"])
     altaz_frame = AltAz(obstime=obstime, location=CCAT_LOCATION)
 
-    pos_icrs = SkyCoord(
-        az=az_cmd * u.deg, alt=el_cmd * u.deg, frame=altaz_frame
-    ).transform_to("icrs")
-
-    lst = obstime.sidereal_time("apparent", longitude=CCAT_LOCATION.lon)
-    ha_rad = (lst - pos_icrs.ra).wrap_at(180 * u.deg).rad
-    lat_rad = CCAT_LOCATION.lat.rad
-    dec_rad = pos_icrs.dec.rad
+    # Direction from the commanded position to the ICRS north pole, as a
+    # spherical bearing in (az, alt) measured from the zenith direction towards
+    # increasing az. The ICRS pole is used (not the pole of date), because
+    # J2000 axes differ from the equinox of date by ~0.3-0.4 deg now.
+    pole = SkyCoord(ra=0 * u.deg, dec=90 * u.deg, frame="icrs").transform_to(altaz_frame)
+    az, alt = np.deg2rad(az_cmd), np.deg2rad(el_cmd)
+    daz, alt_p = pole.az.rad - az, pole.alt.rad
 
     para = np.rad2deg(np.arctan2(
-        np.sin(ha_rad),
-        np.tan(lat_rad) * np.cos(dec_rad) - np.sin(dec_rad) * np.cos(ha_rad),
+        np.sin(daz) * np.cos(alt_p),
+        np.cos(alt) * np.sin(alt_p) - np.sin(alt) * np.cos(alt_p) * np.cos(daz),
     ))
 
-    assert abs(computed - para) < 0.1, (
+    diff = (computed - para + 180.0) % 360.0 - 180.0
+    assert abs(diff) < 0.1, (
         f"az={az_cmd}, el={el_cmd}: "
         f"tel_angle_focal_plane={computed:.3f} deg, "
-        f"parallactic_angle={para:.3f} deg, diff={abs(computed - para):.3f} deg"
+        f"parallactic_angle={para:.3f} deg, diff={abs(diff):.3f} deg"
     )
+
+
+# ---------------------------------------------------------------------------
+# Dedicated test: tel_vel_azm / tel_vel_elv converted from deg/s to arcsec/s
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("vel_azi,vel_ele", [
+    pytest.param( 0.0,   0.0,   id="stationary"),
+    pytest.param( 0.01,  0.0,   id="azimuth_only"),
+    pytest.param( 0.0,  -0.005, id="elevation_only_negative"),
+    pytest.param(-0.25,  0.1,   id="both"),
+])
+def test_tel_vel_converted_to_arcsec_per_sec(translator_factory, vel_azi, vel_ele):
+    t = translator_factory(
+        status_overrides={
+            "Azimuth current velocity": vel_azi,
+            "Elevation current velocity": vel_ele,
+        },
+    )
+    result, _ = t.set_tel2obs_dict()
+
+    assert result["tel_vel_azm"] == pytest.approx(vel_azi * 3600.0)
+    assert result["tel_vel_elv"] == pytest.approx(vel_ele * 3600.0)
 
 
 # ---------------------------------------------------------------------------

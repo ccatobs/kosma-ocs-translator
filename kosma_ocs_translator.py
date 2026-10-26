@@ -322,6 +322,8 @@ class KOSMA_translator:
         {0[tel_elv_act]:3.4f}   tel_elv_act   ! actual elevation (for tracking display) [degree]
         {0[tel_supports_ephemeris]}   tel_supports_ephemeris   ! Telescope supports ephemeris tracking [Y/N] !
         {0[tel_mjd1]}    tel_mjd1 ! modified Julian Date UT1 [days]
+        {0[tel_vel_azm]} tel_vel_azm ! azimuth velocity [arcsec/sec]
+        {0[tel_vel_elv]} tel_vel_elv ! elevation velocity [arcsec/sec]
         """
 
     def load_ccdpossim_template(self):
@@ -375,6 +377,12 @@ class KOSMA_translator:
             self.tel_lost_track = "Y"
         input_dict["tel_lost_track"] = self.tel_lost_track
 
+        # velocity
+        vel_azi = response["Azimuth current velocity"]
+        vel_ele = response["Elevation current velocity"]
+        input_dict["tel_vel_azm"] = vel_azi * 3600.    # deg/s to arcsec/s
+        input_dict["tel_vel_elv"] = vel_ele * 3600.    # deg/s to arcsec/s
+        
         # commanded and actual positions and timestamp
         day_of_year = response["Time"]
         year = response["Year"]
@@ -395,12 +403,15 @@ class KOSMA_translator:
         input_dict["tel_azm_act"] = input_dict["tel_azm_cmd"] + acu_azm_del
         input_dict["tel_elv_act"] = input_dict["tel_elv_cmd"] + acu_elv_del
 
-        # TODO: careful check of signs and definitions
-        cmd_coord_sys_on = self.last_obs2tel["obs_coord_sys_on"]
-        if cmd_coord_sys_on == "HORIZON":
+        # Calculate angle between coordinate systems
+        cmd_coord_sys_del = self.last_obs2tel["obs_coord_sys_del"]
+        if cmd_coord_sys_del == "HORIZON":
             input_dict["tel_angle_focal_plane"] = 0.0
         else:
-            # calculation is needed
+            # Calculation is needed:
+            # Calculate north (+epsilon in the second axis cmd_coord_sys_del) in Horizon
+            # then csys_del -> horizon (opposite sign)
+
             altaz_frame = AltAz(obstime=status_time, location=self.location)
 
             pos = SkyCoord(
@@ -409,7 +420,7 @@ class KOSMA_translator:
 
             epsilon = 1e-3  # about 4 arcsec, small angle approximation is sufficient
             north = _apply_offset(
-                pos.transform_to(coord_sys_map[cmd_coord_sys_on]), 0, epsilon, 'Y'
+                pos.transform_to(coord_sys_map[cmd_coord_sys_del]), 0, epsilon, 'Y'
             ).transform_to(altaz_frame)
 
             angle = np.arctan2(
@@ -420,7 +431,7 @@ class KOSMA_translator:
             if tel_angle_focal_plane < -180:
                 tel_angle_focal_plane += 360.
 
-            input_dict["tel_angle_focal_plane"] = tel_angle_focal_plane
+            input_dict["tel_angle_focal_plane"] = tel_angle_focal_plane * (-1)
 
         self.log.info(f"on track: {input_dict['tel_on_track']} az:{input_dict['tel_azm_act']:3.2f} ele:{input_dict['tel_elv_act']:3.2f} cmd_az:{input_dict['tel_azm_cmd']:3.2f} cmd_ele:{input_dict['tel_elv_cmd']:3.2f} obs_tolerance: {self.obs_tolerance/3600.0:3.2f} deg ")
 
@@ -764,7 +775,7 @@ class KOSMA_translator:
             # within the margin left by track_overhead (11 sec vs 9.8 sec required
             # by TCS); a later retry would be rejected as starting too soon anyway.
             lead_send = payload["start_time"] - time.time()
-            response = self.ocs.scan_pattern(data=payload, busy_timeout=1)
+            response = self.ocs.scan_pattern(data=payload, busy_timeout=1, retry_interval=0.3)
             lead_done = payload["start_time"] - time.time()
             self.log.info(
                 f"start_time lead: {lead_send:.3f} s before send, "
