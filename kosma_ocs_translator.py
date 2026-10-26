@@ -679,12 +679,28 @@ class KOSMA_translator:
             f"tracking to {coord.data.lon.deg} {coord.data.lat.deg} in {cmd_coord_sys_on} frame"
         )
 
+        # Abort the previous path first (409 "nothing to abort" when idle is harmless).
+        # This must come before time_array is built: TCS rejects a path starting
+        # less than 9.8 sec from its arrival, so the abort must not eat into the
+        # overhead below. The telescope is not tracking from here until the new
+        # path starts.
+        if self._track_stop_event.is_set():
+            self.log.info("Track superseded, previous path not aborted")
+            return
+        try:
+            self.ocs.abort()
+        except Exception as e:
+            self.log.error(f"Abort error: {e}")
+            self.tel_error = 1
+            return
+
         # make an array of times from now + overhead to now + overhead + track_duration,
         # with 1 second steps
         # Overhead [sec] to account for computation and communication delay
         # TCS requires > 10 sec ahead
         track_overhead = 11
         n_steps = int(track_duration) + 1
+        t_build = time.perf_counter()
         time_array = Time.now() + track_overhead * u.second + np.linspace(
             0, track_duration, n_steps) * u.second
 
@@ -736,12 +752,24 @@ class KOSMA_translator:
             "coordsys": "Horizon",
             "points": points_list,
         }
+        self.log.info(f"payload computed in {time.perf_counter() - t_build:.3f} s")
 
         try:
             # TODO: find out a way to pass obs_wavelength together with payload
-            # response = self.ocs.scan_pattern(
-            #     data=payload, stop_event=self._track_stop_event)
-            response = self.ocs.scan_pattern(data=payload)
+            # A newer track has superseded this one while the payload was computed
+            if self._track_stop_event.is_set():
+                self.log.info("Track superseded, payload not sent")
+                return
+            # TCS answers 503 (busy) until it is idle after the abort. Retry only
+            # within the margin left by track_overhead (11 sec vs 9.8 sec required
+            # by TCS); a later retry would be rejected as starting too soon anyway.
+            lead_send = payload["start_time"] - time.time()
+            response = self.ocs.scan_pattern(data=payload, busy_timeout=1)
+            lead_done = payload["start_time"] - time.time()
+            self.log.info(
+                f"start_time lead: {lead_send:.3f} s before send, "
+                f"{lead_done:.3f} s after response (TCS needs >= 9.8 s)"
+            )
             body = response.json()
             self.last_payload = payload
             self.last_obs2tel = self.obs2tel
