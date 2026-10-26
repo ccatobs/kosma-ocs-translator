@@ -12,9 +12,9 @@ DATA_DIR = Path(__file__).parent / "data"
 
 # CCAT site coordinates
 CCAT_LOCATION = EarthLocation(
-    lat=-22.9585 * u.deg,
-    lon=-67.7576 * u.deg,
-    height=5611 * u.m,
+    lat=-22.985639 * u.deg,
+    lon=-67.740278 * u.deg,
+    height=5611.8 * u.m,
 )
 
 # Default obs2tel values — mirror of tests/data/KOSMA_obs2tel.set.

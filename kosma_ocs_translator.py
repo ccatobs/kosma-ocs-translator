@@ -23,6 +23,8 @@ try:
     from sun_avoidance.telescope import get_overtop_altaz_from_nominal
 except:
     print("sun-avoidance not found. Install from git@github.com:ccatobs/sun-avoidance.git")
+    sys.exit(1)
+
 
 coord_sys_map = {
     "J2000": "icrs",
@@ -472,7 +474,7 @@ class KOSMA_translator:
         """
         if self.last_payload is None or self.last_obs2tel is None:
             self.log.info('No record of successfully sent command to telescope. Wait...')
-            return
+            return None, None
 
         response = self.ocs.get_status()
         input_dict = self._build_tel2obs_params(response)
@@ -485,6 +487,9 @@ class KOSMA_translator:
 
     def write_tel2obs_file(self):
         input_dict, ccd_input_dict = self.set_tel2obs_dict()
+        if input_dict is None:
+            return
+
         self.log.debug(
             f"writing tel2obs file with obs cookie: {self.tel_return_cookie}"
         )
@@ -676,7 +681,9 @@ class KOSMA_translator:
 
         # make an array of times from now + overhead to now + overhead + track_duration,
         # with 1 second steps
-        track_overhead = 3  # seconds, to account for computation and communication delay
+        # Overhead [sec] to account for computation and communication delay
+        # TCS requires > 10 sec ahead
+        track_overhead = 11
         n_steps = int(track_duration) + 1
         time_array = Time.now() + track_overhead * u.second + np.linspace(
             0, track_duration, n_steps) * u.second
@@ -732,8 +739,9 @@ class KOSMA_translator:
 
         try:
             # TODO: find out a way to pass obs_wavelength together with payload
-            response = self.ocs.scan_pattern(
-                data=payload, stop_event=self._track_stop_event)
+            # response = self.ocs.scan_pattern(
+            #     data=payload, stop_event=self._track_stop_event)
+            response = self.ocs.scan_pattern(data=payload)
             body = response.json()
             self.last_payload = payload
             self.last_obs2tel = self.obs2tel
@@ -799,12 +807,14 @@ def setup_logging(log_level):
 
 
 def parse_arguments():
+    def_cpath = "../CCAT/observatory-control-system/tls"
+
     parser = argparse.ArgumentParser(description="KOSMA OCS Translator")
     parser.add_argument(
         "--certificates-path",
         type=str,
-        default="../CCAT/observatory-control-system/tls",
-        help="Path to the certificates directory.",
+        default=def_cpath,
+        help=f"Path to the certificates directory. Default is {def_cpath}",
     )
     parser.add_argument(
         "--log-level",
