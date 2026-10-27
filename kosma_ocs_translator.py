@@ -237,6 +237,11 @@ class KOSMA_translator:
         # [sec] after path start_time before the cookie is returned, so that the
         # ACU commanded position has switched to the new path
         self.cookie_start_margin = 1.0
+        # [sec] length of a path sent to TCS (and of the move-to bookkeeping payload)
+        self.track_duration = 600
+        # [sec] minimum remaining time of the last path to keep it for a new obs2tel
+        # commanding the same target (see reuse_last_track)
+        self.reuse_min_remaining = self.track_duration / 2
         # True if the path for tel_return_cookie was rejected or failed to be sent
         self.tel_path_failed = False
         self.tel_error = 0
@@ -641,7 +646,7 @@ class KOSMA_translator:
                 raise ValueError(msg)
 
         # track details
-        track_duration = 600  # seconds
+        track_duration = self.track_duration  # seconds
         frame = coord_sys_map[cmd_coord_sys_on]
 
         # If coordinate system of ON is Horizon, use move-to.
@@ -892,6 +897,49 @@ class KOSMA_translator:
         self.tel_return_cookie = cookie
         self.tel_lost_track = "N"
 
+    # obs2tel variables that define the commanded path; obs2tel files that differ
+    # only in other variables (e.g. the cookie) command the same path
+    SAME_TARGET_KEYS = [
+        "obs_lam_on", "obs_bet_on", "obs_coord_sys_on",
+        "obs_lam_del", "obs_bet_del", "obs_coord_sys_del",
+        "obs_lam_off", "obs_bet_off", "obs_coord_sys_off",
+        "obs_extended_elevation_range",
+        "obs_x_focal_plane", "obs_y_focal_plane",
+        "obs_otf_mode", "obs_lam_vel", "obs_bet_vel",
+    ]
+
+    def reuse_last_track(self):
+        """
+        If the new obs2tel commands the same target as the last accepted path
+        and that path has at least reuse_min_remaining left, keep it instead of
+        aborting and resending it (e.g. control_tel presets the next position,
+        then commands the same position again with a new cookie).
+        Returns True if the last path is reused.
+        """
+        if self.last_payload is None or self.last_obs2tel is None or self.tel_path_failed:
+            return False
+        if self._track_thread and self._track_thread.is_alive():
+            return False
+        if any(self.obs2tel[k] != self.last_obs2tel[k] for k in self.SAME_TARGET_KEYS):
+            return False
+        if self.last_payload["type"] != "move_to":
+            last_end_time = self.last_payload["start_time"] + self.last_payload["points"][-1][0]
+            if last_end_time - time.time() < self.reuse_min_remaining:
+                return False
+
+        cookie = self.next_tel_return_cookie
+        self.last_obs2tel = self.obs2tel
+        if self.pending_tel_return_cookie is not None:
+            # path not started yet: return the new cookie instead, once it started
+            self.log.info(f"same target, cookie {cookie} replaces pending cookie")
+            self.pending_tel_return_cookie = cookie
+        else:
+            self.log.info(f"same target, last path kept, returning cookie {cookie}")
+            self.old_tel_return_cookie = self.tel_return_cookie
+            self.tel_return_cookie = cookie
+            self.tel_lost_track = "N"    # initialize for the new cookie
+        return True
+
     def stop_track(self):
         if self._track_thread and self._track_thread.is_alive():
             self.log.info("Signaling track thread to stop")
@@ -1085,6 +1133,8 @@ def main():
                 f"obs2tel cookie has not changed ({translator.next_tel_return_cookie}), no action taken"
             )
             time.sleep(translator.obs_tel_info_update_time)
+            continue
+        if translator.reuse_last_track():
             continue
         if translator.obs2tel["obs_otf_mode"] in ["C", "P"]:
             translator.log.info("OTF mode command received, not yet implemented")

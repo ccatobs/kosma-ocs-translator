@@ -477,6 +477,62 @@ def test_move_to_response_check(translator_factory, mock_ocs, status_code, body,
         assert t.tel_error == 503
 
 
+def _new_obs2tel(t, cookie, **changes):
+    """Simulate reading a new obs2tel: same as the last one except for changes."""
+    t.obs2tel = {**t.last_obs2tel, "obs_cookie": cookie, **changes}
+    t.next_tel_return_cookie = cookie
+
+
+@pytest.mark.parametrize("changes,start_offset,pending,reused", [
+    pytest.param({},                         -30.0,   False, True,  id="same_target_running"),
+    pytest.param({},                         -30.0,   True,  True,  id="same_target_pending"),
+    pytest.param({"obs_lam_del": 30.0},      -30.0,   False, False, id="different_offset"),
+    pytest.param({},                         -350.0,  False, False, id="path_ends_too_early"),
+    pytest.param({},                         -250.0,  False, True,  id="path_long_enough"),
+])
+def test_reuse_last_track(translator_factory, changes, start_offset, pending, reused):
+    import time
+    t = translator_factory()   # payload is 600 s long, reuse needs >= 300 s left
+    t.last_payload["start_time"] = time.time() + start_offset
+    t.tel_return_cookie = 1
+    if pending:
+        t.pending_tel_return_cookie = 2
+    t.tel_lost_track = "Y"
+    _new_obs2tel(t, 3, **changes)
+
+    assert t.reuse_last_track() is reused
+
+    if not reused:
+        assert t.tel_return_cookie == 1
+    elif pending:
+        assert t.pending_tel_return_cookie == 3
+        assert t.tel_return_cookie == 1
+    else:
+        assert t.tel_return_cookie == 3
+        assert t.old_tel_return_cookie == 1
+        assert t.tel_lost_track == "N"
+
+
+def test_reuse_last_track_not_after_failure(translator_factory):
+    import time
+    t = translator_factory()
+    t.last_payload["start_time"] = time.time() - 30
+    t._fail_path(2, 1)
+    _new_obs2tel(t, 3)
+
+    assert t.reuse_last_track() is False
+
+
+def test_reuse_last_move_to_without_end(translator_factory):
+    t = translator_factory()
+    t.last_payload["type"] = "move_to"
+    t.last_payload["start_time"] = 0.0   # long ago; a move-to holds its position
+    _new_obs2tel(t, 3)
+
+    assert t.reuse_last_track() is True
+    assert t.tel_return_cookie == 3
+
+
 def test_unexpected_exception_in_track_fails_path(translator_factory):
     t = translator_factory(obs2tel_overrides={"obs_coord_sys_on": "NOT_A_FRAME"})
     t.tel_return_cookie = 1
