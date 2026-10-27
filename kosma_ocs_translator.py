@@ -231,6 +231,14 @@ class KOSMA_translator:
         self.tel_return_cookie = 0
         self.old_tel_return_cookie = 0
         self.next_tel_return_cookie = 0
+        # cookie of an accepted path that has not started yet; published as
+        # tel_return_cookie only once the ACU is executing the new path
+        self.pending_tel_return_cookie = None
+        # [sec] after path start_time before the cookie is returned, so that the
+        # ACU commanded position has switched to the new path
+        self.cookie_start_margin = 1.0
+        # True if the path for tel_return_cookie was rejected or failed to be sent
+        self.tel_path_failed = False
         self.tel_error = 0
         self.tel_lost_track = "N"
         self.read_obs2tel_file()
@@ -346,7 +354,6 @@ class KOSMA_translator:
         input_dict = {}
 
         # Fixed values
-        input_dict["tel_pos_in_range"] = "Y"     # practically not used
         input_dict["tel_latitude"] = self.location.lat.deg
         input_dict["tel_longitude"] = self.location.lon.deg
         input_dict["tel_altitude"] = self.location.height.to(u.m).value
@@ -357,9 +364,32 @@ class KOSMA_translator:
         #       follow-up how this is used in combination of
         #       instrument plate scale factor
 
+        # time stamp of the status, relative to the start of the last sent path
+        status_time = _get_time_from_acu_format(response["Time"], response["Year"])
+        if self.last_payload is None:
+            # no path accepted yet; only reached when the first path failed
+            t_rel = 0.0
+        else:
+            t_rel = status_time.unix - self.last_payload["start_time"]
+
+        # Return the new cookie only once the ACU is executing the new path
+        if self.pending_tel_return_cookie is not None and t_rel >= self.cookie_start_margin:
+            self.log.info(
+                f"path started (t_rel={t_rel:.2f} s), "
+                f"returning cookie {self.pending_tel_return_cookie}"
+            )
+            self.old_tel_return_cookie = self.tel_return_cookie
+            self.tel_return_cookie = self.pending_tel_return_cookie
+            self.pending_tel_return_cookie = None
+            self.tel_lost_track = "N"    # initialize for the new cookie
+            self.tel_error = 0
+            self.tel_path_failed = False
+
         # values set elsewhere
         input_dict["tel_return_cookie"] = self.tel_return_cookie
         input_dict["tel_error"] = self.tel_error
+        # starpoint ignores tel_error; "N" makes it skip the target of a failed path
+        input_dict["tel_pos_in_range"] = "N" if self.tel_path_failed else "Y"
 
         current_azi = response["Azimuth current position"]
         current_ele = response["Elevation current position"]
@@ -370,7 +400,10 @@ class KOSMA_translator:
 
         actdiff = 3600 * ((acu_azm_del*np.cos(np.deg2rad(cmd_ele)))**2 + acu_elv_del**2) ** 0.5
 
-        if actdiff < self.obs_tolerance:
+        if self.tel_path_failed:
+            # the ACU is not executing the commanded path
+            input_dict["tel_on_track"] = "N"
+        elif actdiff < self.obs_tolerance:
             input_dict["tel_on_track"] = "Y"
         else:
             input_dict["tel_on_track"] = "N"
@@ -384,30 +417,29 @@ class KOSMA_translator:
         input_dict["tel_vel_elv"] = vel_ele * 3600.    # deg/s to arcsec/s
         
         # commanded and actual positions and timestamp
-        day_of_year = response["Time"]
-        year = response["Year"]
-        status_time = _get_time_from_acu_format(day_of_year, year)
-        # time stamp of the status
         input_dict["tel_time_act"] = status_time.unix
         input_dict["tel_mjd1"] = status_time.ut1.mjd
 
-        t0 = self.last_payload["start_time"]
-        pts = np.array(self.last_payload["points"])   # shape (N, 5): dt, az, el, vaz, vel
         # time of the status since the start time of the table sent
-        t_rel = status_time.unix - t0
         input_dict["tel_time_del"] = t_rel
 
-        # TODO: apply refraction correction to tel_elev_cmd
-        input_dict["tel_azm_cmd"] = np.interp(t_rel, pts[:, 0], pts[:, 1])
-        input_dict["tel_elv_cmd"] = np.interp(t_rel, pts[:, 0], pts[:, 2])
+        if self.last_payload is None:
+            # no path to interpolate: report the ACU's own positions
+            input_dict["tel_azm_cmd"] = cmd_azi
+            input_dict["tel_elv_cmd"] = cmd_ele
+        else:
+            pts = np.array(self.last_payload["points"])   # shape (N, 5): dt, az, el, vaz, vel
+            # TODO: apply refraction correction to tel_elev_cmd
+            input_dict["tel_azm_cmd"] = np.interp(t_rel, pts[:, 0], pts[:, 1])
+            input_dict["tel_elv_cmd"] = np.interp(t_rel, pts[:, 0], pts[:, 2])
         input_dict["tel_azm_act"] = input_dict["tel_azm_cmd"] + acu_azm_del
         input_dict["tel_elv_act"] = input_dict["tel_elv_cmd"] + acu_elv_del
 
         # Calculate angle between coordinate systems
-        cmd_coord_sys_del = self.last_obs2tel["obs_coord_sys_del"]
-        if cmd_coord_sys_del == "HORIZON":
+        if self.last_obs2tel is None or self.last_obs2tel["obs_coord_sys_del"] == "HORIZON":
             input_dict["tel_angle_focal_plane"] = 0.0
         else:
+            cmd_coord_sys_del = self.last_obs2tel["obs_coord_sys_del"]
             # Calculation is needed:
             # Calculate north (+epsilon in the second axis cmd_coord_sys_del) in Horizon
             # then csys_del -> horizon (opposite sign)
@@ -433,7 +465,7 @@ class KOSMA_translator:
 
             input_dict["tel_angle_focal_plane"] = tel_angle_focal_plane * (-1)
 
-        self.log.info(f"on track: {input_dict['tel_on_track']} az:{input_dict['tel_azm_act']:3.2f} ele:{input_dict['tel_elv_act']:3.2f} cmd_az:{input_dict['tel_azm_cmd']:3.2f} cmd_ele:{input_dict['tel_elv_cmd']:3.2f} obs_tolerance: {self.obs_tolerance/3600.0:3.2f} deg ")
+        self.log.info(f"on track: {input_dict['tel_on_track']} az:{input_dict['tel_azm_act']:.4f} ele:{input_dict['tel_elv_act']:.4f} cmd_az:{input_dict['tel_azm_cmd']:.4f} cmd_ele:{input_dict['tel_elv_cmd']:.4f} obs_tolerance: {self.obs_tolerance/3600.0:.4f} deg ")
 
         fmt = "%d-%b-%Y  %H:%M:%S"
         current = time.localtime()
@@ -483,7 +515,7 @@ class KOSMA_translator:
         """
         Set dictionary of KOSMA_tel2obs and KOSMA_ccdpos.sim
         """
-        if self.last_payload is None or self.last_obs2tel is None:
+        if (self.last_payload is None or self.last_obs2tel is None) and not self.tel_path_failed:
             self.log.info('No record of successfully sent command to telescope. Wait...')
             return None, None
 
@@ -491,9 +523,10 @@ class KOSMA_translator:
         input_dict = self._build_tel2obs_params(response)
 
         # TODO: implement this get command on OCS and TCS
-        response_pointing = self.ocs.get_cmd_pointing()
-        ccd_input_dict = self._build_ccdpos_params(input_dict, response_pointing)
-
+        #response_pointing = self.ocs.get_cmd_pointing()
+        #ccd_input_dict = self._build_ccdpos_params(input_dict, response_pointing)
+        ccd_input_dict = {}
+        
         return input_dict, ccd_input_dict
 
     def write_tel2obs_file(self):
@@ -532,6 +565,20 @@ class KOSMA_translator:
         self._track_thread.start()
 
     def _track_loop(self):
+        """
+        Thread target. Any unexpected exception fails the path, so that the
+        cookie is still returned to the observer.
+        """
+        # the cookie this thread works for; next_tel_return_cookie may already be
+        # overwritten by a newer obs2tel while this thread is being stopped
+        cookie = self.next_tel_return_cookie
+        try:
+            self._send_track(cookie)
+        except Exception as e:
+            self.log.exception(f"Track error: {e}")
+            self._fail_path(cookie, 1)
+
+    def _send_track(self, cookie):
         """
         This routine is called every time when KOSMA_obs2tel.set is updated. If a 
         track is already running, the previous one is stopped and the new one starts.
@@ -635,10 +682,32 @@ class KOSMA_translator:
             else:
                 cmd_az = coord.az.deg
                 cmd_el = coord.alt.deg
-            self.ocs.move_to(cmd_az, cmd_el)
 
-            # include the response check and update cookie/cmd values recording
-
+            if self._track_stop_event.is_set():
+                self.log.info("Track superseded, move-to not sent")
+                return
+            # ocs.move_to aborts the previous command itself
+            response = self.ocs.move_to(cmd_az, cmd_el)
+            body = response.json()
+            if response.status_code != 200 or body.get("status") != "ok":
+                self.log.error(
+                    f"move_to rejected: HTTP {response.status_code}, "
+                    f"status={body.get('status')}, message={body.get('message')}"
+                )
+                self._fail_path(cookie, response.status_code)
+            else:
+                self.log.info(f"move_to accepted: {body}")
+                # Bookkeeping only (not sent): the ACU starts moving on receipt
+                # and holds the position, so the commanded position is constant.
+                self.last_payload = {
+                    "type": "move_to",
+                    "start_time": time.time(),
+                    "coordsys": "Horizon",
+                    "points": [[0.0, cmd_az, cmd_el, 0.0, 0.0],
+                               [float(track_duration), cmd_az, cmd_el, 0.0, 0.0]],
+                }
+                self.last_obs2tel = self.obs2tel
+                self.pending_tel_return_cookie = cookie
             return
 
         # non-HORIZON source: make into an astropy coordinate object,
@@ -690,7 +759,7 @@ class KOSMA_translator:
             f"tracking to {coord.data.lon.deg} {coord.data.lat.deg} in {cmd_coord_sys_on} frame"
         )
 
-        # Abort the previous path first (409 "nothing to abort" when idle is harmless).
+        # Abort the previous path first, if it has not ended yet.
         # This must come before time_array is built: TCS rejects a path starting
         # less than 9.8 sec from its arrival, so the abort must not eat into the
         # overhead below. The telescope is not tracking from here until the new
@@ -698,12 +767,19 @@ class KOSMA_translator:
         if self._track_stop_event.is_set():
             self.log.info("Track superseded, previous path not aborted")
             return
-        try:
-            self.ocs.abort()
-        except Exception as e:
-            self.log.error(f"Abort error: {e}")
-            self.tel_error = 1
-            return
+        if self.last_payload is not None and self.last_payload["type"] == "move_to":
+            self.log.info("Previous command was move-to, no abort sent")
+        elif self.last_payload is not None:
+            last_end_time = self.last_payload["start_time"] + self.last_payload["points"][-1][0]
+            if last_end_time > time.time():
+                try:
+                    self.ocs.abort()
+                except Exception as e:
+                    self.log.error(f"Abort error: {e}")
+                    self._fail_path(cookie, 1)
+                    return
+            else:
+                self.log.info("Previous path already ended, no abort sent")
 
         # make an array of times from now + overhead to now + overhead + track_duration,
         # with 1 second steps
@@ -782,22 +858,39 @@ class KOSMA_translator:
                 f"{lead_done:.3f} s after response (TCS needs >= 9.8 s)"
             )
             body = response.json()
-            self.last_payload = payload
-            self.last_obs2tel = self.obs2tel
-            self.old_tel_return_cookie = self.tel_return_cookie
-            self.tel_return_cookie = self.next_tel_return_cookie
-            self.tel_lost_track = "N"    # initialize for the new cookie
             if response.status_code != 200 or body.get("status") != "ok":
                 self.log.error(
                     f"scan_pattern rejected: HTTP {response.status_code}, "
                     f"status={body.get('status')}, message={body.get('message')}"
                 )
-                self.tel_error = response.status_code
+                self._fail_path(cookie, response.status_code)
             else:
                 self.log.info(f"scan_pattern accepted: {body}")
+                # "type" only for bookkeeping, not part of the payload sent to TCS
+                self.last_payload = {**payload, "type": "path"}
+                self.last_obs2tel = self.obs2tel
+                # Do not return the cookie yet: until start_time the ACU still holds
+                # the previous target and tel_on_track would be a stale "Y".
+                self.pending_tel_return_cookie = cookie
         except Exception as e:
             self.log.error(f"Track error: {e}")
-            self.tel_error = 1
+            self._fail_path(cookie, 1)
+
+    def _fail_path(self, cookie, error):
+        """
+        The path for cookie will never start: return the cookie now, flagged
+        as failed, so that the observer does not wait for it.
+        """
+        if self._track_stop_event.is_set():
+            # superseded by a newer obs2tel; its own thread returns the new cookie
+            self.log.info(f"Track for cookie {cookie} superseded, failure not reported")
+            return
+        self.tel_error = error
+        self.tel_path_failed = True
+        self.pending_tel_return_cookie = None
+        self.old_tel_return_cookie = self.tel_return_cookie
+        self.tel_return_cookie = cookie
+        self.tel_lost_track = "N"
 
     def stop_track(self):
         if self._track_thread and self._track_thread.is_alive():
@@ -985,9 +1078,11 @@ def main():
             #)
             continue
         translator.read_obs2tel_file()
-        if translator.tel_return_cookie == translator.next_tel_return_cookie:
+        if translator.next_tel_return_cookie in (
+            translator.tel_return_cookie, translator.pending_tel_return_cookie
+        ):
             translator.log.info(
-                f"obs2tel cookie has not changed ({translator.tel_return_cookie}), no action taken"
+                f"obs2tel cookie has not changed ({translator.next_tel_return_cookie}), no action taken"
             )
             time.sleep(translator.obs_tel_info_update_time)
             continue

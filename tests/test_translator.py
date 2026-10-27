@@ -7,6 +7,7 @@ function handles the rest.
 
 """
 from pathlib import Path
+from unittest.mock import MagicMock
 import pytest
 import numpy as np
 from dataclasses import dataclass, field
@@ -329,6 +330,162 @@ def test_tel_vel_converted_to_arcsec_per_sec(translator_factory, vel_azi, vel_el
 
     assert result["tel_vel_azm"] == pytest.approx(vel_azi * 3600.0)
     assert result["tel_vel_elv"] == pytest.approx(vel_ele * 3600.0)
+
+
+# ---------------------------------------------------------------------------
+# Dedicated test: cookie of an accepted path is returned only after it started
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("t_rel,returned", [
+    pytest.param(-10.0, False, id="before_start"),
+    pytest.param(  0.5, False, id="within_margin"),
+    pytest.param( 30.0, True,  id="after_start"),
+])
+def test_pending_cookie_returned_after_path_start(translator_factory, mock_ocs, t_rel, returned):
+    t = translator_factory()
+    status = mock_ocs.get_status.return_value
+    status_time = _get_time_from_acu_format(status["Time"], status["Year"])
+    t.last_payload["start_time"] = status_time.unix - t_rel
+    t.tel_return_cookie = 1
+    t.pending_tel_return_cookie = 2
+    t.tel_lost_track = "Y"
+
+    result, _ = t.set_tel2obs_dict()
+
+    if returned:
+        assert result["tel_return_cookie"] == 2
+        assert t.pending_tel_return_cookie is None
+        assert t.old_tel_return_cookie == 1
+        assert result["tel_lost_track"] == "N"
+    else:
+        assert result["tel_return_cookie"] == 1
+        assert t.pending_tel_return_cookie == 2
+
+
+def test_failed_path_returns_cookie_out_of_range(translator_factory):
+    t = translator_factory()
+    t.tel_return_cookie = 1
+    t._fail_path(2, 503)
+
+    result, _ = t.set_tel2obs_dict()
+
+    assert result["tel_return_cookie"] == 2
+    assert result["tel_error"] == 503
+    assert result["tel_pos_in_range"] == "N"
+    # actual == commanded in the mock status, but the failed path is not tracked
+    assert result["tel_on_track"] == "N"
+
+
+def test_started_path_clears_previous_failure(translator_factory):
+    t = translator_factory()  # status time is 30 s after the payload start
+    t._fail_path(2, 1)
+    t.pending_tel_return_cookie = 3
+
+    result, _ = t.set_tel2obs_dict()
+
+    assert result["tel_return_cookie"] == 3
+    assert result["tel_error"] == 0
+    assert result["tel_pos_in_range"] == "Y"
+    assert result["tel_on_track"] == "Y"
+
+
+def test_superseded_failure_not_reported(translator_factory):
+    t = translator_factory()
+    t.tel_return_cookie = 1
+    t._track_stop_event.set()
+    t._fail_path(2, 1)
+
+    assert t.tel_return_cookie == 1
+    assert t.tel_path_failed is False
+
+
+def test_first_path_failed_writes_status(translator_factory, mock_ocs):
+    t = translator_factory()
+    t.last_payload = None
+    t.last_obs2tel = None
+    t._fail_path(2, 1)
+
+    result, _ = t.set_tel2obs_dict()
+
+    status = mock_ocs.get_status.return_value
+    assert result["tel_return_cookie"] == 2
+    assert result["tel_pos_in_range"] == "N"
+    assert result["tel_on_track"] == "N"
+    assert result["tel_azm_cmd"] == status["Azimuth commanded position"]
+    assert result["tel_angle_focal_plane"] == 0.0
+
+
+@pytest.mark.parametrize("last_start,aborted", [
+    pytest.param(None,     False, id="no_previous_path"),
+    pytest.param(-10000.0, False, id="previous_path_ended"),
+    pytest.param(-10.0,    True,  id="previous_path_running"),
+    pytest.param(5.0,      True,  id="previous_path_not_started"),
+])
+def test_abort_only_if_previous_path_not_ended(translator_factory, mock_ocs, last_start, aborted):
+    import time
+    t = translator_factory()   # payload is 600 s long
+    if last_start is None:
+        t.last_payload = None
+    else:
+        t.last_payload["start_time"] = time.time() + last_start
+
+    t._track_loop()
+
+    assert mock_ocs.abort.called is aborted
+
+
+def test_no_abort_after_move_to(translator_factory, mock_ocs):
+    import time
+    t = translator_factory()
+    t.last_payload["type"] = "move_to"
+    t.last_payload["start_time"] = time.time()
+
+    t._track_loop()
+
+    assert not mock_ocs.abort.called
+
+
+HORIZON_OBS2TEL = {
+    "obs_coord_sys_on": "HORIZON", "obs_lam_on": 170.0, "obs_bet_on": 50.0,
+    "obs_coord_sys_del": "HORIZON", "obs_coord_sys_off": "HORIZON",
+}
+
+
+@pytest.mark.parametrize("status_code,body,accepted", [
+    pytest.param(200, {"status": "ok"},    True,  id="accepted"),
+    pytest.param(503, {"status": "busy"},  False, id="rejected"),
+])
+def test_move_to_response_check(translator_factory, mock_ocs, status_code, body, accepted):
+    mock_ocs.move_to.return_value = MagicMock(status_code=status_code, json=lambda: body)
+    t = translator_factory(obs2tel_overrides=HORIZON_OBS2TEL)
+    t.tel_return_cookie = 1
+    t.next_tel_return_cookie = 2
+
+    t._track_loop()
+
+    assert mock_ocs.move_to.called
+    if accepted:
+        assert t.last_payload["type"] == "move_to"
+        assert t.pending_tel_return_cookie == 2
+        assert t.tel_return_cookie == 1
+        assert t.tel_path_failed is False
+    else:
+        assert t.last_payload["type"] == "path"   # previous one kept
+        assert t.pending_tel_return_cookie is None
+        assert t.tel_return_cookie == 2
+        assert t.tel_path_failed is True
+        assert t.tel_error == 503
+
+
+def test_unexpected_exception_in_track_fails_path(translator_factory):
+    t = translator_factory(obs2tel_overrides={"obs_coord_sys_on": "NOT_A_FRAME"})
+    t.tel_return_cookie = 1
+    t.next_tel_return_cookie = 2
+
+    t._track_loop()   # ValueError for the unknown frame must not escape
+
+    assert t.tel_return_cookie == 2
+    assert t.tel_path_failed is True
 
 
 # ---------------------------------------------------------------------------

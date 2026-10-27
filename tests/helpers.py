@@ -95,6 +95,7 @@ def make_payload(az, el, t_start, duration=600):
         np.zeros(n),   # vel
     ]).tolist()
     return {
+        "type": "path",
         "start_time": float(t_start),
         "coordsys": "Horizon",
         "points": points,
