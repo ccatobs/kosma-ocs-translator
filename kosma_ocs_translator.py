@@ -214,8 +214,10 @@ def ImportKOSMAReadWriteIntoDictionary(files=None, variable=None, update_mod_tim
 
 
 class KOSMA_translator:
-    def __init__(self, ocs):
+    def __init__(self, ocs, abort_if_unknown=True):
         self.ocs = ocs
+        # abort before the first path if there is no record of the previous command
+        self.abort_if_unknown = abort_if_unknown
         #
         self.log = logging.getLogger("kosma-ocs-translator")
         self._host_pid = f"({socket.gethostname()}:{os.getpid()})"
@@ -772,19 +774,27 @@ class KOSMA_translator:
         if self._track_stop_event.is_set():
             self.log.info("Track superseded, previous path not aborted")
             return
-        if self.last_payload is not None and self.last_payload["type"] == "move_to":
+        if self.last_payload is None:
+            # no record of the previous command (e.g. after a restart): a path
+            # sent before may still be running on TCS
+            need_abort = self.abort_if_unknown
+            if not need_abort:
+                self.log.info("No record of previous command, no abort sent")
+        elif self.last_payload["type"] == "move_to":
+            need_abort = False
             self.log.info("Previous command was move-to, no abort sent")
-        elif self.last_payload is not None:
+        else:
             last_end_time = self.last_payload["start_time"] + self.last_payload["points"][-1][0]
-            if last_end_time > time.time():
-                try:
-                    self.ocs.abort()
-                except Exception as e:
-                    self.log.error(f"Abort error: {e}")
-                    self._fail_path(cookie, 1)
-                    return
-            else:
+            need_abort = last_end_time > time.time()
+            if not need_abort:
                 self.log.info("Previous path already ended, no abort sent")
+        if need_abort:
+            try:
+                self.ocs.abort()
+            except Exception as e:
+                self.log.error(f"Abort error: {e}")
+                self._fail_path(cookie, 1)
+                return
 
         # make an array of times from now + overhead to now + overhead + track_duration,
         # with 1 second steps
@@ -1015,6 +1025,12 @@ def parse_arguments():
         action="store_true",
         help="Connect to the OCS of the local development setup (127.0.0.1:5600). Default is False.",
     )
+    parser.add_argument(
+        "--no-abort-if-unknown",
+        action="store_true",
+        help="Do not abort before the first path when there is no record of the previous "
+             "command (e.g. after a restart). Default is False (abort).",
+    )
     return parser.parse_args()
 
 
@@ -1093,7 +1109,7 @@ def main():
         certificates_path=args.certificates_path,
         logger=logger,
     )
-    translator = KOSMA_translator(ocs)
+    translator = KOSMA_translator(ocs, abort_if_unknown=not args.no_abort_if_unknown)
     background_thread = threading.Thread(
         target=run_write_tel2obs_file_in_background, args=(translator,)
     )

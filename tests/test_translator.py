@@ -415,15 +415,19 @@ def test_first_path_failed_writes_status(translator_factory, mock_ocs):
     assert result["tel_angle_focal_plane"] == 0.0
 
 
-@pytest.mark.parametrize("last_start,aborted", [
-    pytest.param(None,     False, id="no_previous_path"),
-    pytest.param(-10000.0, False, id="previous_path_ended"),
-    pytest.param(-10.0,    True,  id="previous_path_running"),
-    pytest.param(5.0,      True,  id="previous_path_not_started"),
+@pytest.mark.parametrize("last_start,abort_if_unknown,aborted", [
+    pytest.param(None,     True,  True,  id="no_previous_path"),
+    pytest.param(None,     False, False, id="no_previous_path_no_abort_if_unknown"),
+    pytest.param(-10000.0, True,  False, id="previous_path_ended"),
+    pytest.param(-10.0,    True,  True,  id="previous_path_running"),
+    pytest.param(5.0,      True,  True,  id="previous_path_not_started"),
 ])
-def test_abort_only_if_previous_path_not_ended(translator_factory, mock_ocs, last_start, aborted):
+def test_abort_only_if_previous_path_not_ended(
+    translator_factory, mock_ocs, last_start, abort_if_unknown, aborted
+):
     import time
     t = translator_factory()   # payload is 600 s long
+    t.abort_if_unknown = abort_if_unknown
     if last_start is None:
         t.last_payload = None
     else:
