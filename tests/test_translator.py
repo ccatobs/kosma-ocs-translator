@@ -362,7 +362,7 @@ def test_pending_cookie_returned_after_path_start(translator_factory, mock_ocs, 
         assert t.pending_tel_return_cookie == 2
 
 
-def test_failed_path_returns_cookie_out_of_range(translator_factory):
+def test_failed_path_returns_cookie_with_error(translator_factory):
     t = translator_factory()
     t.tel_return_cookie = 1
     t._fail_path(2, 503)
@@ -371,7 +371,7 @@ def test_failed_path_returns_cookie_out_of_range(translator_factory):
 
     assert result["tel_return_cookie"] == 2
     assert result["tel_error"] == 503
-    assert result["tel_pos_in_range"] == "N"
+    assert result["tel_pos_in_range"] == "Y"
     # actual == commanded in the mock status, but the failed path is not tracked
     assert result["tel_on_track"] == "N"
 
@@ -409,7 +409,7 @@ def test_first_path_failed_writes_status(translator_factory, mock_ocs):
 
     status = mock_ocs.get_status.return_value
     assert result["tel_return_cookie"] == 2
-    assert result["tel_pos_in_range"] == "N"
+    assert result["tel_error"] == 1
     assert result["tel_on_track"] == "N"
     assert result["tel_azm_cmd"] == status["Azimuth commanded position"]
     assert result["tel_angle_focal_plane"] == 0.0

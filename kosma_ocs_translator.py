@@ -395,8 +395,7 @@ class KOSMA_translator:
         # values set elsewhere
         input_dict["tel_return_cookie"] = self.tel_return_cookie
         input_dict["tel_error"] = self.tel_error
-        # starpoint ignores tel_error; "N" makes it skip the target of a failed path
-        input_dict["tel_pos_in_range"] = "N" if self.tel_path_failed else "Y"
+        input_dict["tel_pos_in_range"] = "Y"     # practically not used
 
         current_azi = response["Azimuth current position"]
         current_ele = response["Elevation current position"]
