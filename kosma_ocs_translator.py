@@ -471,7 +471,7 @@ class KOSMA_translator:
 
             input_dict["tel_angle_focal_plane"] = tel_angle_focal_plane * (-1)
 
-        self.log.info(f"on track: {input_dict['tel_on_track']} az:{input_dict['tel_azm_act']:.4f} ele:{input_dict['tel_elv_act']:.4f} cmd_az:{input_dict['tel_azm_cmd']:.4f} cmd_ele:{input_dict['tel_elv_cmd']:.4f} obs_tolerance: {self.obs_tolerance/3600.0:.4f} deg ")
+        #self.log.info(f"on track: {input_dict['tel_on_track']} az:{input_dict['tel_azm_act']:.4f} ele:{input_dict['tel_elv_act']:.4f} cmd_az:{input_dict['tel_azm_cmd']:.4f} cmd_ele:{input_dict['tel_elv_cmd']:.4f} obs_tolerance: {self.obs_tolerance/3600.0:.4f} deg ")
 
         fmt = "%d-%b-%Y  %H:%M:%S"
         current = time.localtime()
@@ -790,6 +790,7 @@ class KOSMA_translator:
         if need_abort:
             try:
                 self.ocs.abort()
+                self.log.info(f"Previous path aborted")
             except Exception as e:
                 self.log.error(f"Abort error: {e}")
                 self._fail_path(cookie, 1)
