@@ -220,7 +220,8 @@ class TestGetKosmaSpem:
     def test_missing_value_raises(self, kosma_dir):
         path = kosma_dir / usa.KOSMA_SPEM_FILE
         lines = path.read_text().splitlines(keepends=True)
-        path.write_text("".join(l for l in lines if "ccatacu_point[3] " not in l))
+        # leading space so that string_ccatacu_point[3] is kept
+        path.write_text("".join(l for l in lines if " ccatacu_point[3] " not in l))
         with pytest.raises(ValueError, match=r"ccatacu_point\[3\]"):
             usa.get_kosma_spem()
 
