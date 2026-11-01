@@ -5,10 +5,61 @@ and update them on ACU
 
 import argparse
 import logging
+import math
 import os
 import re
+import subprocess
+from datetime import datetime, timezone
 
 from kosma_ocs_translator import setup_ocs, ImportKOSMAReadWriteIntoDictionary
+
+# logger name follows the script name (without .py), also when run as __main__
+LOGGER_NAME = os.path.splitext(os.path.basename(__file__))[0]
+
+KOSMA_SPEM_FILE = "KOSMA_ccatacu_point.in"
+
+# SPEM parameters are named differently in KOSMA (string_ccatacu_point) and ACU
+kosma2acu_names = {"TFNC": "TFC", "TFNS": "TFS", "TFN": "TF"}
+acu2kosma_names = {v: k for k, v in kosma2acu_names.items()}
+
+# keys in the ACU SPEM set not used for the comparison or the update
+# LEL velocity may be needed later if the pointing model turns out to be
+# dependent of the elevation velocity. For now not used in the fit
+ignore_keys_acu = ["Time", "Year", "LEL velocity"]
+ignore_keys_kosma = ["ccatacu_model_date"]
+
+# ACU stores SPEM parameters with 3 decimals in mdeg
+spem_abs_tol = 1e-3
+
+
+def ask_continue(question):
+    """
+    Ask the user to continue or abort
+
+    Parameters
+    ----------
+    question : str
+        Question shown to the user
+
+    Returns
+    -------
+    bool
+        True if the user chose to continue
+    """
+    while True:
+        answer = input(f"{question} [y(continue)/n(abort)]: ").strip().lower()
+        if answer in ("y", "yes"):
+            return True
+        if answer in ("n", "no"):
+            return False
+        print("Please answer y (continue) or n (abort).")
+
+
+def format_value(value):
+    if isinstance(value, (int, float)):
+        return f"{value:12.3f}"
+    return f"{str(value):>12s}"
+
 
 def get_kosma_spem():
     """
@@ -21,12 +72,27 @@ def get_kosma_spem():
     """
 
     spem_kosma_format = ImportKOSMAReadWriteIntoDictionary(
-        files = ["KOSMA_ccatacu_point.in"])
+        files = [KOSMA_SPEM_FILE])
+    if KOSMA_SPEM_FILE not in spem_kosma_format:
+        raise FileNotFoundError(f"{KOSMA_SPEM_FILE} not found in KOSMA_file_io")
+    spem_kosma_format = spem_kosma_format[KOSMA_SPEM_FILE]
 
     # Make a dictionary of key = string_ccatacu_point[i], value = ccatacu_point[i]
-    # also include ccatacu_model_type and ccatacu_model_date
-    # for ccatacu_model_type, read the entire string before "ccatacu_model_type"
-    # but then replace space by -.
+    spem = {}
+    for var, name in spem_kosma_format.items():
+        m = re.fullmatch(r"string_ccatacu_point\[(\d+)\]", var)
+        if not m:
+            continue
+        value_var = f"ccatacu_point[{m.group(1)}]"
+        if value_var not in spem_kosma_format:
+            raise ValueError(f"{KOSMA_SPEM_FILE} lacks {value_var} for {name}")
+        name = kosma2acu_names.get(name, name)
+        spem[name] = float(spem_kosma_format[value_var])
+
+    # also include ccatacu_model_date
+    spem["ccatacu_model_date"] = spem_kosma_format.get("ccatacu_model_date")
+
+    return spem
 
 
 def put_kosma_spem(spem):
@@ -37,11 +103,51 @@ def put_kosma_spem(spem):
     ----------
     spem : dict
         New SPEM parameters
+
+    Returns
+    -------
+    spem : dict
+        SPEM parameters read back from KOSMA_file_io after the update
     """
+    log = logging.getLogger(LOGGER_NAME)
 
     # inverse of get_kosma_spem is needed to map key to the idx in string_ccatacu_point
-    # and use a shell command, e.g. Kset_point ccatacu_point[0] 1
-    # and Kset_point ccatacu_model_date as a current time
+    spem_kosma_format = ImportKOSMAReadWriteIntoDictionary(
+        files = [KOSMA_SPEM_FILE]).get(KOSMA_SPEM_FILE, {})
+    name2idx = {}
+    for var, name in spem_kosma_format.items():
+        m = re.fullmatch(r"string_ccatacu_point\[(\d+)\]", var)
+        if m:
+            name2idx[name] = int(m.group(1))
+
+    commands = []
+    for key, value in spem.items():
+        if key in ignore_keys_acu or key in ignore_keys_kosma:
+            continue
+        name = acu2kosma_names.get(key, key)
+        if name not in name2idx:
+            raise KeyError(f"{key} ({name}) not found in string_ccatacu_point")
+        commands.append(f"Kset_point ccatacu_point[{name2idx[name]}] {value:.6f}")
+    model_date = datetime.now(timezone.utc).strftime("%Y-%m-%d:%H:%M:%SZ")
+    commands.append(f"Kset_point ccatacu_model_date {model_date}")
+
+    # use a shell command, e.g. Kset_point ccatacu_point[0] 1
+    failed = []
+    for cmd in commands:
+        result = subprocess.run(
+            cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
+        if result.returncode != 0:
+            log.error(f"Error running command {cmd}: {result.stderr}")
+            failed.append(cmd)
+        else:
+            log.debug(f"Command {cmd} ran successfully.")
+    if failed:
+        raise RuntimeError(f"Failed to update {KOSMA_SPEM_FILE}: {failed}")
+    log.info(f"{KOSMA_SPEM_FILE} updated (ccatacu_model_date = {model_date})")
+
+    return get_kosma_spem()
+
 
 def check_spem_sets(spem_acu, spem_kosma):
     """
@@ -53,22 +159,48 @@ def check_spem_sets(spem_acu, spem_kosma):
     spem_acu, spem_kosma : dict
         SPEM sets to compare
     """
+    log = logging.getLogger(LOGGER_NAME)
 
-    # 1. compare the keys first. Ignore the following keys on either set
-    # leave the comment below
-    # LEL velocity may be needed later if the pointing model turns out to be
-    # dependent of the elevation velocity. For now not used in the fit
-    ignore_keys_acu = ["Time", "Year", "LEL velocity"]
-    ignore_keys_kosma = ["ccatacu_model_type", "ccatacu_model_date"]
-    
-    # 2. print the list of key - value from spem_acu - value from spem_kosma for
-    # all keys (except for the ignore_keys above) to the terminal
-    # if all values match, message both in terminal and log that they match and return
-    # if any values do not match, highlight the difference,
-    # print in addition ccat_acu_model_date from spem_kosma
-    # and ask for user input - either continue or abort
-    # log the decision and return or abort
+    # Compare the keys first. Ignore ignore_keys_acu and ignore_keys_kosma
+    keys_acu = [k for k in spem_acu if k not in ignore_keys_acu]
+    keys_kosma = [k for k in spem_kosma if k not in ignore_keys_kosma]
+    only_acu = [k for k in keys_acu if k not in keys_kosma]
+    only_kosma = [k for k in keys_kosma if k not in keys_acu]
+    if only_acu:
+        log.warning(f"Keys only in ACU SPEM set: {', '.join(only_acu)}")
+    if only_kosma:
+        log.warning(f"Keys only in KOSMA SPEM set: {', '.join(only_kosma)}")
 
+    # Print the list of key - value from spem_acu - value from spem_kosma
+    keys = keys_acu + only_kosma
+    differ = []
+    print(f"{'key':<8s} {'ACU':>12s} {'KOSMA':>12s}")
+    for key in keys:
+        value_acu = spem_acu.get(key)
+        value_kosma = spem_kosma.get(key)
+        match = (
+            value_acu is not None
+            and value_kosma is not None
+            and math.isclose(value_acu, value_kosma, abs_tol=spem_abs_tol)
+        )
+        if not match:
+            differ.append(key)
+        mark = "" if match else "  <-- differs"
+        print(f"{key:<8s} {format_value(value_acu)} {format_value(value_kosma)}{mark}")
+
+    if not differ:
+        log.info("SPEM parameters in ACU and KOSMA_file_io match")
+        return
+
+    print(f"ccatacu_model_date in KOSMA: {spem_kosma.get('ccatacu_model_date')}")
+    log.warning(
+        "SPEM parameters in ACU and KOSMA_file_io differ for: " + ", ".join(differ)
+    )
+    if ask_continue("SPEM sets in ACU and KOSMA differ. Continue?"):
+        log.info("User chose to continue despite the SPEM mismatch")
+        return
+    log.info("User aborted due to the SPEM mismatch")
+    raise SystemExit("Aborted by user")
 
 
 def kosma2spem(point_in, current_spem):
@@ -105,7 +237,7 @@ def kosma2spem(point_in, current_spem):
             else:
                 m = re.fullmatch(r"a_point\[(\d+)\]", name)
                 if m:
-                    apoint[f"a{m.group(1)}"] = float(value) * argsec2mdeg
+                    apoint[f"a{m.group(1)}"] = float(value) * arcsec2mdeg
 
     expected = ["model_type"] + [f"a{i}" for i in range(n_coeff)]
     missing = [k for k in expected if k not in apoint]
@@ -178,7 +310,11 @@ def kosma2spem(point_in, current_spem):
         spem["TFES"] = apoint['a24']
         spem["TFE"] = apoint['a25']
 
+    else:
+        raise ValueError(f"Unknown model_type {apoint['model_type']} in {point_in}")
+
     return spem
+
 
 def confirm_update(current_spem_acu, new_spem):
     """
@@ -191,25 +327,56 @@ def confirm_update(current_spem_acu, new_spem):
     new_spem : dict
        SPEM parameters to be uploaded
     """
+    log = logging.getLogger(LOGGER_NAME)
 
-    # 1. print key - current - new for all keys except for ignore_keys_acu 
-    # listed in check_spem_sets (ignore_keys_acu)
-    # 2. ask for user confirmation - continue or abort
-    # log the decision and continue or abort
+    # Print key - current - new for all keys except for ignore_keys_acu
+    keys = [k for k in current_spem_acu if k not in ignore_keys_acu]
+    keys += [k for k in new_spem if k not in keys and k not in ignore_keys_acu]
+    print(f"{'key':<8s} {'current':>12s} {'new':>12s} {'diff':>12s}")
+    for key in keys:
+        current = current_spem_acu.get(key)
+        new = new_spem.get(key)
+        if current is not None and new is not None:
+            diff = format_value(new - current)
+        else:
+            diff = format_value("N/A")
+        print(f"{key:<8s} {format_value(current)} {format_value(new)} {diff}")
+    log.info(f"New SPEM parameters to upload: {new_spem}")
 
+    # Ask for user confirmation - continue or abort
+    if ask_continue("Upload the new SPEM parameters to ACU?"):
+        log.info("User confirmed the SPEM update")
+        return
+    log.info("User aborted the SPEM update")
+    raise SystemExit("Aborted by user")
+
+
+def print_spem(spem):
+    """
+    Print SPEM parameters
+
+    Parameters
+    ----------
+    spem : dict
+        SPEM parameters
+    """
+    log = logging.getLogger(LOGGER_NAME)
+    for key, value in spem.items():
+        print(f"{key:<16s} {format_value(value)}")
+    log.info(f"SPEM parameters: {spem}")
 
 
 def setup_logging(log_level):
     # setup logging to file and to screen
-    logger = logging.getLogger("update_spem_acu")
-    logger.setLevel(log_level)
+    log = logging.getLogger(LOGGER_NAME)
+    log.setLevel(log_level)
 
     # Remove existing handlers to avoid conflicts
-    # if logger.hasHandlers():
-    #    logger.handlers.clear()
+    # if log.hasHandlers():
+    #    log.handlers.clear()
 
     # Prevent propagation to the root logger
-    logger.propagate = False
+    log.propagate = False
 
     # create console handler and set level to debug
     ch = logging.StreamHandler()
@@ -217,7 +384,7 @@ def setup_logging(log_level):
     # create simpler formatter for console output
     console_formatter = logging.Formatter("%(levelname)s: %(message)s")
     ch.setFormatter(console_formatter)
-    logger.addHandler(ch)
+    log.addHandler(ch)
 
     # file handler
     fh = logging.FileHandler("kosma-ocs-translator.log")
@@ -227,9 +394,9 @@ def setup_logging(log_level):
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     )
     fh.setFormatter(file_formatter)
-    logger.addHandler(fh)
+    log.addHandler(fh)
 
-    return logger
+    return log
 
 
 def parse_arguments():
@@ -267,20 +434,23 @@ def parse_arguments():
     return parser.parse_args()
 
 
+def strip_parameter_prefix(spem):
+    return {k.removeprefix("Parameter "): v for k, v in spem.items()}
+
+
 def main():
     args = parse_arguments()
     log_level = getattr(logging, args.log_level)
-    logger = setup_logging(log_level)
+    log = setup_logging(log_level)
     ocs = setup_ocs(
         use_local_dev=args.use_local_dev,
         certificates_path=args.certificates_path,
-        logger=logger,
+        logger=log,
     )
-    
-    # get current SPEM in ACU, TODO: implement on the OCS side
-    current_spem_acu = ocs.get_spem()
 
+    # get current SPEM in ACU, TODO: implement on the OCS side
     # strip "Parameter " from the acu keys
+    current_spem_acu = strip_parameter_prefix(ocs.get_spem())
 
     # get current SPEM in KOSMA-file-io
     current_spem_kosma = get_kosma_spem()
@@ -296,13 +466,15 @@ def main():
 
     # push to ACU, TODO: implement on the OCS side
     response = ocs.put_spem(new_spem)
+    log.info(f"Response from put_spem: {response}")
 
     # verify the update
-    updated_spem_acu = ocs.get_spem()
+    updated_spem_acu = strip_parameter_prefix(ocs.get_spem())
     print_spem(updated_spem_acu)
 
     # push to KOSMA_file_io
     updated_spem_kosma = put_kosma_spem(new_spem)
+    print_spem(updated_spem_kosma)
 
 
 if __name__ == "__main__":
