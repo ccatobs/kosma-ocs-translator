@@ -866,7 +866,12 @@ class KOSMA_translator:
             # within the margin left by track_overhead (11 sec vs 9.8 sec required
             # by TCS); a later retry would be rejected as starting too soon anyway.
             lead_send = payload["start_time"] - time.time()
-            response = self.ocs.scan_pattern(data=payload, busy_timeout=1, retry_interval=0.3)
+            response = self._scan_pattern_with_retry(
+                payload, busy_timeout=1, retry_interval=0.3
+            )
+            if response is None:
+                self.log.info("Track superseded while TCS was busy, payload not sent")
+                return
             lead_done = payload["start_time"] - time.time()
             self.log.info(
                 f"start_time lead: {lead_send:.3f} s before send, "
@@ -890,6 +895,35 @@ class KOSMA_translator:
         except Exception as e:
             self.log.error(f"Track error: {e}")
             self._fail_path(cookie, 1)
+
+    def _scan_pattern_with_retry(self, payload, busy_timeout, retry_interval):
+        """
+        Send payload with ocs.scan_pattern, resending it while the TCS answers
+        503 (busy) for at most busy_timeout seconds, retry_interval apart.
+        Returns the last response, or None if the track was superseded
+        (_track_stop_event set) while waiting for a retry.
+        """
+        deadline = time.monotonic() + busy_timeout
+        attempt = 1
+        while True:
+            response = self.ocs.scan_pattern(data=payload)
+            if response.status_code != 503:
+                return response
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self.log.warning(
+                    f"TCS still busy after {attempt} attempt(s) "
+                    f"within {busy_timeout} s, giving up"
+                )
+                return response
+            self.log.info(
+                f"TCS busy (attempt {attempt}), retrying in "
+                f"{min(retry_interval, remaining):.2f} s"
+            )
+            # interruptible sleep: stop retrying as soon as a newer track arrives
+            if self._track_stop_event.wait(min(retry_interval, remaining)):
+                return None
+            attempt += 1
 
     def _fail_path(self, cookie, error):
         """
