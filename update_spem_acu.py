@@ -35,6 +35,9 @@ spem_abs_tol = 1e-2
 # SPEM parameters derived from the pointing fit are rounded to 0.001 mdeg
 spem_decimals = 3
 
+# pass as extra= to a log call to write the message to the log file only
+FILE_ONLY = {"file_only": True}
+
 
 def ask_continue(question):
     """
@@ -377,7 +380,7 @@ def confirm_update(current_spem_acu, new_spem):
         else:
             diff = format_value("N/A")
         print(f"{key:<8s} {format_value(current)} {format_value(new)} {diff}")
-    log.info(f"New SPEM parameters to upload: {new_spem}")
+    log.info(f"New SPEM parameters to upload: {new_spem}", extra=FILE_ONLY)
 
     # Ask for user confirmation - continue or abort
     if ask_continue("Upload the new SPEM parameters to ACU?"):
@@ -399,7 +402,7 @@ def print_spem(spem):
     log = logging.getLogger(LOGGER_NAME)
     for key, value in spem.items():
         print(f"{key:<16s} {format_value(value)}")
-    log.info(f"SPEM parameters: {spem}")
+    log.info(f"SPEM parameters: {spem}", extra=FILE_ONLY)
 
 
 def setup_logging(log_level):
@@ -420,6 +423,9 @@ def setup_logging(log_level):
     # create simpler formatter for console output
     console_formatter = logging.Formatter("%(levelname)s: %(message)s")
     ch.setFormatter(console_formatter)
+    # log.info(..., extra=FILE_ONLY) goes to the log file only, e.g. when the
+    # same information is already printed to the terminal as a table
+    ch.addFilter(lambda record: not getattr(record, "file_only", False))
     log.addHandler(ch)
 
     # file handler

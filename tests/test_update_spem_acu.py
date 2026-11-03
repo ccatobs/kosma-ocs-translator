@@ -172,6 +172,24 @@ class TestFormatValue:
         assert usa.format_value(None) == "        None"
 
 
+class TestSetupLogging:
+
+    def test_file_only_messages_not_on_console(self, tmp_path, monkeypatch, capsys):
+        monkeypatch.chdir(tmp_path)
+        log = usa.setup_logging(logging.INFO)
+        log.info("to both")
+        log.info("to file only", extra=usa.FILE_ONLY)
+        for handler in log.handlers:
+            handler.flush()
+
+        console = capsys.readouterr().err
+        assert "to both" in console
+        assert "to file only" not in console
+        logfile = (tmp_path / "kosma-ocs-translator.log").read_text()
+        assert "to both" in logfile
+        assert "to file only" in logfile
+
+
 class TestStripParameterPrefix:
 
     def test_strip(self):
