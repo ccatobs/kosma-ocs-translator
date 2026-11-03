@@ -481,6 +481,46 @@ def test_move_to_response_check(translator_factory, mock_ocs, status_code, body,
         assert t.tel_error == 503
 
 
+def _responses(*codes):
+    return [MagicMock(status_code=c, json=lambda c=c: {"status": "ok" if c == 200 else "busy"})
+            for c in codes]
+
+
+@pytest.mark.parametrize("codes,busy_timeout,expected_code,expected_calls", [
+    pytest.param([200],                1.0,  200, 1, id="accepted_first_try"),
+    pytest.param([503, 503, 200],      1.0,  200, 3, id="accepted_after_busy"),
+    pytest.param([503] * 50,           0.05, 503, None, id="busy_until_timeout"),
+    pytest.param([400],                1.0,  400, 1, id="other_error_not_retried"),
+])
+def test_scan_pattern_with_retry(translator_factory, mock_ocs, codes, busy_timeout,
+                                 expected_code, expected_calls):
+    mock_ocs.scan_pattern.side_effect = _responses(*codes)
+    t = translator_factory()
+
+    response = t._scan_pattern_with_retry({"points": []}, busy_timeout=busy_timeout,
+                                          retry_interval=0.01)
+
+    assert response.status_code == expected_code
+    if expected_calls is not None:
+        assert mock_ocs.scan_pattern.call_count == expected_calls
+    else:
+        assert 1 < mock_ocs.scan_pattern.call_count < len(codes)
+    for call in mock_ocs.scan_pattern.call_args_list:
+        assert call.kwargs == {"data": {"points": []}}
+
+
+def test_scan_pattern_retry_stops_when_superseded(translator_factory, mock_ocs):
+    mock_ocs.scan_pattern.side_effect = _responses(503, 200)
+    t = translator_factory()
+    t._track_stop_event.set()
+
+    response = t._scan_pattern_with_retry({"points": []}, busy_timeout=1.0,
+                                          retry_interval=0.01)
+
+    assert response is None
+    assert mock_ocs.scan_pattern.call_count == 1
+
+
 def _new_obs2tel(t, cookie, **changes):
     """Simulate reading a new obs2tel: same as the last one except for changes."""
     t.obs2tel = {**t.last_obs2tel, "obs_cookie": cookie, **changes}
