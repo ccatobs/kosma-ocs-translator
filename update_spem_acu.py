@@ -317,6 +317,33 @@ def kosma2spem(point_in, current_spem):
     return spem
 
 
+def changed_spem(new_spem, current_spem):
+    """
+    Select the SPEM parameters that differ from the current set
+
+    Parameters
+    ----------
+    new_spem : dict
+        SPEM parameters to be uploaded
+    current_spem : dict
+        SPEM parameters currently set
+
+    Returns
+    -------
+    changed : dict
+        Entries of new_spem missing in current_spem or differing by more than
+        spem_abs_tol
+    """
+    changed = {}
+    for key, value in new_spem.items():
+        if key in ignore_keys_acu or key in ignore_keys_kosma:
+            continue
+        current = current_spem.get(key)
+        if current is None or not math.isclose(value, current, abs_tol=spem_abs_tol):
+            changed[key] = value
+    return changed
+
+
 def confirm_update(current_spem_acu, new_spem):
     """
     Print the current ACU spem and new SPEM to be uploaded and ask for user confirmation
@@ -450,8 +477,7 @@ def main():
         logger=log,
     )
 
-    # get current SPEM in ACU, TODO: implement on the OCS side
-    # strip "Parameter " from the acu keys
+    # get current SPEM in ACU, strip "Parameter " from the acu keys
     current_spem_acu = strip_parameter_prefix(ocs.get_dataset("CmdSPEMParameter"))
 
     # get current SPEM in KOSMA-file-io
@@ -463,20 +489,38 @@ def main():
     # read KOSMA_point_in and derive SPEM parameters
     new_spem = kosma2spem(point_in=args.point_in, current_spem=current_spem_kosma)
 
+    # only parameters that actually change are sent
+    changed_acu = changed_spem(new_spem, current_spem_acu)
+    changed_kosma = changed_spem(new_spem, current_spem_kosma)
+    if not changed_acu and not changed_kosma:
+        log.info("New SPEM parameters are identical to the current ones, nothing to update")
+        return
+
     # print and ask confirmation
     confirm_update(current_spem_acu, new_spem)
 
-    # push to ACU, TODO: implement on the OCS side
-    response = ocs.put_spem(new_spem)
-    log.info(f"Response from put_spem: {response}")
+    # push to ACU
+    if changed_acu:
+        log.info(f"Updating ACU SPEM parameters: {', '.join(changed_acu)}")
+        response = ocs.set_spem(**changed_acu)
+        log.info(f"Response from set_spem: {response.status_code} {response.text}")
+        if response.status_code != 200:
+            # do not touch KOSMA_file_io, it should stay in sync with the ACU
+            raise RuntimeError(f"set_spem failed with HTTP {response.status_code}")
 
-    # verify the update
-    updated_spem_acu = strip_parameter_prefix(ocs.get_spem())
-    print_spem(updated_spem_acu)
+        # verify the update
+        updated_spem_acu = strip_parameter_prefix(ocs.get_dataset("CmdSPEMParameter"))
+        print_spem(updated_spem_acu)
+    else:
+        log.info("ACU SPEM parameters already up to date, not sent")
 
     # push to KOSMA_file_io
-    updated_spem_kosma = put_kosma_spem(new_spem)
-    print_spem(updated_spem_kosma)
+    if changed_kosma:
+        log.info(f"Updating {KOSMA_SPEM_FILE}: {', '.join(changed_kosma)}")
+        updated_spem_kosma = put_kosma_spem(changed_kosma)
+        print_spem(updated_spem_kosma)
+    else:
+        log.info(f"{KOSMA_SPEM_FILE} already up to date, not updated")
 
 
 if __name__ == "__main__":
