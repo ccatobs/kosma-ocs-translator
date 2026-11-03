@@ -24,7 +24,9 @@ def mock_ocs():
     ocs.earth_location = CCAT_LOCATION
     ocs.get_telescope_position.return_value = None
     ocs.get_status.return_value = dict(DEFAULT_STATUS)
-    ocs.get_cmd_pointing.return_value = dict(DEFAULT_POINTING)
+    ocs.get_dataset.side_effect = lambda name: (
+        dict(DEFAULT_POINTING) if name == "CmdPointingCorrection" else {}
+    )
     return ocs
 
 

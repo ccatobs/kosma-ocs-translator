@@ -415,6 +415,24 @@ def test_first_path_failed_writes_status(translator_factory, mock_ocs):
     assert result["tel_angle_focal_plane"] == 0.0
 
 
+@pytest.mark.parametrize("coord_sys_on,coord_sys_del,expected_deg", [
+    pytest.param("J2000",   "HORIZON", (1.0, -0.5), id="horizon_offset_on_j2000_source"),
+    pytest.param("HORIZON", "HORIZON", (1.0, -0.5), id="horizon_offset_on_horizon_source"),
+    pytest.param("HORIZON", "J2000",   (0.0, 0.0),  id="j2000_offset_not_reported"),
+])
+def test_ccdpos_offsets(translator_factory, coord_sys_on, coord_sys_del, expected_deg):
+    t = translator_factory(obs2tel_overrides={
+        "obs_coord_sys_on": coord_sys_on, "obs_lam_on": 170.0, "obs_bet_on": 50.0,
+        "obs_coord_sys_del": coord_sys_del,
+        "obs_lam_del": 3600.0, "obs_bet_del": -1800.0,   # arcsec
+    })
+
+    _, ccd = t.set_tel2obs_dict()
+
+    assert ccd["op_oazm"] == pytest.approx(np.deg2rad(expected_deg[0]))
+    assert ccd["op_oelv"] == pytest.approx(np.deg2rad(expected_deg[1]))
+
+
 @pytest.mark.parametrize("last_start,abort_if_unknown,aborted", [
     pytest.param(None,     True,  True,  id="no_previous_path"),
     pytest.param(None,     False, False, id="no_previous_path_no_abort_if_unknown"),

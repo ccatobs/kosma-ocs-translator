@@ -498,9 +498,11 @@ class KOSMA_translator:
         ccd_input_dict["op_azm"] = np.deg2rad(input_dict["tel_azm_cmd"])
         ccd_input_dict["op_elv"] = np.deg2rad(input_dict["tel_elv_cmd"])
 
-        if self.last_obs2tel["obs_coord_sys_on"] == "HORIZON":
-            ccd_input_dict["op_oazm"] = np.deg2rad(self.last_obs2tel["obs_lam_del"])
-            ccd_input_dict["op_oelv"] = np.deg2rad(self.last_obs2tel["obs_bet_del"])
+        # last_obs2tel is None if the very first path failed
+        if self.last_obs2tel is not None and self.last_obs2tel["obs_coord_sys_del"] == "HORIZON":
+            # obs_lam_del, obs_bet_del are in arcsec
+            ccd_input_dict["op_oazm"] = np.deg2rad(self.last_obs2tel["obs_lam_del"] / 3600.0)
+            ccd_input_dict["op_oelv"] = np.deg2rad(self.last_obs2tel["obs_bet_del"] / 3600.0)
         else:
             # these values are irrelevant if not Horizon
             ccd_input_dict["op_oazm"] = 0
@@ -530,8 +532,7 @@ class KOSMA_translator:
 
         response_pointing = self.ocs.get_dataset("CmdPointingCorrection")
         ccd_input_dict = self._build_ccdpos_params(input_dict, response_pointing)
-        ccd_input_dict = {}
-        
+
         return input_dict, ccd_input_dict
 
     def write_tel2obs_file(self):

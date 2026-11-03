@@ -393,6 +393,17 @@ class TestKosma2Spem:
         point_in = write_point_in(tmp_path / "KOSMA_point.in", "CCAT_ASYMMETRIC", apoint)
         assert usa.kosma2spem(str(point_in), CURRENT_SPEM)["AW"] == pytest.approx(1.0)
 
+    def test_values_rounded_to_0p001_mdeg(self, tmp_path):
+        apoint = [0.0] * 26
+        apoint[4] = 100 / 3.6  # AW = a4, written as 100 arcsec = 27.777... mdeg
+        current = {**CURRENT_SPEM, "NRX": 1.23456789}
+        point_in = write_point_in(tmp_path / "KOSMA_point.in", "CCAT_ASYMMETRIC", apoint)
+        spem = usa.kosma2spem(str(point_in), current)
+        assert spem["AW"] == 27.778
+        assert spem["NRX"] == 1.235
+        for key, value in spem.items():
+            assert value == round(value, usa.spem_decimals), key
+
     def test_missing_coefficient_raises(self, tmp_path):
         point_in = write_point_in(
             tmp_path / "KOSMA_point.in", "CCAT_NORMAL", self.APOINT, skip=(5,)
@@ -465,8 +476,24 @@ class TestMain:
 
     APOINT = [i + 1.0 for i in range(26)]
 
+    @staticmethod
+    def apoint_reproducing_current():
+        """CCAT_ASYMMETRIC point model that reproduces CURRENT_SPEM."""
+        apoint = [0.0] * 26
+        apoint[0] = -CURRENT_SPEM["NRX"]
+        apoint[2] = -CURRENT_SPEM["NRY"]
+        apoint[8] = CURRENT_SPEM["NRY"]
+        apoint[9] = -CURRENT_SPEM["NRX"]
+        for i, name in zip(range(20, 26), ["TFC", "TFS", "TF", "TFEC", "TFES", "TFE"]):
+            apoint[i] = CURRENT_SPEM[name]
+        return apoint
+
     def run_main(self, tmp_path, monkeypatch, acu_spem, replies, apoint=APOINT,
-                 status_code=200):
+                 status_code=200, acu_applies=True):
+        """
+        Run main() against a fake ACU holding acu_spem. set_spem updates the
+        fake ACU only if acu_applies (False: accepted but silently not applied).
+        """
         write_ccatacu_point(tmp_path, CURRENT_SPEM)
         point_in = write_point_in(
             tmp_path / "KOSMA_point.in", "CCAT_ASYMMETRIC", apoint,
@@ -477,18 +504,31 @@ class TestMain:
         monkeypatch.setattr(sys, "argv", ["update_spem_acu.py", "-i", str(point_in)])
         monkeypatch.setattr("builtins.input", answers(*replies))
 
+        acu = dict(acu_spem)
+
+        def get_dataset(name):
+            assert name == "CmdSPEMParameter"
+            return {(k if k in usa.ignore_keys_acu else f"Parameter {k}"): v
+                    for k, v in acu.items()}
+
+        def set_spem(**params):
+            if acu_applies and status_code == 200:
+                acu.update(params)
+            return MagicMock(status_code=status_code, text="{}")
+
         ocs = MagicMock()
-        ocs.get_dataset.return_value = {
-            (k if k in usa.ignore_keys_acu else f"Parameter {k}"): v
-            for k, v in acu_spem.items()
-        }
-        ocs.set_spem.return_value = MagicMock(status_code=status_code, text="{}")
+        ocs.get_dataset.side_effect = get_dataset
+        ocs.set_spem.side_effect = set_spem
         monkeypatch.setattr(usa, "setup_ocs", lambda **kwargs: ocs)
         fake = FakeKsetPoint(tmp_path)
         monkeypatch.setattr(usa.subprocess, "run", fake)
 
         usa.main()
         return ocs, fake
+
+    @staticmethod
+    def point_cmds(fake):
+        return [c for c in fake.commands if "ccatacu_point[" in c]
 
     def test_full_update(self, tmp_path, monkeypatch, acu_spem):
         ocs, fake = self.run_main(tmp_path, monkeypatch, acu_spem, replies=["y"])
@@ -501,47 +541,50 @@ class TestMain:
         assert set(sent) == set(ACU_NAMES) - {"NRX", "NRY"}
         assert sent == pytest.approx({k: expected[k] for k in sent})
         assert ocs.get_dataset.call_count == 2
-        ocs.get_dataset.assert_called_with("CmdSPEMParameter")
 
         updated = usa.get_kosma_spem()
         for name in ACU_NAMES:
             assert updated[name] == pytest.approx(expected[name], abs=1e-6), name
-        assert not any("ccatacu_point[26]" in c or "ccatacu_point[27]" in c
-                       for c in fake.commands)
+        assert updated["ccatacu_model_date"] != MODEL_DATE
         assert (tmp_path / "kosma-ocs-translator.log").exists()
 
-    def test_only_changed_parameters_are_sent(self, tmp_path, monkeypatch, acu_spem):
-        # point model reproducing CURRENT_SPEM except for AW (a4)
-        apoint = [0.0] * 26
-        apoint[0] = -CURRENT_SPEM["NRX"]
-        apoint[2] = -CURRENT_SPEM["NRY"]
-        apoint[8] = CURRENT_SPEM["NRY"]
-        apoint[9] = -CURRENT_SPEM["NRX"]
-        for i, name in zip(range(20, 26), ["TFC", "TFS", "TF", "TFEC", "TFES", "TFE"]):
-            apoint[i] = CURRENT_SPEM[name]
-        apoint[4] = 2.0
+    def test_only_changed_parameters_sent_to_acu(self, tmp_path, monkeypatch, acu_spem):
+        apoint = self.apoint_reproducing_current()
+        apoint[4] = 2.0   # only AW changes
         ocs, fake = self.run_main(tmp_path, monkeypatch, acu_spem, replies=["y"],
                                   apoint=apoint)
 
         assert ocs.set_spem.call_args.kwargs == pytest.approx({"AW": 2.0})
-        point_cmds = [c for c in fake.commands if "ccatacu_point[" in c]
-        assert point_cmds == [f"Kset_point ccatacu_point[{ACU_NAMES.index('AW')}] 2.000000"]
+        # KOSMA gets the full read-back set from the ACU
+        assert len(self.point_cmds(fake)) == len(ACU_NAMES)
+        assert (f"Kset_point ccatacu_point[{ACU_NAMES.index('AW')}] 2.000000"
+                in self.point_cmds(fake))
 
-    def test_nothing_changed_does_not_ask_or_update(self, tmp_path, monkeypatch, acu_spem):
-        apoint = [0.0] * 26
-        apoint[0] = -CURRENT_SPEM["NRX"]
-        apoint[2] = -CURRENT_SPEM["NRY"]
-        apoint[8] = CURRENT_SPEM["NRY"]
-        apoint[9] = -CURRENT_SPEM["NRX"]
-        for i, name in zip(range(20, 26), ["TFC", "TFS", "TF", "TFEC", "TFES", "TFE"]):
-            apoint[i] = CURRENT_SPEM[name]
+    def test_kosma_follows_acu_when_set_spem_not_applied(self, tmp_path, monkeypatch,
+                                                         acu_spem, caplog):
+        apoint = self.apoint_reproducing_current()
+        apoint[4] = 2.0
+        # the script logger does not propagate, attach caplog directly
+        logging.getLogger(usa.LOGGER_NAME).addHandler(caplog.handler)
+        self.run_main(tmp_path, monkeypatch, acu_spem, replies=["y"],
+                      apoint=apoint, acu_applies=False)
+
+        # KOSMA holds what the ACU really has (old AW), not the uploaded value
+        updated = usa.get_kosma_spem()
+        for name in ACU_NAMES:
+            assert updated[name] == pytest.approx(CURRENT_SPEM[name], abs=1e-6), name
+        assert "differ from the new ones" in caplog.text
+        assert "AW" in caplog.text
+
+    def test_nothing_changed_not_sent_but_kosma_dumped(self, tmp_path, monkeypatch,
+                                                       acu_spem):
         # no replies: input() would raise StopIteration if called
         ocs, fake = self.run_main(tmp_path, monkeypatch, acu_spem, replies=[],
-                                  apoint=apoint)
+                                  apoint=self.apoint_reproducing_current())
 
         ocs.set_spem.assert_not_called()
-        assert fake.commands == []
-        assert usa.get_kosma_spem()["ccatacu_model_date"] == MODEL_DATE
+        assert len(self.point_cmds(fake)) == len(ACU_NAMES)
+        assert usa.get_kosma_spem()["ccatacu_model_date"] != MODEL_DATE
 
     def test_set_spem_failure_does_not_update_kosma(self, tmp_path, monkeypatch, acu_spem):
         with pytest.raises(RuntimeError, match="503"):
