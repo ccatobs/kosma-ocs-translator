@@ -18,10 +18,6 @@ LOGGER_NAME = os.path.splitext(os.path.basename(__file__))[0]
 
 KOSMA_SPEM_FILE = "KOSMA_ccatacu_point.in"
 
-# SPEM parameters are named differently in KOSMA (string_ccatacu_point) and ACU
-kosma2acu_names = {"TFNC": "TFC", "TFNS": "TFS", "TFN": "TF"}
-acu2kosma_names = {v: k for k, v in kosma2acu_names.items()}
-
 # keys in the ACU SPEM set not used for the comparison or the update
 # LEL velocity may be needed later if the pointing model turns out to be
 # dependent of the elevation velocity. For now not used in the fit
@@ -93,7 +89,6 @@ def get_kosma_spem():
         value_var = f"ccatacu_point[{m.group(1)}]"
         if value_var not in spem_kosma_format:
             raise ValueError(f"{KOSMA_SPEM_FILE} lacks {value_var} for {name}")
-        name = kosma2acu_names.get(name, name)
         spem[name] = float(spem_kosma_format[value_var])
 
     # also include ccatacu_model_date
@@ -131,10 +126,9 @@ def put_kosma_spem(spem):
     for key, value in spem.items():
         if key in ignore_keys_acu or key in ignore_keys_kosma:
             continue
-        name = acu2kosma_names.get(key, key)
-        if name not in name2idx:
-            raise KeyError(f"{key} ({name}) not found in string_ccatacu_point")
-        commands.append(f"Kset_point ccatacu_point[{name2idx[name]}] {value:.6f}")
+        if key not in name2idx:
+            raise KeyError(f"{key} not found in string_ccatacu_point")
+        commands.append(f"Kset_point ccatacu_point[{name2idx[key]}] {value:.6f}")
     model_date = datetime.now(timezone.utc).strftime("%Y-%m-%d:%H:%M:%SZ")
     commands.append(f"Kset_point ccatacu_model_date {model_date}")
 

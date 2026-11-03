@@ -15,12 +15,12 @@ import update_spem_acu as usa
 
 
 # names in string_ccatacu_point[i], in the order of KOSMA_ccatacu_point.in
-KOSMA_NAMES = [
+# (identical to the ACU SPEM parameter names)
+ACU_NAMES = [
     "IA", "CA", "NPAE", "AN", "AW", "AES", "AEC", "IE", "EEC", "EES",
     "AW2", "AN2", "EES2", "AES2", "EEC2", "AEC2", "LELA", "LELE", "LEVA", "LEVE",
-    "TFNC", "TFNS", "TFEC", "TFES", "TFN", "TFE", "NRX", "NRY",
+    "TFC", "TFS", "TFEC", "TFES", "TF", "TFE", "NRX", "NRY",
 ]
-ACU_NAMES = [usa.kosma2acu_names.get(name, name) for name in KOSMA_NAMES]
 
 MODEL_DATE = "2026-10-30:14:44:00Z"
 
@@ -43,7 +43,7 @@ def write_ccatacu_point(directory, spem, model_date=MODEL_DATE):
             f"{spem[name]}   ccatacu_point[{i}]"
             "   ! CCAT-ACU pointing correction coefficient [mdeg]\n"
         )
-    for i, name in enumerate(KOSMA_NAMES):
+    for i, name in enumerate(ACU_NAMES):
         lines.append(
             f"{name}   string_ccatacu_point[{i}]"
             " ! description text for CCAT-ACU pointing correction coefficients\n"
@@ -205,12 +205,6 @@ class TestGetKosmaSpem:
         spem = usa.get_kosma_spem()
         for name in ACU_NAMES:
             assert spem[name] == pytest.approx(CURRENT_SPEM[name]), name
-
-    def test_kosma_names_are_mapped(self, kosma_dir):
-        spem = usa.get_kosma_spem()
-        for kosma_name, acu_name in usa.kosma2acu_names.items():
-            assert kosma_name not in spem
-            assert acu_name in spem
 
     def test_values_are_float(self, kosma_dir):
         spem = usa.get_kosma_spem()
