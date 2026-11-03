@@ -528,9 +528,8 @@ class KOSMA_translator:
         response = self.ocs.get_status()
         input_dict = self._build_tel2obs_params(response)
 
-        # TODO: implement this get command on OCS and TCS
-        #response_pointing = self.ocs.get_cmd_pointing()
-        #ccd_input_dict = self._build_ccdpos_params(input_dict, response_pointing)
+        response_pointing = self.ocs.get_dataset("CmdPointingCorrection")
+        ccd_input_dict = self._build_ccdpos_params(input_dict, response_pointing)
         ccd_input_dict = {}
         
         return input_dict, ccd_input_dict

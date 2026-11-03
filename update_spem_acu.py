@@ -174,7 +174,8 @@ def check_spem_sets(spem_acu, spem_kosma):
     # Print the list of key - value from spem_acu - value from spem_kosma
     keys = keys_acu + only_kosma
     differ = []
-    print(f"{'key':<8s} {'ACU':>12s} {'KOSMA':>12s}")
+    print("")
+    print(f"{'key':<8s} {'ACU':>12s} {'KOSMA_ccatacu_point.in':>25s}")
     for key in keys:
         value_acu = spem_acu.get(key)
         value_kosma = spem_kosma.get(key)
@@ -332,6 +333,7 @@ def confirm_update(current_spem_acu, new_spem):
     # Print key - current - new for all keys except for ignore_keys_acu
     keys = [k for k in current_spem_acu if k not in ignore_keys_acu]
     keys += [k for k in new_spem if k not in keys and k not in ignore_keys_acu]
+    print("")
     print(f"{'key':<8s} {'current':>12s} {'new':>12s} {'diff':>12s}")
     for key in keys:
         current = current_spem_acu.get(key)
@@ -450,7 +452,7 @@ def main():
 
     # get current SPEM in ACU, TODO: implement on the OCS side
     # strip "Parameter " from the acu keys
-    current_spem_acu = strip_parameter_prefix(ocs.get_spem())
+    current_spem_acu = strip_parameter_prefix(ocs.get_dataset("CmdSPEMParameter"))
 
     # get current SPEM in KOSMA-file-io
     current_spem_kosma = get_kosma_spem()
