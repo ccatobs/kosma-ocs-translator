@@ -695,6 +695,169 @@ def test_dump_spem_to_kosma_failure_does_not_raise(translator_factory, mock_ocs,
 
 
 # ---------------------------------------------------------------------------
+# op_tel_model_type / op_tel_model_date copied from KOSMA_ccatacu_point.in
+# ---------------------------------------------------------------------------
+
+def _write_ccatacu_model(directory, model_type, model_date):
+    (Path(directory) / "KOSMA_ccatacu_point.in").write_text(
+        "30-Oct-2026  14:46:42  1793368002.442420   File update time stamp   ! Kset_point\n"
+        "1.5   ccatacu_point[0]   ! CCAT-ACU pointing correction coefficient [mdeg]\n"
+        "IA   string_ccatacu_point[0]   ! description text\n"
+        f"{model_type}   ccatacu_model_type   ! identifier string for CCAT-ACU pointing model type\n"
+        f"{model_date}   ccatacu_model_date   ! creation date of CCAT_ACU pointing model values\n"
+    )
+
+
+def test_ccdpos_model_type_and_date_from_ccatacu_point(translator_factory, tmp_path):
+    _write_ccatacu_model(tmp_path, "CCAT-ACU_VA_1.3", "2026-10-30:14:44:00Z")
+    t = translator_factory()
+
+    _, ccd = t.set_tel2obs_dict()
+
+    assert ccd["op_tel_model_type"] == "CCAT-ACU_VA_1.3"
+    assert ccd["op_tel_model_date"] == "2026-10-30:14:44:00Z"
+
+
+def test_ccdpos_model_type_with_blanks_takes_first_column(translator_factory, tmp_path):
+    _write_ccatacu_model(tmp_path, "CCAT-ACU VA Error Compensations-document Release 1.3",
+                         "2026-10-30:14:44:00Z")
+    t = translator_factory()
+
+    _, ccd = t.set_tel2obs_dict()
+
+    assert ccd["op_tel_model_type"] == "CCAT-ACU"
+    assert ccd["op_tel_model_date"] == "2026-10-30:14:44:00Z"
+
+
+def test_ccdpos_model_defaults_without_ccatacu_point(translator_factory):
+    from kosma_ocs_translator import POINTING_MODEL_DEFAULTS
+    t = translator_factory()   # tmp_path has no KOSMA_ccatacu_point.in
+
+    _, ccd = t.set_tel2obs_dict()
+
+    assert (ccd["op_tel_model_type"], ccd["op_tel_model_date"]) == POINTING_MODEL_DEFAULTS
+
+
+def test_ccdpos_model_date_follows_file_update(translator_factory, tmp_path):
+    import os
+    _write_ccatacu_model(tmp_path, "CCAT-ACU", "2026-10-30:14:44:00Z")
+    t = translator_factory()
+    _, ccd = t.set_tel2obs_dict()
+    assert ccd["op_tel_model_date"] == "2026-10-30:14:44:00Z"
+
+    # e.g. update_spem_acu.py wrote a new SPEM set; force a different mtime
+    _write_ccatacu_model(tmp_path, "CCAT-ACU", "2026-11-05:10:00:00Z")
+    path = tmp_path / "KOSMA_ccatacu_point.in"
+    st = path.stat()
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns + 10**9))
+
+    _, ccd = t.set_tel2obs_dict()
+    assert ccd["op_tel_model_date"] == "2026-11-05:10:00:00Z"
+
+
+def test_ccdpos_model_not_reread_if_file_unchanged(translator_factory, tmp_path, monkeypatch):
+    import kosma_ocs_translator as kot
+    _write_ccatacu_model(tmp_path, "CCAT-ACU", "2026-10-30:14:44:00Z")
+    t = translator_factory()
+    reads = []
+    original = kot._read_first_column
+    monkeypatch.setattr(kot, "_read_first_column",
+                        lambda *a, **kw: reads.append(a) or original(*a, **kw))
+
+    for _ in range(3):
+        t.set_tel2obs_dict()
+
+    assert len(reads) == 1
+
+
+def test_ccdpos_file_contains_model_type_and_date(translator_factory, tmp_path):
+    _write_ccatacu_model(tmp_path, "CCAT-ACU_VA_1.3", "2026-10-30:14:44:00Z")
+    t = translator_factory()
+
+    t.write_tel2obs_file()
+
+    lines = (tmp_path / "KOSMA_ccdpos.sim").read_text().splitlines()
+    fields = {l.partition("!")[0].split()[-1]: l.partition("!")[0].split()[0]
+              for l in lines if "!" in l and "File update time stamp" not in l}
+    assert fields["op_tel_model_type"] == "CCAT-ACU_VA_1.3"
+    assert fields["op_tel_model_date"] == "2026-10-30:14:44:00Z"
+
+
+# ---------------------------------------------------------------------------
+# op_vel_elv: commanded (path) elevation velocity in KOSMA_ccdpos.sim
+# ---------------------------------------------------------------------------
+
+def _set_payload_el_velocity(t, vel_of_time):
+    """Replace the el velocity column of t.last_payload by vel_of_time(dt) [deg/s]."""
+    for p in t.last_payload["points"]:
+        p[4] = vel_of_time(p[0])
+
+
+def test_op_vel_elv_zero_for_static_payload(translator_factory):
+    t = translator_factory()   # static payload: velocities are 0
+
+    _, ccd = t.set_tel2obs_dict()
+
+    assert ccd["op_vel_elv"] == 0.0
+
+
+def test_op_vel_elv_interpolated_from_payload(translator_factory):
+    t = translator_factory()   # status time is 30 s after the payload start
+    _set_payload_el_velocity(t, lambda dt: 0.001 + 1e-6 * dt)
+
+    result, ccd = t.set_tel2obs_dict()
+
+    t_rel = result["tel_time_del"]
+    assert t_rel == pytest.approx(30.0, abs=1e-3)
+    assert ccd["op_vel_elv"] == pytest.approx((0.001 + 1e-6 * t_rel) * 3600.0)
+
+
+def test_op_vel_elv_zero_without_payload(translator_factory):
+    t = translator_factory()
+    t.last_payload = None
+    t.last_obs2tel = None
+    t._fail_path(2, 1)   # first path failed: status is still written
+
+    _, ccd = t.set_tel2obs_dict()
+
+    assert ccd["op_vel_elv"] == 0.0
+
+
+def test_tel_vel_elv_stays_acu_measured_velocity(translator_factory):
+    # tel2obs reports the ACU velocity, ccdpos the commanded one
+    t = translator_factory(status_overrides={"Elevation current velocity": 0.01})
+    _set_payload_el_velocity(t, lambda dt: 0.002)
+
+    result, ccd = t.set_tel2obs_dict()
+
+    assert result["tel_vel_elv"] == pytest.approx(0.01 * 3600.0)
+    assert ccd["op_vel_elv"] == pytest.approx(0.002 * 3600.0)
+
+
+def test_op_vel_elv_written_only_to_ccdpos(translator_factory, tmp_path):
+    t = translator_factory()
+    _set_payload_el_velocity(t, lambda dt: 0.002)
+
+    t.write_tel2obs_file()
+
+    def values(path):
+        out = {}
+        for line in path.read_text().splitlines():
+            data, sep, _ = line.partition("!")
+            fields = data.split()
+            if sep and fields and "File update time stamp" not in data:
+                out[fields[-1]] = fields[0]
+        return out
+
+    ccdpos = values(tmp_path / "KOSMA_ccdpos.sim")
+    tel2obs = values(tmp_path / "KOSMA_tel2obs.set")
+    assert float(ccdpos["op_vel_elv"]) == pytest.approx(0.002 * 3600.0)
+    # the helper key is not written to KOSMA_tel2obs.set
+    assert "tel_vel_elv_cmd" not in tel2obs
+    assert "op_vel_elv" not in tel2obs
+
+
+# ---------------------------------------------------------------------------
 # Output file format inspection
 # ---------------------------------------------------------------------------
 

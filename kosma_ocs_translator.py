@@ -288,6 +288,32 @@ KOSMA_SPEM_FILE = "KOSMA_ccatacu_point.in"
 ignore_keys_acu = ["Time", "Year", "LEL velocity"]
 ignore_keys_kosma = ["ccatacu_model_date"]
 
+# ACFG defaults of op_tel_model_type / op_tel_model_date (KOSMA_ccdpos.sim),
+# used if KOSMA_SPEM_FILE or its ccatacu_model_type / ccatacu_model_date is missing
+POINTING_MODEL_DEFAULTS = ("CCAT-ACU", "YYYY-MM-DDTHH:MM:SSZ")
+
+
+def _read_first_column(path, names):
+    """
+    Values of the variables names in a KOSMA_file_io file, as strings.
+    Lines are "<value>   <name>   ! <comment>"; the name is the last field
+    before "!", the value is the first field (a value containing blanks is cut
+    at the first blank). The first occurrence of a variable is used.
+
+    Returns
+    -------
+    values : dict
+        name -> value for the names found
+    """
+    values = {}
+    with open(path) as f:
+        for line in f:
+            fields = line.partition("!")[0].split()
+            if len(fields) >= 2 and fields[-1] in names and fields[-1] not in values:
+                values[fields[-1]] = fields[0]
+    return values
+
+
 # obs_wavelength [micron] below which the ACU SPEM parameters are dumped to
 # KOSMA_file_io at start-up (optical pointing)
 SPEM_DUMP_MAX_WAVELENGTH = 100.0
@@ -438,6 +464,53 @@ class KOSMA_translator:
         # Keep the record of the last payload and corresponding obs2tel
         self.last_payload = None
         self.last_obs2tel = None
+        # pointing model identifier for KOSMA_ccdpos.sim, cached by the
+        # modification time of KOSMA_ccatacu_point.in (see _pointing_model_info)
+        self._model_info_key = None
+        self._model_info = POINTING_MODEL_DEFAULTS
+
+    def _pointing_model_info(self):
+        """
+        Pointing model type and date applied by the ACU, for op_tel_model_type /
+        op_tel_model_date in KOSMA_ccdpos.sim. Copied from ccatacu_model_type /
+        ccatacu_model_date in KOSMA_ccatacu_point.in  The file is re-read only when its
+        modification time changes; ACFG defaults are used if it is missing.
+
+        Returns
+        -------
+        model_type, model_date : str
+        """
+        path = f"{self.read_write_dir}/{KOSMA_SPEM_FILE}"
+        try:
+            st = os.stat(path)
+            key = (st.st_mtime_ns, st.st_size)
+        except FileNotFoundError:
+            key = "missing"
+        if key == self._model_info_key:
+            return self._model_info
+
+        self._model_info_key = key
+        if key == "missing":
+            self.log.warning(
+                f"{path} not found, using default pointing model type/date "
+                f"{POINTING_MODEL_DEFAULTS} in KOSMA_ccdpos.sim"
+            )
+            self._model_info = POINTING_MODEL_DEFAULTS
+            return self._model_info
+
+        found = _read_first_column(path, ["ccatacu_model_type", "ccatacu_model_date"])
+        missing = [k for k in ("ccatacu_model_type", "ccatacu_model_date") if k not in found]
+        if missing:
+            self.log.warning(f"{', '.join(missing)} not found in {path}, using default")
+        self._model_info = (
+            found.get("ccatacu_model_type", POINTING_MODEL_DEFAULTS[0]),
+            found.get("ccatacu_model_date", POINTING_MODEL_DEFAULTS[1]),
+        )
+        self.log.info(
+            f"pointing model for KOSMA_ccdpos.sim: type={self._model_info[0]} "
+            f"date={self._model_info[1]}"
+        )
+        return self._model_info
 
     def check_for_obs2tel_update(self):
         # check modification time of obs2tel file and store
@@ -521,8 +594,11 @@ class KOSMA_translator:
         {0[timestring]}  {0[timestamp]}   File update time stamp   ! ccat_translator {0[host_pid]}
         {0[op_azm]}  op_azm   ! azimuth [radian] for optical pointing (commanded to telescope, without pointing model corrections)
         {0[op_elv]}  op_elv   ! elevatin [radian] for optical pointing (commanded to telescope, without pointing model corrections)
+        {0[op_vel_elv]}  op_vel_elv   ! elevation velocity [arcsec/sec], recorded for optical pointing simulation
         {0[op_oazm]}  op_oazm   ! azimuth pointing offset [rad]; optical pointing (HORIZON system)
         {0[op_oelv]}  op_oelv   ! elevation pointing offset [rad]; optical pointing (HORIZON system)
+        {0[op_tel_model_type]}   op_tel_model_type   ! identifier string for telescope task pointing model applied [KOSMA_3m,CCAT_*,CCAT-ACU*]
+        {0[op_tel_model_date]}   op_tel_model_date   ! creation date for telescope task pointing model applied
         {0[del_tel_tot_azm]}   del_tel_tot_azm   ! azimuth  pointing offset [rad] from telescope pointing model (including non repeatable terms)
         {0[del_tel_tot_elv]}   del_tel_tot_elv   ! elevation pointing offset [rad] from telescope pointing model (including non repeatable terms)
         {0[del_tel_rep_azm]}   del_tel_rep_azm   ! azimuth  pointing offset [rad] from telescope pointing model (only repeatable terms)
@@ -592,10 +668,14 @@ class KOSMA_translator:
             # report the current position; tel_on_track is "N" anyway
             input_dict["tel_azm_cmd"] = current_azi - del_tot_azm
             input_dict["tel_elv_cmd"] = current_ele - del_tot_elv
+            # not in KOSMA_tel2obs.set; used for op_vel_elv in KOSMA_ccdpos.sim [deg/s]
+            input_dict["tel_vel_elv_cmd"] = 0.0
         else:
             pts = np.array(self.last_payload["points"])   # shape (N, 5): dt, az, el, vaz, vel
             input_dict["tel_azm_cmd"] = np.interp(t_rel, pts[:, 0], pts[:, 1])
             input_dict["tel_elv_cmd"] = np.interp(t_rel, pts[:, 0], pts[:, 2])
+            # interpolated here, from the same payload as tel_elv_cmd
+            input_dict["tel_vel_elv_cmd"] = np.interp(t_rel, pts[:, 0], pts[:, 4])
         expected_azi = input_dict["tel_azm_cmd"] + del_tot_azm
         expected_ele = input_dict["tel_elv_cmd"] + del_tot_elv
         acu_azm_del = current_azi - expected_azi
@@ -682,6 +762,8 @@ class KOSMA_translator:
         ccd_input_dict = {}
         ccd_input_dict["op_azm"] = np.deg2rad(input_dict["tel_azm_cmd"])
         ccd_input_dict["op_elv"] = np.deg2rad(input_dict["tel_elv_cmd"])
+        # commanded (path) elevation velocity, deg/s -> arcsec/s, as in astra_track
+        ccd_input_dict["op_vel_elv"] = input_dict["tel_vel_elv_cmd"] * 3600.0
 
         # last_obs2tel is None if the very first path failed
         if self.last_obs2tel is not None and self.last_obs2tel["obs_coord_sys_del"] == "HORIZON":
@@ -692,6 +774,10 @@ class KOSMA_translator:
             # these values are irrelevant if not Horizon
             ccd_input_dict["op_oazm"] = 0
             ccd_input_dict["op_oelv"] = 0
+
+        model_type, model_date = self._pointing_model_info()
+        ccd_input_dict["op_tel_model_type"] = model_type
+        ccd_input_dict["op_tel_model_date"] = model_date
 
         ccd_input_dict["del_tel_tot_azm"] = np.deg2rad(del_tot_azm)
         ccd_input_dict["del_tel_tot_elv"] = np.deg2rad(del_tot_elv)
