@@ -1,9 +1,12 @@
-"""Unit tests for ImportKOSMAReadWriteIntoDictionary."""
+"""Unit tests for ImportKOSMAReadWriteIntoDictionary and _write_atomic."""
+import os
+import stat
 import time
 import pytest
 from pathlib import Path
 
-from kosma_ocs_translator import ImportKOSMAReadWriteIntoDictionary
+import kosma_ocs_translator
+from kosma_ocs_translator import ImportKOSMAReadWriteIntoDictionary, _write_atomic
 from helpers import BASE_OBS2TEL, DATA_DIR, write_obs2tel
 
 
@@ -91,3 +94,72 @@ class TestImportKOSMAReadWriteIntoDictionary:
         monkeypatch.setenv("WRITE_DIR", str(tmp_path))
         d = ImportKOSMAReadWriteIntoDictionary(files=["KOSMA_obs2tel.set"])["KOSMA_obs2tel.set"]
         assert d[key] == value
+
+
+class TestWriteAtomic:
+
+    def test_creates_new_file(self, tmp_path):
+        path = tmp_path / "KOSMA_tel2obs.set"
+        _write_atomic(str(path), "new\n")
+        assert path.read_text() == "new\n"
+        # no temporary file left behind
+        assert os.listdir(tmp_path) == ["KOSMA_tel2obs.set"]
+
+    def test_replaces_file_by_rename(self, tmp_path):
+        path = tmp_path / "KOSMA_tel2obs.set"
+        path.write_text("old\n")
+        old_inode = path.stat().st_ino
+        # a reader that opened the file before the update
+        with open(path) as reader:
+            _write_atomic(str(path), "new\n")
+            # still sees the complete old content, not an emptied file
+            assert reader.read() == "old\n"
+        assert path.read_text() == "new\n"
+        # replaced by a new file (rename), not truncated and rewritten in place
+        assert path.stat().st_ino != old_inode
+        assert os.listdir(tmp_path) == ["KOSMA_tel2obs.set"]
+
+    @pytest.mark.parametrize("mode", [0o644, 0o664, 0o640])
+    def test_keeps_mode_of_existing_file(self, tmp_path, mode):
+        path = tmp_path / "KOSMA_tel2obs.set"
+        path.write_text("old\n")
+        os.chmod(path, mode)
+        _write_atomic(str(path), "new\n")
+        assert stat.S_IMODE(path.stat().st_mode) == mode
+
+    def test_write_error_keeps_old_file(self, tmp_path):
+        path = tmp_path / "KOSMA_tel2obs.set"
+        path.write_text("old\n")
+        with pytest.raises(TypeError):
+            _write_atomic(str(path), None)   # f.write(None) fails
+        assert path.read_text() == "old\n"
+        assert os.listdir(tmp_path) == ["KOSMA_tel2obs.set"]
+
+    def test_rename_error_keeps_old_file(self, tmp_path, monkeypatch):
+        path = tmp_path / "KOSMA_tel2obs.set"
+        path.write_text("old\n")
+
+        def failing_replace(src, dst):
+            raise OSError("rename failed")
+
+        monkeypatch.setattr(kosma_ocs_translator.os, "replace", failing_replace)
+        with pytest.raises(OSError, match="rename failed"):
+            _write_atomic(str(path), "new\n")
+        assert path.read_text() == "old\n"
+        assert os.listdir(tmp_path) == ["KOSMA_tel2obs.set"]
+
+
+def test_write_tel2obs_file_is_atomic(translator_factory, tmp_path):
+    t = translator_factory()
+    (tmp_path / "KOSMA_tel2obs.set").write_text("old\n")
+    old_inode = (tmp_path / "KOSMA_tel2obs.set").stat().st_ino
+
+    t.write_tel2obs_file()
+
+    assert (tmp_path / "KOSMA_tel2obs.set").stat().st_ino != old_inode
+    assert "tel_return_cookie" in (tmp_path / "KOSMA_tel2obs.set").read_text()
+    assert "del_tel_tot_azm" in (tmp_path / "KOSMA_ccdpos.sim").read_text()
+    # only the obs2tel input and the two output files, no temporary files
+    assert sorted(os.listdir(tmp_path)) == [
+        "KOSMA_ccdpos.sim", "KOSMA_obs2tel.set", "KOSMA_tel2obs.set",
+    ]

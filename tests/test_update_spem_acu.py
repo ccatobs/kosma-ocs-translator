@@ -185,7 +185,7 @@ class TestSetupLogging:
         console = capsys.readouterr().err
         assert "to both" in console
         assert "to file only" not in console
-        logfile = (tmp_path / "kosma-ocs-translator.log").read_text()
+        logfile = (tmp_path / "update-spem-acu.log").read_text()
         assert "to both" in logfile
         assert "to file only" in logfile
 
@@ -364,7 +364,8 @@ class TestKosma2Spem:
     COMMON = {
         "IA": 1 + 1.5, "CA": -2, "NPAE": -(3 - 2.0), "AN": -4, "AW": 5,
         "AES": 6, "AEC": -7, "AW2": 11, "AN2": -12, "EES2": 13, "AES2": 14,
-        "EEC2": 15, "AEC2": 16, "LELA": 17, "LELE": 18, "LEVA": 19, "LEVE": 20,
+        "EEC2": 15, "AEC2": 16, "LELA": 17, "LELE": 18,
+        "LEVA": 19 * 1000, "LEVE": 20 * 1000,   # scaled in KOSMA
         "NRX": 1.5, "NRY": -2.0,
     }
     CURRENT_TILT = {"TFC": 0.3, "TFS": 0.4, "TF": 0.5,
@@ -404,6 +405,15 @@ class TestKosma2Spem:
         apoint[4] = 1.0  # AW = a4, written as 3.6 arcsec
         point_in = write_point_in(tmp_path / "KOSMA_point.in", "CCAT_ASYMMETRIC", apoint)
         assert usa.kosma2spem(str(point_in), CURRENT_SPEM)["AW"] == pytest.approx(1.0)
+
+    def test_leva_leve_scaled_by_1000(self, tmp_path):
+        apoint = [0.0] * 26
+        apoint[18] = 0.002   # LEVA = a18 * 1000
+        apoint[19] = -0.003  # LEVE = a19 * 1000
+        point_in = write_point_in(tmp_path / "KOSMA_point.in", "CCAT_ASYMMETRIC", apoint)
+        spem = usa.kosma2spem(str(point_in), CURRENT_SPEM)
+        assert spem["LEVA"] == pytest.approx(2.0)
+        assert spem["LEVE"] == pytest.approx(-3.0)
 
     def test_values_rounded_to_0p001_mdeg(self, tmp_path):
         apoint = [0.0] * 26
@@ -511,7 +521,7 @@ class TestMain:
             tmp_path / "KOSMA_point.in", "CCAT_ASYMMETRIC", apoint,
         )
         monkeypatch.setenv("WRITE_DIR", str(tmp_path))
-        # setup_logging writes kosma-ocs-translator.log into the cwd
+        # setup_logging writes update-spem-acu.log into the cwd
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(sys, "argv", ["update_spem_acu.py", "-i", str(point_in)])
         monkeypatch.setattr("builtins.input", answers(*replies))
@@ -558,7 +568,7 @@ class TestMain:
         for name in ACU_NAMES:
             assert updated[name] == pytest.approx(expected[name], abs=1e-6), name
         assert updated["ccatacu_model_date"] != MODEL_DATE
-        assert (tmp_path / "kosma-ocs-translator.log").exists()
+        assert (tmp_path / "update-spem-acu.log").exists()
 
     def test_only_changed_parameters_sent_to_acu(self, tmp_path, monkeypatch, acu_spem):
         apoint = self.apoint_reproducing_current()
@@ -578,7 +588,8 @@ class TestMain:
         apoint[4] = 2.0
         # the script logger does not propagate, attach caplog directly
         logging.getLogger(usa.LOGGER_NAME).addHandler(caplog.handler)
-        self.run_main(tmp_path, monkeypatch, acu_spem, replies=["y"],
+        # replies: confirm the upload, then continue despite the mismatch
+        self.run_main(tmp_path, monkeypatch, acu_spem, replies=["y", "y"],
                       apoint=apoint, acu_applies=False)
 
         # KOSMA holds what the ACU really has (old AW), not the uploaded value
@@ -587,6 +598,15 @@ class TestMain:
             assert updated[name] == pytest.approx(CURRENT_SPEM[name], abs=1e-6), name
         assert "differ from the new ones" in caplog.text
         assert "AW" in caplog.text
+
+    def test_abort_when_set_spem_not_applied(self, tmp_path, monkeypatch, acu_spem):
+        apoint = self.apoint_reproducing_current()
+        apoint[4] = 2.0
+        # replies: confirm the upload, then abort at the mismatch
+        with pytest.raises(SystemExit):
+            self.run_main(tmp_path, monkeypatch, acu_spem, replies=["y", "n"],
+                          apoint=apoint, acu_applies=False)
+        assert usa.get_kosma_spem()["ccatacu_model_date"] == MODEL_DATE
 
     def test_nothing_changed_not_sent_but_kosma_dumped(self, tmp_path, monkeypatch,
                                                        acu_spem):

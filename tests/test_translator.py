@@ -651,6 +651,50 @@ def test_unexpected_exception_in_track_fails_path(translator_factory):
 
 
 # ---------------------------------------------------------------------------
+# Start-up dump of the ACU SPEM parameters to KOSMA_file_io
+# ---------------------------------------------------------------------------
+
+ACU_SPEM_RAW = {"Time": 1.0, "Year": 2026, "Parameter IA": 1.5, "Parameter CA": -2.0}
+
+
+@pytest.mark.parametrize("wavelength,dumped", [
+    pytest.param(0.6,   True,  id="optical"),
+    pytest.param(99.9,  True,  id="just_below_100um"),
+    pytest.param(100.0, False, id="100um"),
+    pytest.param(850.0, False, id="submm"),
+])
+def test_dump_spem_to_kosma(translator_factory, mock_ocs, monkeypatch, wavelength, dumped):
+    import kosma_ocs_translator as kot
+    put = MagicMock(return_value={"IA": 1.5, "CA": -2.0})
+    monkeypatch.setattr(kot, "put_kosma_spem", put)
+    mock_ocs.get_dataset.side_effect = lambda name: (
+        dict(ACU_SPEM_RAW) if name == "CmdSPEMParameter" else {}
+    )
+    t = translator_factory(obs2tel_overrides={"obs_wavelength": wavelength})
+
+    result = t.dump_spem_to_kosma()
+
+    if dumped:
+        put.assert_called_once()
+        assert put.call_args.args[0] == {"Time": 1.0, "Year": 2026, "IA": 1.5, "CA": -2.0}
+        assert result == {"IA": 1.5, "CA": -2.0}
+    else:
+        put.assert_not_called()
+        mock_ocs.get_dataset.assert_not_called()
+        assert result is None
+
+
+def test_dump_spem_to_kosma_failure_does_not_raise(translator_factory, mock_ocs, monkeypatch):
+    import kosma_ocs_translator as kot
+    monkeypatch.setattr(kot, "put_kosma_spem",
+                        MagicMock(side_effect=RuntimeError("Kset_point failed")))
+    mock_ocs.get_dataset.side_effect = lambda name: dict(ACU_SPEM_RAW)
+    t = translator_factory(obs2tel_overrides={"obs_wavelength": 0.6})
+
+    assert t.dump_spem_to_kosma() is None
+
+
+# ---------------------------------------------------------------------------
 # Output file format inspection
 # ---------------------------------------------------------------------------
 

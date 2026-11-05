@@ -8,21 +8,20 @@ import logging
 import math
 import os
 import re
-import subprocess
-from datetime import datetime, timezone
+import subprocess  # used by put_kosma_spem in kosma_ocs_translator (patched in tests)
 
-from kosma_ocs_translator import setup_ocs, ImportKOSMAReadWriteIntoDictionary
+from kosma_ocs_translator import (
+    setup_ocs,
+    KOSMA_SPEM_FILE,
+    ignore_keys_acu,
+    ignore_keys_kosma,
+    strip_parameter_prefix,
+    get_kosma_spem,
+    put_kosma_spem,
+)
 
 # logger name follows the script name (without .py), also when run as __main__
 LOGGER_NAME = os.path.splitext(os.path.basename(__file__))[0]
-
-KOSMA_SPEM_FILE = "KOSMA_ccatacu_point.in"
-
-# keys in the ACU SPEM set not used for the comparison or the update
-# LEL velocity may be needed later if the pointing model turns out to be
-# dependent of the elevation velocity. For now not used in the fit
-ignore_keys_acu = ["Time", "Year", "LEL velocity"]
-ignore_keys_kosma = ["ccatacu_model_date"]
 
 # tolerance [mdeg] to treat two SPEM parameter values as identical
 # (0.01 mdeg = 0.036 arcsec)
@@ -62,92 +61,6 @@ def format_value(value):
     if isinstance(value, (int, float)):
         return f"{value:12.3f}"
     return f"{str(value):>12s}"
-
-
-def get_kosma_spem():
-    """
-    Get ACU parameters stored in KOSMA_file_io
-
-    Returns
-    -------
-    spem : dict
-        Dictionary of ACU SPEM parameters
-    """
-
-    spem_kosma_format = ImportKOSMAReadWriteIntoDictionary(
-        files = [KOSMA_SPEM_FILE])
-    if KOSMA_SPEM_FILE not in spem_kosma_format:
-        raise FileNotFoundError(f"{KOSMA_SPEM_FILE} not found in KOSMA_file_io")
-    spem_kosma_format = spem_kosma_format[KOSMA_SPEM_FILE]
-
-    # Make a dictionary of key = string_ccatacu_point[i], value = ccatacu_point[i]
-    spem = {}
-    for var, name in spem_kosma_format.items():
-        m = re.fullmatch(r"string_ccatacu_point\[(\d+)\]", var)
-        if not m:
-            continue
-        value_var = f"ccatacu_point[{m.group(1)}]"
-        if value_var not in spem_kosma_format:
-            raise ValueError(f"{KOSMA_SPEM_FILE} lacks {value_var} for {name}")
-        spem[name] = float(spem_kosma_format[value_var])
-
-    # also include ccatacu_model_date
-    spem["ccatacu_model_date"] = spem_kosma_format.get("ccatacu_model_date")
-
-    return spem
-
-
-def put_kosma_spem(spem):
-    """
-    Update ACU parameters stored in KOSMA_file_io
-
-    Parameters
-    ----------
-    spem : dict
-        New SPEM parameters
-
-    Returns
-    -------
-    spem : dict
-        SPEM parameters read back from KOSMA_file_io after the update
-    """
-    log = logging.getLogger(LOGGER_NAME)
-
-    # inverse of get_kosma_spem is needed to map key to the idx in string_ccatacu_point
-    spem_kosma_format = ImportKOSMAReadWriteIntoDictionary(
-        files = [KOSMA_SPEM_FILE]).get(KOSMA_SPEM_FILE, {})
-    name2idx = {}
-    for var, name in spem_kosma_format.items():
-        m = re.fullmatch(r"string_ccatacu_point\[(\d+)\]", var)
-        if m:
-            name2idx[name] = int(m.group(1))
-
-    commands = []
-    for key, value in spem.items():
-        if key in ignore_keys_acu or key in ignore_keys_kosma:
-            continue
-        if key not in name2idx:
-            raise KeyError(f"{key} not found in string_ccatacu_point")
-        commands.append(f"Kset_point ccatacu_point[{name2idx[key]}] {value:.6f}")
-    model_date = datetime.now(timezone.utc).strftime("%Y-%m-%d:%H:%M:%SZ")
-    commands.append(f"Kset_point ccatacu_model_date {model_date}")
-
-    # use a shell command, e.g. Kset_point ccatacu_point[0] 1
-    failed = []
-    for cmd in commands:
-        result = subprocess.run(
-            cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-        )
-        if result.returncode != 0:
-            log.error(f"Error running command {cmd}: {result.stderr}")
-            failed.append(cmd)
-        else:
-            log.debug(f"Command {cmd} ran successfully.")
-    if failed:
-        raise RuntimeError(f"Failed to update {KOSMA_SPEM_FILE}: {failed}")
-    log.info(f"{KOSMA_SPEM_FILE} updated (ccatacu_model_date = {model_date})")
-
-    return get_kosma_spem()
 
 
 def check_spem_sets(spem_acu, spem_kosma):
@@ -470,10 +383,6 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def strip_parameter_prefix(spem):
-    return {k.removeprefix("Parameter "): v for k, v in spem.items()}
-
-
 def main():
     args = parse_arguments()
     log_level = getattr(logging, args.log_level)
@@ -520,11 +429,13 @@ def main():
             "SPEM parameters in ACU differ from the new ones after set_spem: "
             + ", ".join(not_applied)
         )
-        ask_continue("Continue anyway to mirror the ACU values in KOSMA?")
+        if not ask_continue("Continue anyway to mirror the ACU values in KOSMA?"):
+            log.info("User aborted, KOSMA_file_io not updated")
+            raise SystemExit("Aborted by user")
 
     # KOSMA_file_io mirrors the ACU: dump the full read-back set (not new_spem),
     # so that KOSMA never holds values the ACU did not apply
-    updated_spem_kosma = put_kosma_spem(updated_spem_acu)
+    updated_spem_kosma = put_kosma_spem(updated_spem_acu, logger=log)
     print_spem(updated_spem_kosma)
 
 

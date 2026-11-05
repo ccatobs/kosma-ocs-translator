@@ -4,6 +4,9 @@ import random
 import logging
 import os, glob, re
 import socket
+import subprocess
+import stat
+import contextlib
 from ocs import observatory_control_system
 from astropy.coordinates import SkyCoord, EarthLocation, AltAz, Distance
 from astropy import units as u
@@ -112,6 +115,38 @@ def _get_time_from_acu_format(day_of_year, year):
     t = Time(f"{year}-01-01", format="iso", scale="utc") + (day_of_year - 1) * u.day
 
     return t
+
+
+def _write_atomic(path, text):
+    """
+    Replace the file path with text, so that a reader sees either the complete
+    old or the complete new file, never an empty or partly written one.
+    Same scheme as WriteVarSetList in KOSMA_file_io.c: write a temporary file
+    in the same directory, copy the mode of the existing file, rename it over path.
+
+    Parameters
+    ----------
+    path : str
+        File to be replaced
+    text : str
+        New content of the file
+    """
+    # same directory, so that the rename stays within one filesystem (atomic)
+    tmp = f"{path}_{os.getpid()}"
+    try:
+        with open(tmp, "w") as f:
+            f.write(text)
+        # keep the mode of the existing file (KOSMA processes may run as other users)
+        try:
+            os.chmod(tmp, stat.S_IMODE(os.stat(path).st_mode))
+        except FileNotFoundError:
+            pass
+        os.replace(tmp, path)
+    except BaseException:
+        # no leftover temporary file on error
+        with contextlib.suppress(FileNotFoundError):
+            os.remove(tmp)
+        raise
 
 
 def _total_pointing_correction(response_pointing):
@@ -242,6 +277,115 @@ def ImportKOSMAReadWriteIntoDictionary(files=None, variable=None, update_mod_tim
     # remove entries that just have a timestamp and no variable values
     # for
     return readwrite_dict
+
+
+# KOSMA_file_io file holding the ACU SPEM parameters (used for optical pointing)
+KOSMA_SPEM_FILE = "KOSMA_ccatacu_point.in"
+
+# keys in the ACU SPEM set not used for the comparison or the update
+# LEL velocity may be needed later if the pointing model turns out to be
+# dependent of the elevation velocity. For now not used in the fit
+ignore_keys_acu = ["Time", "Year", "LEL velocity"]
+ignore_keys_kosma = ["ccatacu_model_date"]
+
+# obs_wavelength [micron] below which the ACU SPEM parameters are dumped to
+# KOSMA_file_io at start-up (optical pointing)
+SPEM_DUMP_MAX_WAVELENGTH = 100.0
+
+
+def strip_parameter_prefix(spem):
+    """
+    Strip "Parameter " from the keys of the ACU dataset CmdSPEMParameter
+    """
+    return {k.removeprefix("Parameter "): v for k, v in spem.items()}
+
+
+def get_kosma_spem():
+    """
+    Get ACU parameters stored in KOSMA_file_io
+
+    Returns
+    -------
+    spem : dict
+        Dictionary of ACU SPEM parameters
+    """
+
+    spem_kosma_format = ImportKOSMAReadWriteIntoDictionary(
+        files = [KOSMA_SPEM_FILE])
+    if KOSMA_SPEM_FILE not in spem_kosma_format:
+        raise FileNotFoundError(f"{KOSMA_SPEM_FILE} not found in KOSMA_file_io")
+    spem_kosma_format = spem_kosma_format[KOSMA_SPEM_FILE]
+
+    # Make a dictionary of key = string_ccatacu_point[i], value = ccatacu_point[i]
+    spem = {}
+    for var, name in spem_kosma_format.items():
+        m = re.fullmatch(r"string_ccatacu_point\[(\d+)\]", var)
+        if not m:
+            continue
+        value_var = f"ccatacu_point[{m.group(1)}]"
+        if value_var not in spem_kosma_format:
+            raise ValueError(f"{KOSMA_SPEM_FILE} lacks {value_var} for {name}")
+        spem[name] = float(spem_kosma_format[value_var])
+
+    # also include ccatacu_model_date
+    spem["ccatacu_model_date"] = spem_kosma_format.get("ccatacu_model_date")
+
+    return spem
+
+
+def put_kosma_spem(spem, logger=None):
+    """
+    Update ACU parameters stored in KOSMA_file_io
+
+    Parameters
+    ----------
+    spem : dict
+        New SPEM parameters
+    logger : logging.Logger, optional
+        Logger to use. Defaults to the "kosma-ocs-translator" logger.
+
+    Returns
+    -------
+    spem : dict
+        SPEM parameters read back from KOSMA_file_io after the update
+    """
+    log = logger if logger is not None else logging.getLogger("kosma-ocs-translator")
+
+    # inverse of get_kosma_spem is needed to map key to the idx in string_ccatacu_point
+    spem_kosma_format = ImportKOSMAReadWriteIntoDictionary(
+        files = [KOSMA_SPEM_FILE]).get(KOSMA_SPEM_FILE, {})
+    name2idx = {}
+    for var, name in spem_kosma_format.items():
+        m = re.fullmatch(r"string_ccatacu_point\[(\d+)\]", var)
+        if m:
+            name2idx[name] = int(m.group(1))
+
+    commands = []
+    for key, value in spem.items():
+        if key in ignore_keys_acu or key in ignore_keys_kosma:
+            continue
+        if key not in name2idx:
+            raise KeyError(f"{key} not found in string_ccatacu_point")
+        commands.append(f"Kset_point ccatacu_point[{name2idx[key]}] {value:.6f}")
+    model_date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d:%H:%M:%SZ")
+    commands.append(f"Kset_point ccatacu_model_date {model_date}")
+
+    # use a shell command, e.g. Kset_point ccatacu_point[0] 1
+    failed = []
+    for cmd in commands:
+        result = subprocess.run(
+            cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        )
+        if result.returncode != 0:
+            log.error(f"Error running command {cmd}: {result.stderr}")
+            failed.append(cmd)
+        else:
+            log.debug(f"Command {cmd} ran successfully.")
+    if failed:
+        raise RuntimeError(f"Failed to update {KOSMA_SPEM_FILE}: {failed}")
+    log.info(f"{KOSMA_SPEM_FILE} updated (ccatacu_model_date = {model_date})")
+
+    return get_kosma_spem()
 
 
 class KOSMA_translator:
@@ -584,14 +728,14 @@ class KOSMA_translator:
         self.log.debug(
             f"writing tel2obs file with obs cookie: {self.tel_return_cookie}"
         )
-        tel2obs_handle = open(f"{self.read_write_dir}/KOSMA_tel2obs.set", "w")
-        tel2obs_handle.write(self.tel2obs.format(input_dict))
-        tel2obs_handle.close()
+        _write_atomic(
+            f"{self.read_write_dir}/KOSMA_tel2obs.set", self.tel2obs.format(input_dict)
+        )
 
         if ccd_input_dict:
-            ccdpossim_handle = open(f"{self.read_write_dir}/KOSMA_ccdpos.sim", "w")
-            ccdpossim_handle.write(self.ccdpossim .format(ccd_input_dict))
-            ccdpossim_handle.close()
+            _write_atomic(
+                f"{self.read_write_dir}/KOSMA_ccdpos.sim", self.ccdpossim.format(ccd_input_dict)
+            )
 
 
     def track(self):
@@ -1025,6 +1169,39 @@ class KOSMA_translator:
             self.tel_lost_track = "N"    # initialize for the new cookie
         return True
 
+    def dump_spem_to_kosma(self):
+        """
+        For optical pointing (obs_wavelength < SPEM_DUMP_MAX_WAVELENGTH micron),
+        mirror the SPEM parameters currently used by the ACU into KOSMA_file_io,
+        so that the pointing fit in KOSMA starts from the actual ACU model.
+        Failures are logged but do not stop the translator.
+
+        Returns
+        -------
+        spem : dict or None
+            SPEM parameters read back from KOSMA_file_io, None if not dumped
+        """
+        obs_wavelength = self.obs2tel["obs_wavelength"]
+        if obs_wavelength >= SPEM_DUMP_MAX_WAVELENGTH:
+            self.log.info(
+                f"obs_wavelength = {obs_wavelength} micron, "
+                f"ACU SPEM parameters not dumped to {KOSMA_SPEM_FILE}"
+            )
+            return None
+        self.log.info(
+            f"obs_wavelength = {obs_wavelength} micron, "
+            f"dumping ACU SPEM parameters to {KOSMA_SPEM_FILE}"
+        )
+        try:
+            spem_acu = strip_parameter_prefix(self.ocs.get_dataset("CmdSPEMParameter"))
+            self.log.info(f"ACU SPEM parameters: {spem_acu}")
+            spem_kosma = put_kosma_spem(spem_acu, logger=self.log)
+        except Exception as e:
+            self.log.error(f"Failed to dump ACU SPEM parameters to {KOSMA_SPEM_FILE}: {e}")
+            return None
+        self.log.info(f"SPEM parameters in {KOSMA_SPEM_FILE}: {spem_kosma}")
+        return spem_kosma
+
     def stop_track(self):
         if self._track_thread and self._track_thread.is_alive():
             self.log.info("Signaling track thread to stop")
@@ -1185,6 +1362,8 @@ def main():
         logger=logger,
     )
     translator = KOSMA_translator(ocs, abort_if_unknown=not args.no_abort_if_unknown)
+    # optical pointing: KOSMA needs the SPEM parameters currently used by the ACU
+    translator.dump_spem_to_kosma()
     background_thread = threading.Thread(
         target=run_write_tel2obs_file_in_background, args=(translator,)
     )
