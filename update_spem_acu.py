@@ -263,8 +263,8 @@ def kosma2spem(point_in, current_spem):
     spem["AEC2"] = apoint['a15']
     spem["LELA"] = apoint['a16']
     spem["LELE"] = apoint['a17']
-    spem["LEVA"] = apoint['a18']
-    spem["LEVE"] = apoint['a19']
+    spem["LEVA"] = apoint['a18'] * 1000    # scaled in KOSMA
+    spem["LEVE"] = apoint['a19'] * 1000
     spem["NRX"] = current_spem["NRX"]
     spem["NRY"] = current_spem["NRY"]
 
