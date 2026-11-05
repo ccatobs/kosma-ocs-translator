@@ -110,8 +110,39 @@ def _get_time_from_acu_format(day_of_year, year):
     """
 
     t = Time(f"{year}-01-01", format="iso", scale="utc") + (day_of_year - 1) * u.day
- 
+
     return t
+
+
+def _total_pointing_correction(response_pointing):
+    """
+    Total pointing correction (SPEM + tiltmeters) applied by the ACU.
+
+    Parameters
+    ----------
+    response_pointing : dict
+        ACU dataset "CmdPointingCorrection"
+
+    Returns
+    -------
+    del_tot_azm, del_tot_elv : float
+        Azimuth and elevation corrections in degrees
+    """
+
+    # TODO: when the refraction correction is done at OCS,
+    # it also needs to be added here
+
+    del_tot_azm = (
+        response_pointing["SPEM correction AZ"]
+        + response_pointing["Tiltmeter Az correction AZ"]
+        + response_pointing["Tiltmeter El correction AZ"]
+    )
+    del_tot_elv = (
+        response_pointing["SPEM correction EL"]
+        + response_pointing["Tiltmeter Az correction EL"]
+        + response_pointing["Tiltmeter El correction EL"]
+    )
+    return del_tot_azm, del_tot_elv
 
 
 def ImportKOSMAReadWriteIntoDictionary(files=None, variable=None, update_mod_time=True):
@@ -327,7 +358,7 @@ class KOSMA_translator:
         {0[tel_latitude]}   tel_latitude   ! latitude of observatory (needed for Doppler correction) [degree]
         {0[tel_longitude]}  tel_longitude   ! longitude of observatory (needed for Doppler correction) [degree, +west (astronomical notation)]
         {0[tel_altitude]}  tel_altitude   ! height above sea level (needed for Doppler correction) [meter]
-        {0[tel_angle_focal_plane]}   tel_angle_focal_plane   ! ccw angle from second coordinate of the telescope reference coordinate system (TARF,HORIZON) to second coordinate of obs_coord_sys_del [degree]
+        {0[tel_angle_focal_plane]}   tel_angle_focal_plane   ! ccw angle from 2nd coordinate of obs_coord_sys_del to 2nd coordinate of telescope reference system (TARF,HORIZON) [degree] (NOTE: was formerly opposite, but wrong)
         0   tel_los_act   ! actual los-angle [degree]
         {0[tel_time_act]}   tel_time_act   ! time when status data were valid [seconds since 1970 UTC]
         {0[tel_time_del]}   tel_time_del   ! time since start of track (may be negative, if start in the future) [seconds]
@@ -354,9 +385,10 @@ class KOSMA_translator:
         {0[del_tel_rep_elv]}   del_tel_rep_elv   ! elevation pointing offset [rad] from telescope pointing model (only repeatable terms)
         """
 
-    def _build_tel2obs_params(self, response) -> dict:
+    def _build_tel2obs_params(self, response: dict, response_pointing: dict) -> dict:
         """
-        Derive the KOSMA_tel2obs parameter dictionary from a single ACU status response.
+        Derive the KOSMA_tel2obs parameter dictionary from a single ACU status
+        response and the pointing corrections (dataset CmdPointingCorrection).
         """
         input_dict = {}
 
@@ -399,12 +431,33 @@ class KOSMA_translator:
 
         current_azi = response["Azimuth current position"]
         current_ele = response["Elevation current position"]
-        cmd_azi = response["Azimuth commanded position"]
-        cmd_ele = response["Elevation commanded position"]
-        acu_azm_del = current_azi - cmd_azi
-        acu_elv_del = current_ele - cmd_ele
 
-        actdiff = 3600 * ((acu_azm_del*np.cos(np.deg2rad(cmd_ele)))**2 + acu_elv_del**2) ** 0.5
+        # cmd_azi = response["Azimuth commanded position"]
+        # cmd_ele = response["Elevation commanded position"]
+        # acu_azm_del = current_azi - cmd_azi
+        # acu_elv_del = current_ele - cmd_ele
+
+        # actdiff = 3600 * ((acu_azm_del*np.cos(np.deg2rad(cmd_ele)))**2 + acu_elv_del**2) ** 0.5
+
+        # The ACU "commanded position" is not used. Instead the
+        # expected position is the path position (interpolated from the last
+        # payload) plus the total pointing correction applied by the ACU.
+        del_tot_azm, del_tot_elv = _total_pointing_correction(response_pointing)
+        if self.last_payload is None:
+            # no path to interpolate (only when the first path failed):
+            # report the current position; tel_on_track is "N" anyway
+            input_dict["tel_azm_cmd"] = current_azi - del_tot_azm
+            input_dict["tel_elv_cmd"] = current_ele - del_tot_elv
+        else:
+            pts = np.array(self.last_payload["points"])   # shape (N, 5): dt, az, el, vaz, vel
+            input_dict["tel_azm_cmd"] = np.interp(t_rel, pts[:, 0], pts[:, 1])
+            input_dict["tel_elv_cmd"] = np.interp(t_rel, pts[:, 0], pts[:, 2])
+        expected_azi = input_dict["tel_azm_cmd"] + del_tot_azm
+        expected_ele = input_dict["tel_elv_cmd"] + del_tot_elv
+        acu_azm_del = current_azi - expected_azi
+        acu_elv_del = current_ele - expected_ele
+
+        actdiff = 3600 * ((acu_azm_del*np.cos(np.deg2rad(expected_ele)))**2 + acu_elv_del**2) ** 0.5
 
         if self.tel_path_failed:
             # the ACU is not executing the commanded path
@@ -429,15 +482,6 @@ class KOSMA_translator:
         # time of the status since the start time of the table sent
         input_dict["tel_time_del"] = t_rel
 
-        if self.last_payload is None:
-            # no path to interpolate: report the ACU's own positions
-            input_dict["tel_azm_cmd"] = cmd_azi
-            input_dict["tel_elv_cmd"] = cmd_ele
-        else:
-            pts = np.array(self.last_payload["points"])   # shape (N, 5): dt, az, el, vaz, vel
-            # TODO: apply refraction correction to tel_elev_cmd
-            input_dict["tel_azm_cmd"] = np.interp(t_rel, pts[:, 0], pts[:, 1])
-            input_dict["tel_elv_cmd"] = np.interp(t_rel, pts[:, 0], pts[:, 2])
         input_dict["tel_azm_act"] = input_dict["tel_azm_cmd"] + acu_azm_del
         input_dict["tel_elv_act"] = input_dict["tel_elv_cmd"] + acu_elv_del
 
@@ -489,10 +533,7 @@ class KOSMA_translator:
         """
         spem_azm = response_pointing["SPEM correction AZ"]
         spem_elv = response_pointing["SPEM correction EL"]
-        tilt1_azm = response_pointing["Tiltmeter Az correction AZ"]
-        tilt2_azm = response_pointing["Tiltmeter El correction AZ"]
-        tilt1_elv = response_pointing["Tiltmeter Az correction EL"]
-        tilt2_elv = response_pointing["Tiltmeter El correction EL"]
+        del_tot_azm, del_tot_elv = _total_pointing_correction(response_pointing)
 
         ccd_input_dict = {}
         ccd_input_dict["op_azm"] = np.deg2rad(input_dict["tel_azm_cmd"])
@@ -508,8 +549,8 @@ class KOSMA_translator:
             ccd_input_dict["op_oazm"] = 0
             ccd_input_dict["op_oelv"] = 0
 
-        ccd_input_dict["del_tel_tot_azm"] = np.deg2rad(spem_azm + tilt1_azm + tilt2_azm)
-        ccd_input_dict["del_tel_tot_elv"] = np.deg2rad(spem_elv + tilt1_elv + tilt2_elv)
+        ccd_input_dict["del_tel_tot_azm"] = np.deg2rad(del_tot_azm)
+        ccd_input_dict["del_tel_tot_elv"] = np.deg2rad(del_tot_elv)
         ccd_input_dict["del_tel_rep_azm"] = np.deg2rad(spem_azm)
         ccd_input_dict["del_tel_rep_elv"] = np.deg2rad(spem_elv)
 
@@ -528,9 +569,9 @@ class KOSMA_translator:
             return None, None
 
         response = self.ocs.get_status()
-        input_dict = self._build_tel2obs_params(response)
-
         response_pointing = self.ocs.get_dataset("CmdPointingCorrection")
+
+        input_dict = self._build_tel2obs_params(response, response_pointing)
         ccd_input_dict = self._build_ccdpos_params(input_dict, response_pointing)
 
         return input_dict, ccd_input_dict

@@ -411,8 +411,52 @@ def test_first_path_failed_writes_status(translator_factory, mock_ocs):
     assert result["tel_return_cookie"] == 2
     assert result["tel_error"] == 1
     assert result["tel_on_track"] == "N"
-    assert result["tel_azm_cmd"] == status["Azimuth commanded position"]
+    # no payload: cmd is the current position minus the (zero) pointing correction
+    assert result["tel_azm_cmd"] == status["Azimuth current position"]
     assert result["tel_angle_focal_plane"] == 0.0
+
+
+@pytest.mark.parametrize("current,correction,on_track,act_minus_cmd", [
+    # payload is static at az=180, el=45; correction is SPEM + tiltmeters [deg]
+    pytest.param((180.0, 45.0), (0.0, 0.0),  "Y", (0.0, 0.0),   id="no_correction"),
+    pytest.param((182.0, 46.5), (2.0, 1.5),  "Y", (0.0, 0.0),   id="current_follows_correction"),
+    pytest.param((180.0, 45.0), (2.0, 1.5),  "N", (-2.0, -1.5), id="correction_not_applied"),
+])
+def test_on_track_uses_payload_plus_pointing_correction(
+    translator_factory, mock_ocs, current, correction, on_track, act_minus_cmd
+):
+    """
+    tel_on_track compares the current position with the payload position plus
+    the total pointing correction; the ACU commanded position is ignored.
+    """
+    pointing = {
+        "SPEM correction AZ": correction[0] / 2,
+        "Tiltmeter Az correction AZ": correction[0] / 4,
+        "Tiltmeter El correction AZ": correction[0] / 4,
+        "SPEM correction EL": correction[1] / 2,
+        "Tiltmeter Az correction EL": correction[1] / 4,
+        "Tiltmeter El correction EL": correction[1] / 4,
+    }
+    mock_ocs.get_dataset.side_effect = lambda name: (
+        pointing if name == "CmdPointingCorrection" else {}
+    )
+    t = translator_factory(status_overrides={
+        "Azimuth current position": current[0],
+        "Elevation current position": current[1],
+    })
+    # ACU commanded position deliberately inconsistent: must not be used
+    mock_ocs.get_status.return_value["Azimuth commanded position"] = 0.0
+    mock_ocs.get_status.return_value["Elevation commanded position"] = 0.0
+
+    result, ccd = t.set_tel2obs_dict()
+
+    assert result["tel_on_track"] == on_track
+    assert result["tel_azm_cmd"] == pytest.approx(180.0)
+    assert result["tel_elv_cmd"] == pytest.approx(45.0)
+    assert result["tel_azm_act"] - result["tel_azm_cmd"] == pytest.approx(act_minus_cmd[0])
+    assert result["tel_elv_act"] - result["tel_elv_cmd"] == pytest.approx(act_minus_cmd[1])
+    assert ccd["del_tel_tot_azm"] == pytest.approx(np.deg2rad(correction[0]))
+    assert ccd["del_tel_tot_elv"] == pytest.approx(np.deg2rad(correction[1]))
 
 
 @pytest.mark.parametrize("coord_sys_on,coord_sys_del,expected_deg", [
