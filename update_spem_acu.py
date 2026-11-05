@@ -176,7 +176,7 @@ def check_spem_sets(spem_acu, spem_kosma):
     keys = keys_acu + only_kosma
     differ = []
     print("")
-    print(f"{'key':<8s} {'ACU':>12s} {'KOSMA_ccatacu_point.in':>25s}")
+    print(f"{'key':<8s} {'ACU [mdeg]':>12s} {'KOSMA_ccatacu_point.in [mdg]':>30s}")
     for key in keys:
         value_acu = spem_acu.get(key)
         value_kosma = spem_kosma.get(key)
@@ -365,7 +365,7 @@ def confirm_update(current_spem_acu, new_spem):
     keys = [k for k in current_spem_acu if k not in ignore_keys_acu]
     keys += [k for k in new_spem if k not in keys and k not in ignore_keys_acu]
     print("")
-    print(f"{'key':<8s} {'current':>12s} {'new':>12s} {'diff':>12s}")
+    print(f"{'key':<8s} {'current [mdeg]':>12s} {'new [mdeg]':>12s} {'diff':>12s}")
     for key in keys:
         current = current_spem_acu.get(key)
         new = new_spem.get(key)
@@ -423,7 +423,7 @@ def setup_logging(log_level):
     log.addHandler(ch)
 
     # file handler
-    fh = logging.FileHandler("kosma-ocs-translator.log")
+    fh = logging.FileHandler("update-spem-acu.log")
     fh.setLevel(log_level)
     # detailed formatter for file output
     file_formatter = logging.Formatter(
@@ -520,6 +520,7 @@ def main():
             "SPEM parameters in ACU differ from the new ones after set_spem: "
             + ", ".join(not_applied)
         )
+        ask_continue("Continue anyway to mirror the ACU values in KOSMA?")
 
     # KOSMA_file_io mirrors the ACU: dump the full read-back set (not new_spem),
     # so that KOSMA never holds values the ACU did not apply
