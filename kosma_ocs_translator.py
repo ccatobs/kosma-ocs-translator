@@ -51,6 +51,19 @@ _frame_epochs = {
     "galactic": Time("J2000"),
 }
 
+# Slew before a path (see KOSMA_translator._slew_to).
+# [deg] If the telescope is at least this far from the first point of a new path
+# (in azimuth or in elevation, not distance on sky), it is first slewed there with move-to
+# and the path is sent only after it has arrived. Otherwise the path is sent directly and the
+# ACU itself moves to the first point with its spline path definition.
+SLEW_BEFORE_PATH_MIN_DIST = 1.0
+# [sec] give up waiting for the slew to finish after this
+SLEW_TIMEOUT = 300.0
+# [deg/s] the slew has finished once both axes are slower than this
+SLEW_SPEED_TOLERANCE = 1e-4
+# [sec] interval of reading the ACU status while waiting for the slew
+SLEW_POLL_INTERVAL = 0.5
+
 
 def _apply_offset(coord, d_lam_arcsec, d_bet_arcsec, true_angle):
     """
@@ -449,13 +462,13 @@ class KOSMA_translator:
         self.tel_path_failed = False
         self.tel_error = 0
         self.tel_lost_track = "N"
+        # True while a move-to sent by _slew_to may still be running on TCS
+        # (e.g. its track was superseded before arrival): the next command aborts it
+        self.slew_in_progress = False
         self.read_obs2tel_file()
-        # For now, ocs.get_telescope_position() always fall back to
-        # a hard coded earth_location.
-        # If this is solved on the OCS side and wants to use values
-        # read from the ACU is prefered, use get_telescope_position
-        # instead of ocs.earth_location
-        # self.ocs.get_telescope_position()
+        # ocs.earth_location is set when the OCS client connects: it is fetched from
+        # TCS /telescope-position (hard-coded FYST constants in TCS astro.go, same as
+        # the TCS uses for its own az/el), with a built-in default if that fails.
         self.location = ocs.earth_location
         self.log.info(f"Telescope location: {self.location}")
         # Add tracking thread management
@@ -965,6 +978,7 @@ class KOSMA_translator:
                 return
             # ocs.move_to aborts the previous command itself
             response = self.ocs.move_to(cmd_az, cmd_el)
+            self.slew_in_progress = False   # aborted by ocs.move_to
             body = response.json()
             if response.status_code != 200 or body.get("status") != "ok":
                 self.log.error(
@@ -1044,7 +1058,11 @@ class KOSMA_translator:
         if self._track_stop_event.is_set():
             self.log.info("Track superseded, previous path not aborted")
             return
-        if self.last_payload is None:
+        if self.slew_in_progress:
+            # the slew of a superseded track may still be running on TCS
+            need_abort = True
+            self.log.info("Previous slew may still be running")
+        elif self.last_payload is None:
             # no record of the previous command (e.g. after a restart): a path
             # sent before may still be running on TCS
             need_abort = self.abort_if_unknown
@@ -1061,71 +1079,89 @@ class KOSMA_translator:
         if need_abort:
             try:
                 self.ocs.abort()
+                self.slew_in_progress = False
                 self.log.info(f"Previous path aborted")
             except Exception as e:
                 self.log.error(f"Abort error: {e}")
                 self._fail_path(cookie, 1)
                 return
 
-        # make an array of times from now + overhead to now + overhead + track_duration,
-        # with 1 second steps
-        # Overhead [sec] to account for computation and communication delay
-        # TCS requires > 10 sec ahead
-        track_overhead = 11
-        n_steps = int(track_duration) + 1
-        t_build = time.perf_counter()
-        time_array = Time.now() + track_overhead * u.second + np.linspace(
-            0, track_duration, n_steps) * u.second
+        def build_payload():
+            """Path of track_duration seconds, starting track_overhead seconds from now."""
+            # make an array of times from now + overhead to now + overhead + track_duration,
+            # with 1 second steps
+            # Overhead [sec] to account for computation and communication delay
+            # TCS requires > 10 sec ahead
+            track_overhead = 11
+            n_steps = int(track_duration) + 1
+            t_build = time.perf_counter()
+            time_array = Time.now() + track_overhead * u.second + np.linspace(
+                0, track_duration, n_steps) * u.second
 
-        # calculate the altaz coordinates for each time step
-        altaz_frames = AltAz(obstime=time_array, location=self.location)
-        altaz = coord.transform_to(altaz_frames)
+            # calculate the altaz coordinates for each time step
+            altaz_frames = AltAz(obstime=time_array, location=self.location)
+            altaz = coord.transform_to(altaz_frames)
 
-        # Apply HORIZON-frame sky/map offsets after AltAz transform
-        if coord_sys_del == "HORIZON" and (lam_del != 0.0 or bet_del != 0.0):
-            altaz = _apply_offset(altaz, lam_del, bet_del, true_angle_del)
+            # Apply HORIZON-frame sky/map offsets after AltAz transform
+            if coord_sys_del == "HORIZON" and (lam_del != 0.0 or bet_del != 0.0):
+                altaz = _apply_offset(altaz, lam_del, bet_del, true_angle_del)
 
-        # Apply HORIZON-frame off-position offsets after AltAz transform
-        if coord_sys_off == "HORIZON" and (lam_off != 0.0 or bet_off != 0.0):
-            altaz = _apply_offset(altaz, lam_off, bet_off, true_angle_off)
+            # Apply HORIZON-frame off-position offsets after AltAz transform
+            if coord_sys_off == "HORIZON" and (lam_off != 0.0 or bet_off != 0.0):
+                altaz = _apply_offset(altaz, lam_off, bet_off, true_angle_off)
 
-        # Apply focal plane offsets
-        if focal_plane_az != 0.0 or focal_plane_el != 0.0:
-            altaz = _apply_offset(altaz, focal_plane_az, focal_plane_el, "Y")
+            # Apply focal plane offsets
+            if focal_plane_az != 0.0 or focal_plane_el != 0.0:
+                altaz = _apply_offset(altaz, focal_plane_az, focal_plane_el, "Y")
 
-        if if_extended:
-            az_array, el_array = get_overtop_altaz_from_nominal(
-                altaz.az.deg, altaz.alt.deg)
-        else:
-            az_array = altaz.az.deg
-            el_array = altaz.alt.deg
+            if if_extended:
+                az_array, el_array = get_overtop_altaz_from_nominal(
+                    altaz.az.deg, altaz.alt.deg)
+            else:
+                az_array = altaz.az.deg
+                el_array = altaz.alt.deg
 
-        # calculate the velocities in azimuth and elevation using np.gradient
-        dt = np.gradient(time_array.unix)
-        az_velocities = np.gradient(az_array) / dt
-        el_velocities = np.gradient(el_array) / dt
+            # calculate the velocities in azimuth and elevation using np.gradient
+            dt = np.gradient(time_array.unix)
+            az_velocities = np.gradient(az_array) / dt
+            el_velocities = np.gradient(el_array) / dt
 
-        # program track mode, see definition here ICD-1000000-32000-02-00 VA Webserver
-        # - Remote Protocol
-        mode = 0  #
-        mode_arr = np.full_like(az_array, mode)
-        # Assuming all arrays are 1D and of the same length
-        points = np.column_stack(
-            [
-                time_array.unix - time_array.unix[0],  # time offset in seconds since start of track
-                az_array,
-                el_array,
-                az_velocities,
-                el_velocities,
-            ]
-        )
-        points_list = points.tolist()
-        payload = {
-            "start_time": time_array[0].unix,
-            "coordsys": "Horizon",
-            "points": points_list,
-        }
-        self.log.info(f"payload computed in {time.perf_counter() - t_build:.3f} s")
+            # program track mode, see definition here ICD-1000000-32000-02-00 VA Webserver
+            # - Remote Protocol
+            # Assuming all arrays are 1D and of the same length
+            points = np.column_stack(
+                [
+                    time_array.unix - time_array.unix[0],  # time offset in seconds since start of track
+                    az_array,
+                    el_array,
+                    az_velocities,
+                    el_velocities,
+                ]
+            )
+            payload = {
+                "start_time": time_array[0].unix,
+                "coordsys": "Horizon",
+                "points": points.tolist(),
+            }
+            self.log.info(f"payload computed in {time.perf_counter() - t_build:.3f} s")
+            return payload
+
+        payload = build_payload()
+
+        # If the telescope is far from the start of the path, slew there first,
+        # then recompute the path so that it starts track_overhead after arrival.
+        first_az, first_el = payload["points"][0][1], payload["points"][0][2]
+        current_az, current_el, _, _ = self._acu_position()
+        distance = max(abs(first_az - current_az), abs(first_el - current_el))
+        if distance >= SLEW_BEFORE_PATH_MIN_DIST:
+            self.log.info(
+                f"telescope at az={current_az:.4f} el={current_el:.4f} is {distance:.3f} deg "
+                f"(>= {SLEW_BEFORE_PATH_MIN_DIST} deg) from the path start "
+                f"az={first_az:.4f} el={first_el:.4f}: slewing there first"
+            )
+            if not self._slew_to(first_az, first_el, cookie):
+                return
+            payload = build_payload()
 
         try:
             # TODO: find out a way to pass obs_wavelength together with payload
@@ -1166,6 +1202,88 @@ class KOSMA_translator:
         except Exception as e:
             self.log.error(f"Track error: {e}")
             self._fail_path(cookie, 1)
+
+    def _acu_position(self):
+        """
+        ACU current position minus the total pointing correction, i.e. comparable
+        with path / move-to positions, and the current axis velocities.
+
+        Returns
+        -------
+        az, el : float
+            [deg]
+        vel_az, vel_el : float
+            [deg/s]
+        """
+        status = self.ocs.get_status()
+        del_tot_azm, del_tot_elv = _total_pointing_correction(
+            self.ocs.get_dataset("CmdPointingCorrection"))
+        return (
+            status["Azimuth current position"] - del_tot_azm,
+            status["Elevation current position"] - del_tot_elv,
+            status["Azimuth current velocity"],
+            status["Elevation current velocity"],
+        )
+
+    def _slew_to(self, az, el, cookie):
+        """
+        Slew the telescope to (az, el) [deg, Horizon], where a path is going to
+        start, and wait until it has arrived.
+
+        For now this is a plain move-to. The slew is isolated here so that it can
+        later be replaced by a slew path avoiding the sun
+        (sun_avoidance/slew.py) without touching _send_track.
+
+        Returns True once the telescope has arrived. Returns False if the track
+        was superseded, or if the slew failed (then the path for cookie is
+        failed with _fail_path).
+        """
+        if self._track_stop_event.is_set():
+            self.log.info("Track superseded, slew not sent")
+            return False
+        # ocs.move_to aborts the previous command itself
+        response = self.ocs.move_to(az, el)
+        body = response.json()
+        if response.status_code != 200 or body.get("status") != "ok":
+            # nothing running on TCS: ocs.move_to aborted the previous command
+            self.slew_in_progress = False
+            self.log.error(
+                f"slew move_to rejected: HTTP {response.status_code}, "
+                f"status={body.get('status')}, message={body.get('message')}"
+            )
+            self._fail_path(cookie, response.status_code)
+            return False
+        self.slew_in_progress = True
+        self.log.info(f"slew move_to accepted: {body}")
+
+        # Arrived = stopped close to the target. Close: within the same limit as
+        # for starting a path without a slew (robust against the pointing
+        # correction); stopped: TCS finishes move-to at the same speed tolerance,
+        # so the path will not be rejected as busy.
+        t0 = time.monotonic()
+        while True:
+            # interruptible: stop waiting as soon as a newer track arrives
+            if self._track_stop_event.wait(SLEW_POLL_INTERVAL):
+                # slew_in_progress stays True: the next track aborts the move-to
+                self.log.info("Track superseded during slew")
+                return False
+            cur_az, cur_el, vel_az, vel_el = self._acu_position()
+            if (max(abs(az - cur_az), abs(el - cur_el)) < SLEW_BEFORE_PATH_MIN_DIST
+                    and abs(vel_az) < SLEW_SPEED_TOLERANCE
+                    and abs(vel_el) < SLEW_SPEED_TOLERANCE):
+                self.slew_in_progress = False
+                self.log.info(
+                    f"slew finished in {time.monotonic() - t0:.1f} s "
+                    f"at az={cur_az:.4f} el={cur_el:.4f}"
+                )
+                return True
+            if time.monotonic() - t0 > SLEW_TIMEOUT:
+                self.log.error(
+                    f"slew not finished within {SLEW_TIMEOUT} s, "
+                    f"at az={cur_az:.4f} el={cur_el:.4f}"
+                )
+                self._fail_path(cookie, 1)
+                return False
 
     def _scan_pattern_with_retry(self, payload, busy_timeout, retry_interval):
         """
@@ -1232,6 +1350,9 @@ class KOSMA_translator:
         Returns True if the last path is reused.
         """
         if self.last_payload is None or self.last_obs2tel is None or self.tel_path_failed:
+            return False
+        if self.slew_in_progress:
+            # the telescope has left the last path for a (superseded) slew
             return False
         if self._track_thread and self._track_thread.is_alive():
             return False

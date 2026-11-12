@@ -651,6 +651,132 @@ def test_unexpected_exception_in_track_fails_path(translator_factory):
 
 
 # ---------------------------------------------------------------------------
+# Slew (move-to) before a path whose start is far from the telescope
+# ---------------------------------------------------------------------------
+
+def _ok():
+    return MagicMock(status_code=200, json=lambda: {"status": "ok"})
+
+
+@pytest.fixture
+def slew_translator(translator_factory, mock_ocs, monkeypatch):
+    """
+    Translator for a J2000 path, with no previous command (no abort sent) and
+    a fake ACU position: far from any path start until a move-to was sent, then
+    at the move-to target. arrive=False keeps it far forever.
+    """
+    import kosma_ocs_translator as kot
+    monkeypatch.setattr(kot, "SLEW_POLL_INTERVAL", 0.01)
+
+    def _make(arrive=True, on_poll=None):
+        t = translator_factory()
+        t.last_payload = None
+        t.abort_if_unknown = False
+        t.tel_return_cookie = 1
+        t.next_tel_return_cookie = 2
+        target = {}
+
+        def move_to(az, el):
+            target["azel"] = (az, el)
+            return _ok()
+
+        def acu_position():
+            if on_poll and "azel" in target:
+                on_poll(t)
+            if arrive and "azel" in target:
+                return (*target["azel"], 0.0, 0.0)
+            return (-100.0, 5.0, 0.0, 0.0)   # path az is in [0, 360): always far
+
+        mock_ocs.move_to.side_effect = move_to
+        mock_ocs.scan_pattern.return_value = _ok()
+        t._acu_position = acu_position
+        return t, target
+
+    return _make
+
+
+def test_no_slew_if_close_to_path_start(slew_translator, mock_ocs, monkeypatch):
+    import kosma_ocs_translator as kot
+    monkeypatch.setattr(kot, "SLEW_BEFORE_PATH_MIN_DIST", 1e6)   # everything is close
+    t, _ = slew_translator()
+
+    t._track_loop()
+
+    assert not mock_ocs.move_to.called
+    assert mock_ocs.scan_pattern.call_count == 1
+    assert t.pending_tel_return_cookie == 2
+
+
+def test_slew_before_path_if_far(slew_translator, mock_ocs):
+    t, target = slew_translator()
+
+    t._track_loop()
+
+    assert mock_ocs.move_to.call_count == 1
+    assert mock_ocs.scan_pattern.call_count == 1
+    sent = mock_ocs.scan_pattern.call_args.kwargs["data"]
+    # slewed to the start of the path (recomputed after the slew, source moved little)
+    assert sent["points"][0][1] == pytest.approx(target["azel"][0], abs=0.1)
+    assert sent["points"][0][2] == pytest.approx(target["azel"][1], abs=0.1)
+    assert t.slew_in_progress is False
+    assert t.last_payload["type"] == "path"
+    assert t.pending_tel_return_cookie == 2
+    assert t.tel_path_failed is False
+
+
+def test_slew_timeout_fails_path(slew_translator, mock_ocs, monkeypatch):
+    import kosma_ocs_translator as kot
+    monkeypatch.setattr(kot, "SLEW_TIMEOUT", 0.05)
+    t, _ = slew_translator(arrive=False)
+
+    t._track_loop()
+
+    assert mock_ocs.move_to.call_count == 1
+    assert not mock_ocs.scan_pattern.called
+    assert t.tel_path_failed is True
+    assert t.tel_return_cookie == 2
+    assert t.tel_error == 1
+
+
+def test_slew_rejected_fails_path(slew_translator, mock_ocs):
+    t, _ = slew_translator()
+    mock_ocs.move_to.side_effect = None
+    mock_ocs.move_to.return_value = MagicMock(status_code=503, json=lambda: {"status": "busy"})
+
+    t._track_loop()
+
+    assert not mock_ocs.scan_pattern.called
+    assert t.slew_in_progress is False
+    assert t.tel_path_failed is True
+    assert t.tel_error == 503
+
+
+def test_superseded_slew_is_aborted_by_next_track(slew_translator, mock_ocs, monkeypatch):
+    import kosma_ocs_translator as kot
+    # superseded while slewing
+    t, _ = slew_translator(arrive=False, on_poll=lambda t: t._track_stop_event.set())
+    t._track_loop()
+    assert not mock_ocs.scan_pattern.called
+    assert t.slew_in_progress is True
+    assert t.tel_path_failed is False      # superseded, not failed
+
+    # the move-to may still be running: no reuse of the last path ...
+    t.last_payload = {"type": "move_to", "start_time": 0.0,
+                      "points": [[0.0, 0.0, 0.0, 0.0, 0.0]]}
+    t.last_obs2tel = dict(t.obs2tel)
+    assert t.reuse_last_track() is False
+
+    # ... and the next path aborts it (normally no abort after a move-to)
+    t._track_stop_event.clear()
+    monkeypatch.setattr(kot, "SLEW_BEFORE_PATH_MIN_DIST", 1e6)
+    t._acu_position = lambda: (0.0, 0.0, 0.0, 0.0)
+    t._track_loop()
+    assert mock_ocs.abort.called
+    assert t.slew_in_progress is False
+    assert mock_ocs.scan_pattern.call_count == 1
+
+
+# ---------------------------------------------------------------------------
 # Start-up dump of the ACU SPEM parameters to KOSMA_file_io
 # ---------------------------------------------------------------------------
 
