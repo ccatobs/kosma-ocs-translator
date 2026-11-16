@@ -296,10 +296,14 @@ def ImportKOSMAReadWriteIntoDictionary(files=None, variable=None, update_mod_tim
 KOSMA_SPEM_FILE = "KOSMA_ccatacu_point.in"
 
 # keys in the ACU SPEM set not used for the comparison or the update
-# LEL velocity may be needed later if the pointing model turns out to be
-# dependent of the elevation velocity. For now not used in the fit
-ignore_keys_acu = ["Time", "Year", "LEL velocity"]
+ignore_keys_acu = ["Time", "Year"]
 ignore_keys_kosma = ["ccatacu_model_date"]
+
+# ACU SPEM parameters that are compared between ACU and KOSMA_file_io and
+# dumped from the ACU to KOSMA_file_io, but never sent to the ACU (set_spem).
+# They do not follow the string_ccatacu_point[i] / ccatacu_point[i] scheme:
+# ACU name (without "Parameter ") -> KOSMA_file_io variable
+acu_readonly_keys = {"LEL velocity": "ccatacu_velelvmax"}   # [deg/s]
 
 # ACFG defaults of op_tel_model_type / op_tel_model_date (KOSMA_ccdpos.sim),
 # used if KOSMA_SPEM_FILE or its ccatacu_model_type / ccatacu_model_date is missing
@@ -366,6 +370,12 @@ def get_kosma_spem():
             raise ValueError(f"{KOSMA_SPEM_FILE} lacks {value_var} for {name}")
         spem[name] = float(spem_kosma_format[value_var])
 
+    # ACU read-only parameters, stored under their ACU name for the comparison.
+    # If missing in the file, the comparison reports them as only in ACU.
+    for acu_name, kosma_var in acu_readonly_keys.items():
+        if kosma_var in spem_kosma_format:
+            spem[acu_name] = float(spem_kosma_format[kosma_var])
+
     # also include ccatacu_model_date
     spem["ccatacu_model_date"] = spem_kosma_format.get("ccatacu_model_date")
 
@@ -402,6 +412,9 @@ def put_kosma_spem(spem, logger=None):
     commands = []
     for key, value in spem.items():
         if key in ignore_keys_acu or key in ignore_keys_kosma:
+            continue
+        if key in acu_readonly_keys:
+            commands.append(f"Kset_point {acu_readonly_keys[key]} {value:.6f}")
             continue
         if key not in name2idx:
             raise KeyError(f"{key} not found in string_ccatacu_point")
@@ -1089,14 +1102,19 @@ class KOSMA_translator:
         def build_payload():
             """Path of track_duration seconds, starting track_overhead seconds from now."""
             # make an array of times from now + overhead to now + overhead + track_duration,
-            # with 1 second steps
+            # with time_step second steps
             # Overhead [sec] to account for computation and communication delay
             # TCS requires > 10 sec ahead
             track_overhead = 11
-            n_steps = int(track_duration) + 1
+            # Time step [sec] between path points
+            time_step = 0.1
+            # If track_duration is not a multiple of time_step, the path ends at the
+            # last full step before track_duration. The small tolerance avoids
+            # dropping a step due to floating-point error (e.g. 600 / 0.1).
+            n_steps = int(track_duration / time_step + 1e-9) + 1
             t_build = time.perf_counter()
-            time_array = Time.now() + track_overhead * u.second + np.linspace(
-                0, track_duration, n_steps) * u.second
+            time_array = Time.now() + track_overhead * u.second + (
+                np.arange(n_steps) * time_step) * u.second
 
             # calculate the altaz coordinates for each time step
             altaz_frames = AltAz(obstime=time_array, location=self.location)

@@ -24,6 +24,9 @@ ACU_NAMES = [
 
 MODEL_DATE = "2026-10-30:14:44:00Z"
 
+# ccatacu_velelvmax in KOSMA = "LEL velocity" in the ACU [deg/s]
+VELELVMAX = 1.5
+
 # SPEM set used at the time of the pointing session (ACU names, mdeg)
 CURRENT_SPEM = {name: 0.0 for name in ACU_NAMES}
 CURRENT_SPEM.update({
@@ -32,8 +35,11 @@ CURRENT_SPEM.update({
 })
 
 
-def write_ccatacu_point(directory, spem, model_date=MODEL_DATE):
-    """Write KOSMA_ccatacu_point.in to *directory* from an ACU-name -> value dict."""
+def write_ccatacu_point(directory, spem, model_date=MODEL_DATE, velelvmax=VELELVMAX):
+    """
+    Write KOSMA_ccatacu_point.in to *directory* from an ACU-name -> value dict.
+    velelvmax=None omits the ccatacu_velelvmax line.
+    """
     lines = [
         "30-Oct-2026  14:46:42  1793368002.442420   File update time stamp"
         "   ! Kset_point (fips:1091816)\n"
@@ -56,6 +62,11 @@ def write_ccatacu_point(directory, spem, model_date=MODEL_DATE):
         f"{model_date}   ccatacu_model_date"
         "   ! creation date of CCAT_ACU pointing model values\n"
     )
+    if velelvmax is not None:
+        lines.append(
+            f"{velelvmax}  ccatacu_velelvmax"
+            " ! maximum elevation velocity of telescope [deg/sec]\n"
+        )
     path = Path(directory) / usa.KOSMA_SPEM_FILE
     path.write_text("".join(lines))
     return path
@@ -136,7 +147,7 @@ def acu_spem():
     """SPEM set as returned by the ACU (after stripping "Parameter ")."""
     spem = {"Time": 123.456, "Year": 2026}
     spem.update(CURRENT_SPEM)
-    spem["LEL velocity"] = 0.1
+    spem["LEL velocity"] = VELELVMAX
     return spem
 
 
@@ -215,7 +226,20 @@ class TestGetKosmaSpem:
 
     def test_no_extra_keys(self, kosma_dir):
         # ccatacu_model_type is not read
-        assert set(usa.get_kosma_spem()) == set(ACU_NAMES) | {"ccatacu_model_date"}
+        assert set(usa.get_kosma_spem()) == (
+            set(ACU_NAMES) | {"ccatacu_model_date", "LEL velocity"}
+        )
+
+    def test_velelvmax_under_acu_name(self, kosma_dir):
+        spem = usa.get_kosma_spem()
+        assert spem["LEL velocity"] == pytest.approx(VELELVMAX)
+        assert isinstance(spem["LEL velocity"], float)
+        assert "ccatacu_velelvmax" not in spem
+
+    def test_missing_velelvmax_is_omitted(self, tmp_path, monkeypatch):
+        write_ccatacu_point(tmp_path, CURRENT_SPEM, velelvmax=None)
+        monkeypatch.setenv("WRITE_DIR", str(tmp_path))
+        assert "LEL velocity" not in usa.get_kosma_spem()
 
     def test_template_with_zeros(self, tmp_path, monkeypatch):
         # values written as "0" are parsed as int by ImportKOSMAReadWriteIntoDictionary
@@ -274,12 +298,21 @@ class TestPutKosmaSpem:
         fake = FakeKsetPoint(kosma_dir)
         monkeypatch.setattr(usa.subprocess, "run", fake)
         spem = self.new_spem()
-        spem.update({"Time": 1.0, "Year": 2026, "LEL velocity": 0.1,
-                     "ccatacu_model_date": "old"})
+        spem.update({"Time": 1.0, "Year": 2026, "ccatacu_model_date": "old"})
         usa.put_kosma_spem(spem)
         # one command per coefficient plus one for the date
         assert len(fake.commands) == len(ACU_NAMES) + 1
         assert not any("old" in c for c in fake.commands)
+
+    def test_lel_velocity_written_to_velelvmax(self, kosma_dir, monkeypatch):
+        fake = FakeKsetPoint(kosma_dir)
+        monkeypatch.setattr(usa.subprocess, "run", fake)
+        spem = self.new_spem()
+        spem["LEL velocity"] = 0.8
+        updated = usa.put_kosma_spem(spem)
+        assert "Kset_point ccatacu_velelvmax 0.800000" in fake.commands
+        assert len(fake.commands) == len(ACU_NAMES) + 2
+        assert updated["LEL velocity"] == pytest.approx(0.8)
 
     def test_unknown_key_raises_before_any_command(self, kosma_dir, monkeypatch):
         fake = FakeKsetPoint(kosma_dir)
@@ -304,7 +337,27 @@ class TestCheckSpemSets:
     def kosma_spem(self):
         spem = dict(CURRENT_SPEM)
         spem["ccatacu_model_date"] = MODEL_DATE
+        spem["LEL velocity"] = VELELVMAX
         return spem
+
+    def test_lel_velocity_mismatch(self, acu_spem, monkeypatch, capsys):
+        monkeypatch.setattr("builtins.input", answers("y"))
+        kosma = self.kosma_spem()
+        kosma["LEL velocity"] = VELELVMAX + 0.5
+        usa.check_spem_sets(acu_spem, kosma)
+        out = capsys.readouterr().out
+        differ_lines = [l for l in out.splitlines() if "differs" in l]
+        assert len(differ_lines) == 1
+        assert differ_lines[0].startswith("LEL velocity")
+
+    def test_lel_velocity_missing_in_kosma(self, acu_spem, monkeypatch, capsys):
+        monkeypatch.setattr("builtins.input", answers("y"))
+        kosma = self.kosma_spem()
+        del kosma["LEL velocity"]
+        usa.check_spem_sets(acu_spem, kosma)
+        out = capsys.readouterr().out
+        assert any(l.startswith("LEL velocity") and "differs" in l
+                   for l in out.splitlines())
 
     def test_identical_sets_do_not_ask(self, acu_spem, monkeypatch, capsys):
         monkeypatch.setattr("builtins.input", no_input)
@@ -457,7 +510,7 @@ class TestConfirmUpdate:
         out = capsys.readouterr().out
         ia_line = next(l for l in out.splitlines() if l.startswith("IA "))
         assert ia_line.split() == ["IA", "0.000", "2.000", "2.000"]
-        for key in usa.ignore_keys_acu:
+        for key in usa.ignore_keys_acu + list(usa.acu_readonly_keys):
             assert key not in out
 
     def test_abort(self, acu_spem, monkeypatch):
@@ -492,6 +545,11 @@ class TestChangedSpem:
         new = {**CURRENT_SPEM, "Time": 1.0, "Year": 2000, "LEL velocity": 9.0,
                "ccatacu_model_date": "new"}
         assert usa.changed_spem(new, acu_spem) == {}
+
+    def test_lel_velocity_never_changed(self):
+        # also when missing in the current set
+        new = {**CURRENT_SPEM, "LEL velocity": 9.0}
+        assert usa.changed_spem(new, CURRENT_SPEM) == {}
 
 
 class TestMain:
@@ -617,6 +675,15 @@ class TestMain:
         ocs.set_spem.assert_not_called()
         assert len(self.point_cmds(fake)) == len(ACU_NAMES)
         assert usa.get_kosma_spem()["ccatacu_model_date"] != MODEL_DATE
+
+    def test_lel_velocity_dumped_but_not_sent(self, tmp_path, monkeypatch, acu_spem):
+        acu_spem = {**acu_spem, "LEL velocity": 0.8}
+        # replies: continue despite LEL velocity mismatch, confirm the upload
+        ocs, fake = self.run_main(tmp_path, monkeypatch, acu_spem, replies=["y", "y"])
+
+        assert "LEL velocity" not in ocs.set_spem.call_args.kwargs
+        assert "Kset_point ccatacu_velelvmax 0.800000" in fake.commands
+        assert usa.get_kosma_spem()["LEL velocity"] == pytest.approx(0.8)
 
     def test_set_spem_failure_does_not_update_kosma(self, tmp_path, monkeypatch, acu_spem):
         with pytest.raises(RuntimeError, match="503"):

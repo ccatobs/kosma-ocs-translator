@@ -15,6 +15,7 @@ from kosma_ocs_translator import (
     KOSMA_SPEM_FILE,
     ignore_keys_acu,
     ignore_keys_kosma,
+    acu_readonly_keys,
     strip_parameter_prefix,
     get_kosma_spem,
     put_kosma_spem,
@@ -89,7 +90,8 @@ def check_spem_sets(spem_acu, spem_kosma):
     keys = keys_acu + only_kosma
     differ = []
     print("")
-    print(f"{'key':<8s} {'ACU [mdeg]':>12s} {'KOSMA_ccatacu_point.in [mdg]':>30s}")
+    # acu_readonly_keys (e.g. LEL velocity [deg/s]) are compared as well
+    print(f"{'key':<12s} {'ACU [mdeg]':>12s} {'KOSMA_ccatacu_point.in [mdg]':>30s}")
     for key in keys:
         value_acu = spem_acu.get(key)
         value_kosma = spem_kosma.get(key)
@@ -101,7 +103,7 @@ def check_spem_sets(spem_acu, spem_kosma):
         if not match:
             differ.append(key)
         mark = "" if match else "  <-- differs"
-        print(f"{key:<8s} {format_value(value_acu)} {format_value(value_kosma)}{mark}")
+        print(f"{key:<12s} {format_value(value_acu)} {format_value(value_kosma)}{mark}")
 
     if not differ:
         log.info("SPEM parameters in ACU and KOSMA_file_io match")
@@ -249,11 +251,12 @@ def changed_spem(new_spem, current_spem):
     -------
     changed : dict
         Entries of new_spem missing in current_spem or differing by more than
-        spem_abs_tol [mdeg]
+        spem_abs_tol [mdeg]. acu_readonly_keys are never included, since they
+        must not be sent to the ACU.
     """
     changed = {}
     for key, value in new_spem.items():
-        if key in ignore_keys_acu or key in ignore_keys_kosma:
+        if key in ignore_keys_acu or key in ignore_keys_kosma or key in acu_readonly_keys:
             continue
         current = current_spem.get(key)
         if current is None or not math.isclose(value, current, abs_tol=spem_abs_tol):
@@ -274,9 +277,11 @@ def confirm_update(current_spem_acu, new_spem):
     """
     log = logging.getLogger(LOGGER_NAME)
 
-    # Print key - current - new for all keys except for ignore_keys_acu
-    keys = [k for k in current_spem_acu if k not in ignore_keys_acu]
-    keys += [k for k in new_spem if k not in keys and k not in ignore_keys_acu]
+    # Print key - current - new for all keys except for ignore_keys_acu and
+    # acu_readonly_keys (never uploaded)
+    skip = set(ignore_keys_acu) | set(acu_readonly_keys)
+    keys = [k for k in current_spem_acu if k not in skip]
+    keys += [k for k in new_spem if k not in keys and k not in skip]
     print("")
     print(f"{'key':<8s} {'current [mdeg]':>12s} {'new [mdeg]':>12s} {'diff':>12s}")
     for key in keys:
