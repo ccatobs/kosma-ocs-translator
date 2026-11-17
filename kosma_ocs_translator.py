@@ -992,7 +992,7 @@ class KOSMA_translator:
             # ocs.move_to aborts the previous command itself
             response = self.ocs.move_to(cmd_az, cmd_el)
             self.slew_in_progress = False   # aborted by ocs.move_to
-            body = response.json()
+            body = self._response_body(response)
             if response.status_code != 200 or body.get("status") != "ok":
                 self.log.error(
                     f"move_to rejected: HTTP {response.status_code}, "
@@ -1202,7 +1202,7 @@ class KOSMA_translator:
                 f"start_time lead: {lead_send:.3f} s before send, "
                 f"{lead_done:.3f} s after response (TCS needs >= 9.8 s)"
             )
-            body = response.json()
+            body = self._response_body(response)
             if response.status_code != 200 or body.get("status") != "ok":
                 self.log.error(
                     f"scan_pattern rejected: HTTP {response.status_code}, "
@@ -1261,7 +1261,7 @@ class KOSMA_translator:
             return False
         # ocs.move_to aborts the previous command itself
         response = self.ocs.move_to(az, el)
-        body = response.json()
+        body = self._response_body(response)
         if response.status_code != 200 or body.get("status") != "ok":
             # nothing running on TCS: ocs.move_to aborted the previous command
             self.slew_in_progress = False
@@ -1302,6 +1302,23 @@ class KOSMA_translator:
                 )
                 self._fail_path(cookie, 1)
                 return False
+
+    @staticmethod
+    def _response_body(response):
+        """
+        JSON body of an OCS response as a dict. Errors raised in front of the
+        API (e.g. an nginx 413 for a too large path payload) come back as HTML,
+        not JSON: then return status None and the start of the raw text as
+        message, so that the caller logs the real HTTP error instead of a
+        JSONDecodeError.
+        """
+        try:
+            body = response.json()
+        except ValueError:
+            return {"status": None, "message": response.text[:200].strip()}
+        if not isinstance(body, dict):
+            return {"status": None, "message": str(body)[:200]}
+        return body
 
     def _scan_pattern_with_retry(self, payload, busy_timeout, retry_interval):
         """
