@@ -10,10 +10,12 @@ repos:
 
 # PRD 0001: KOSMA OCS translator
 
+> **Needs restructuring and review (2026-11-18).** This PRD was written in parallel to a different path of development, and it deviates from the current code. It must be restructured and reviewed again before implementation resumes under this epic. Until then, do not use it as the source of truth or as a guide for implementation.
+
 > Source of truth for this epic. Tracker: [epic issue](https://github.com/ccatobs/kosma-ocs-translator/issues/5).
 > The epic links here; this file is not embedded in the issue body.
 > The KOSMA changes go to `kosma_software/kosma_software` on GitLab (git.ph1.uni-koeln.de) as a reviewed merge request.
-> ADR 0001 (topocentric targets) records the split of geometry between the translator and the OCS.
+> ADR 0002 (ACU pointing model), which supersedes ADR 0001, records the split of geometry and corrections between the translator, the TCS and the ACU.
 
 ## Problem
 

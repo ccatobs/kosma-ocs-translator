@@ -177,8 +177,11 @@ def _total_pointing_correction(response_pointing):
         Azimuth and elevation corrections in degrees
     """
 
-    # TODO: when the refraction correction is done at OCS,
-    # it also needs to be added here
+    # This is the pointing model only and must not include refraction: it is
+    # removed from the encoder positions to get the positions for KOSMA, which keep
+    # the refraction, and it is written as del_tel_tot_* to KOSMA_ccdpos.sim.
+    # TODO: when the refraction correction is done at OCS, add it to tel_*_cmd
+    # in _build_tel2obs_params, not here
 
     del_tot_azm = (
         response_pointing["SPEM correction AZ"]
@@ -336,6 +339,13 @@ def _read_first_column(path, names):
 # KOSMA_ccdpos.sim is written only for the latter.
 SUBMM_MIN_WAVELENGTH = 100.0
 
+# used for the refraction correction if the weather parameters are bad or missing
+DEFAULT_WEATHER = {
+    "pressure": 0.518 * u.bar,
+    "temperature": -5.9 * u.deg_C,
+    "relative_humidity": 0.24,
+}
+
 
 def strip_parameter_prefix(spem):
     """
@@ -442,10 +452,17 @@ def put_kosma_spem(spem, logger=None):
 
 
 class KOSMA_translator:
-    def __init__(self, ocs, abort_if_unknown=True):
+    def __init__(self, ocs, abort_if_unknown=True, refraction_correction=False):
         self.ocs = ocs
         # abort before the first path if there is no record of the previous command
         self.abort_if_unknown = abort_if_unknown
+        # apply the atmospheric refraction in the AltAz transforms
+        self.refraction_correction = refraction_correction
+        # AltAz keyword arguments for refraction, updated for each new track.
+        # Empty: no refraction (AltAz default pressure is 0)
+        self._refraction_params = {}
+        # last known state of the ACU RF refraction correction
+        self._acu_refraction_on = False
         #
         self.log = logging.getLogger("kosma-ocs-translator")
         self._host_pid = f"({socket.gethostname()}:{os.getpid()})"
@@ -485,6 +502,7 @@ class KOSMA_translator:
         # the TCS uses for its own az/el), with a built-in default if that fails.
         self.location = ocs.earth_location
         self.log.info(f"Telescope location: {self.location}")
+        self.log.info(f"Refraction correction: {'ON' if refraction_correction else 'OFF'}")
         # Add tracking thread management
         self._track_thread = None
         self._track_stop_event = threading.Event()
@@ -686,15 +704,21 @@ class KOSMA_translator:
 
         # actdiff = 3600 * ((acu_azm_del*np.cos(np.deg2rad(cmd_ele)))**2 + acu_elv_del**2) ** 0.5
 
-        # The ACU "commanded position" is not used. Instead the
-        # expected position is the path position (interpolated from the last
-        # payload) plus the total pointing correction applied by the ACU.
+        # KOSMA expects the positions of a perfect telescope: with refraction,
+        # without the pointing model. The ACU current position is the encoder position:
+        #   current = path position + total pointing correction + tracking error
+        #   tel_*_cmd = path position (interpolated from the last payload), which
+        #               includes the refraction applied by the translator
+        #   tel_*_act = current - total pointing correction
+        # The ACU "commanded position" is not used.
         del_tot_azm, del_tot_elv = _total_pointing_correction(response_pointing)
+        input_dict["tel_azm_act"] = current_azi - del_tot_azm
+        input_dict["tel_elv_act"] = current_ele - del_tot_elv
         if self.last_payload is None:
             # no path to interpolate (only when the first path failed):
             # report the current position; tel_on_track is "N" anyway
-            input_dict["tel_azm_cmd"] = current_azi - del_tot_azm
-            input_dict["tel_elv_cmd"] = current_ele - del_tot_elv
+            input_dict["tel_azm_cmd"] = input_dict["tel_azm_act"]
+            input_dict["tel_elv_cmd"] = input_dict["tel_elv_act"]
             # not in KOSMA_tel2obs.set; used for op_vel_elv in KOSMA_ccdpos.sim [deg/s]
             input_dict["tel_vel_elv_cmd"] = 0.0
         else:
@@ -703,12 +727,13 @@ class KOSMA_translator:
             input_dict["tel_elv_cmd"] = np.interp(t_rel, pts[:, 0], pts[:, 2])
             # interpolated here, from the same payload as tel_elv_cmd
             input_dict["tel_vel_elv_cmd"] = np.interp(t_rel, pts[:, 0], pts[:, 4])
-        expected_azi = input_dict["tel_azm_cmd"] + del_tot_azm
-        expected_ele = input_dict["tel_elv_cmd"] + del_tot_elv
-        acu_azm_del = current_azi - expected_azi
-        acu_elv_del = current_ele - expected_ele
+        # tracking error
+        acu_azm_del = input_dict["tel_azm_act"] - input_dict["tel_azm_cmd"]
+        acu_elv_del = input_dict["tel_elv_act"] - input_dict["tel_elv_cmd"]
 
-        actdiff = 3600 * ((acu_azm_del*np.cos(np.deg2rad(expected_ele)))**2 + acu_elv_del**2) ** 0.5
+        actdiff = 3600 * (
+            (acu_azm_del*np.cos(np.deg2rad(input_dict["tel_elv_cmd"])))**2 + acu_elv_del**2
+        ) ** 0.5
 
         if self.tel_path_failed:
             # the ACU is not executing the commanded path
@@ -733,9 +758,6 @@ class KOSMA_translator:
         # time of the status since the start time of the table sent
         input_dict["tel_time_del"] = t_rel
 
-        input_dict["tel_azm_act"] = input_dict["tel_azm_cmd"] + acu_azm_del
-        input_dict["tel_elv_act"] = input_dict["tel_elv_cmd"] + acu_elv_del
-
         # Calculate angle between coordinate systems
         if self.last_obs2tel is None or self.last_obs2tel["obs_coord_sys_del"] == "HORIZON":
             input_dict["tel_angle_focal_plane"] = 0.0
@@ -745,7 +767,7 @@ class KOSMA_translator:
             # Calculate north (+epsilon in the second axis cmd_coord_sys_del) in Horizon
             # then csys_del -> horizon (opposite sign)
 
-            altaz_frame = AltAz(obstime=status_time, location=self.location)
+            altaz_frame = self._altaz_frame(status_time)
 
             pos = SkyCoord(
                 az=input_dict["tel_azm_cmd"], alt=input_dict["tel_elv_cmd"],
@@ -806,9 +828,12 @@ class KOSMA_translator:
         ccd_input_dict["op_tel_model_type"] = model_type
         ccd_input_dict["op_tel_model_date"] = model_date
 
-        ccd_input_dict["del_tel_tot_azm"] = np.deg2rad(del_tot_azm)
+        # The ACU azimuth corrections are axis (encoder) differences, while KOSMA
+        # expects them on sky: astra applies del_azm / cos(el) to the axis
+        cos_elv = np.cos(ccd_input_dict["op_elv"])
+        ccd_input_dict["del_tel_tot_azm"] = np.deg2rad(del_tot_azm) * cos_elv
         ccd_input_dict["del_tel_tot_elv"] = np.deg2rad(del_tot_elv)
-        ccd_input_dict["del_tel_rep_azm"] = np.deg2rad(spem_azm)
+        ccd_input_dict["del_tel_rep_azm"] = np.deg2rad(spem_azm) * cos_elv
         ccd_input_dict["del_tel_rep_elv"] = np.deg2rad(spem_elv)
 
         ccd_input_dict["timestamp"] = input_dict["timestamp"]
@@ -829,6 +854,7 @@ class KOSMA_translator:
 
         response = self.ocs.get_status()
         response_pointing = self.ocs.get_dataset("CmdPointingCorrection")
+        self._check_acu_refraction(response_pointing)
 
         input_dict = self._build_tel2obs_params(response, response_pointing)
         # KOSMA_ccdpos.sim is only for optical / infrared camera observations
@@ -935,7 +961,7 @@ class KOSMA_translator:
         else:
             if_extended = False
 
-        # obs wavelength (needs to be passed for refraction correction)
+        # obs wavelength (used for refraction correction)
         obs_wavelength = self.obs2tel["obs_wavelength"]
 
         # validate coordinate systems
@@ -949,6 +975,9 @@ class KOSMA_translator:
                 self.log.error(msg)
                 raise ValueError(msg)
 
+        # get weather
+        self._update_refraction_params(obs_wavelength)
+
         # track details
         track_duration = self.track_duration  # seconds
         frame = coord_sys_map[cmd_coord_sys_on]
@@ -957,7 +986,7 @@ class KOSMA_translator:
         # For this case, it does not make much sense if map or off offset is given
         # by other coordinate system but such a case is also covered below.
         if frame.lower() == "altaz":
-            now_frame = AltAz(obstime=Time.now(), location=self.location)
+            now_frame = self._altaz_frame(Time.now())
             coord = SkyCoord(cmd_lam * u.deg, cmd_bet * u.deg, frame=now_frame)
             if lam_del != 0.0 or bet_del != 0.0:
                 if coord_sys_del == "HORIZON":
@@ -1123,7 +1152,7 @@ class KOSMA_translator:
                 np.arange(n_steps) * time_step) * u.second
 
             # calculate the altaz coordinates for each time step
-            altaz_frames = AltAz(obstime=time_array, location=self.location)
+            altaz_frames = self._altaz_frame(time_array)
             altaz = coord.transform_to(altaz_frames)
 
             # Apply HORIZON-frame sky/map offsets after AltAz transform
@@ -1380,6 +1409,7 @@ class KOSMA_translator:
         "obs_extended_elevation_range",
         "obs_x_focal_plane", "obs_y_focal_plane",
         "obs_otf_mode", "obs_lam_vel", "obs_bet_vel",
+        "obs_wavelength",   # the refraction depends on it
     ]
 
     def reuse_last_track(self):
@@ -1438,6 +1468,107 @@ class KOSMA_translator:
             return None
         self.log.info(f"SPEM parameters in {KOSMA_SPEM_FILE}: {spem_kosma}")
         return spem_kosma
+
+    def get_weather(self):
+        """
+        Current weather at the site, used for the refraction correction.
+        This is the only place that accesses the weather source.
+
+        Returns
+        -------
+        weather : dict
+            pressure and temperature as astropy Quantity, relative_humidity as
+            fraction (0-1). Used as keyword arguments of AltAz.
+        """
+
+        # TODO: add proper keys to get weather data, and a request timeout:
+        # get_measurement_data has none, and this runs in the track thread
+        # before each new path is built, so a stalled request would hold up the track
+        # for now this will fail and falls back to DEFAULT_WEATHER
+        self.ocs.get_measurement_data()
+
+        # If KOSMA_wetter.status can provide the data, switch it to True
+        # and add tests (for now no tests can reach the following part)
+        use_KOSMA_wetter = False
+        if use_KOSMA_wetter:
+            files = ImportKOSMAReadWriteIntoDictionary(
+                files=["KOSMA_wetter.status"])
+            weather = files["KOSMA_wetter.status"]
+            return {
+                "pressure": weather["wet_pressure"] * u.Torr,
+                # wet_temp is in K
+                "temperature": (weather["wet_temp"] - 273.15) * u.deg_C,
+                # wet_humidity is in percent, as used by astra (astra_track.c),
+                # although the comment in some KOSMA_wetter.status templates
+                # says [0..1]
+                "relative_humidity": weather["wet_humidity"] / 100.0,
+            }
+
+    def _update_refraction_params(self, obs_wavelength):
+        """
+        Set the AltAz refraction parameters for a new track, if the refraction
+        correction is ON. obs_wavelength <= 0 means no refraction, as in astra.
+        DEFAULT_WEATHER is used if the weather parameters are bad or missing.
+
+        Parameters
+        ----------
+        obs_wavelength : float
+            Observing wavelength [micron]
+        """
+        if not self.refraction_correction:
+            return
+        if obs_wavelength <= 0:
+            self.log.info(f"obs_wavelength = {obs_wavelength} micron, no refraction applied")
+            self._refraction_params = {}
+            return
+
+        try:
+            weather = self.get_weather()
+            pressure = weather["pressure"].to_value(u.hPa)
+            temperature = weather["temperature"].to_value(u.deg_C)
+            humidity = weather["relative_humidity"]
+            # a relative humidity above 1 would be silently clipped to 1 by ERFA
+            if not (pressure > 0 and np.isfinite(temperature) and 0 <= humidity <= 1):
+                raise ValueError(
+                    f"pressure={pressure} hPa, temperature={temperature} deg_C, "
+                    f"relative_humidity={humidity}"
+                )
+        except Exception as e:
+            self.log.warning(
+                f"Bad or missing weather parameters ({e!r}), using default values"
+            )
+            weather = DEFAULT_WEATHER
+        self.log.info(
+            f"refraction: pressure={weather['pressure'].to_value(u.hPa):.1f} hPa, "
+            f"temperature={weather['temperature'].to_value(u.deg_C):.1f} deg_C, "
+            f"relative_humidity={weather['relative_humidity']:.3f}, "
+            f"wavelength={obs_wavelength} micron"
+        )
+        self._refraction_params = {**weather, "obswl": obs_wavelength * u.micron}
+
+    def _check_acu_refraction(self, response_pointing):
+        """
+        Warn when the ACU RF refraction correction gets enabled while the
+        translator applies refraction: it would be corrected twice.
+
+        Parameters
+        ----------
+        response_pointing : dict
+            ACU dataset "CmdPointingCorrection"
+        """
+        acu_on = bool(response_pointing.get("RF refraction correction on"))
+        if self.refraction_correction and acu_on and not self._acu_refraction_on:
+            self.log.warning(
+                "ACU RF refraction correction is on while the translator also applies "
+                "refraction: refraction is corrected twice"
+            )
+        self._acu_refraction_on = acu_on
+
+    def _altaz_frame(self, obstime):
+        """
+        AltAz frame at obstime, with refraction if the correction is applied
+        """
+        return AltAz(obstime=obstime, location=self.location, **self._refraction_params)
 
     def stop_track(self):
         if self._track_thread and self._track_thread.is_alive():
@@ -1520,6 +1651,12 @@ def parse_arguments():
         help="Do not abort before the first path when there is no record of the previous "
              "command (e.g. after a restart). Default is False (abort).",
     )
+    parser.add_argument(
+        "--refraction-correction",
+        action="store_true",
+        help="Apply the atmospheric refraction correction in the AltAz transforms. "
+             "Default is False (no refraction).",
+    )
     return parser.parse_args()
 
 
@@ -1598,7 +1735,11 @@ def main():
         certificates_path=args.certificates_path,
         logger=logger,
     )
-    translator = KOSMA_translator(ocs, abort_if_unknown=not args.no_abort_if_unknown)
+    translator = KOSMA_translator(
+        ocs,
+        abort_if_unknown=not args.no_abort_if_unknown,
+        refraction_correction=args.refraction_correction,
+    )
     # KOSMA needs the SPEM parameters currently used by the ACU
     translator.dump_spem_to_kosma()
     background_thread = threading.Thread(

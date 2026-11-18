@@ -1,6 +1,8 @@
 # 0001 — The translator sends topocentric targets; the OCS applies refraction and the pointing model
 
-- **Status:** Accepted
+> Superseded by [ADR 0002](0002-acu-pointing-model.md). This record is kept as the decision of 2026-10-14.
+
+- **Status:** Superseded by ADR 0002
 - **Date:** 2026-10-14
 - **Deciders:** Christof Buchbender
 - **Relates to:** PRD 0001 (KOSMA OCS translator), epic ccatobs/kosma-ocs-translator#5 (KOSMA OCS translator)
@@ -45,7 +47,7 @@ The translator owns the sky geometry up to topocentric az/el. The OCS owns refra
 
 ## Status
 
-Accepted on 2026-10-14.
+Accepted on 2026-10-14. Superseded by ADR 0002 on 2026-11-18.
 
 ## Amendments
 

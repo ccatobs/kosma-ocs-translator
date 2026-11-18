@@ -455,8 +455,13 @@ def test_on_track_uses_payload_plus_pointing_correction(
     assert result["tel_elv_cmd"] == pytest.approx(45.0)
     assert result["tel_azm_act"] - result["tel_azm_cmd"] == pytest.approx(act_minus_cmd[0])
     assert result["tel_elv_act"] - result["tel_elv_cmd"] == pytest.approx(act_minus_cmd[1])
-    assert ccd["del_tel_tot_azm"] == pytest.approx(np.deg2rad(correction[0]))
+    # azimuth: ACU axis difference -> on sky, at the commanded elevation of 45 deg
+    cos_elv = np.cos(np.deg2rad(45.0))
+    assert ccd["del_tel_tot_azm"] == pytest.approx(np.deg2rad(correction[0]) * cos_elv)
     assert ccd["del_tel_tot_elv"] == pytest.approx(np.deg2rad(correction[1]))
+    # repeatable part: SPEM only, which is half of the correction here
+    assert ccd["del_tel_rep_azm"] == pytest.approx(np.deg2rad(correction[0] / 2) * cos_elv)
+    assert ccd["del_tel_rep_elv"] == pytest.approx(np.deg2rad(correction[1] / 2))
 
 
 @pytest.mark.parametrize("coord_sys_on,coord_sys_del,expected_deg", [
@@ -594,6 +599,7 @@ def _new_obs2tel(t, cookie, **changes):
     pytest.param({},                         -30.0,   False, True,  id="same_target_running"),
     pytest.param({},                         -30.0,   True,  True,  id="same_target_pending"),
     pytest.param({"obs_lam_del": 30.0},      -30.0,   False, False, id="different_offset"),
+    pytest.param({"obs_wavelength": 350.0},  -30.0,   False, False, id="different_wavelength"),
     pytest.param({},                         -350.0,  False, False, id="path_ends_too_early"),
     pytest.param({},                         -250.0,  False, True,  id="path_long_enough"),
 ])
@@ -775,6 +781,154 @@ def test_superseded_slew_is_aborted_by_next_track(slew_translator, mock_ocs, mon
     assert mock_ocs.abort.called
     assert t.slew_in_progress is False
     assert mock_ocs.scan_pattern.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# Refraction correction in the AltAz transforms
+# ---------------------------------------------------------------------------
+
+def _stub_weather(t, pressure=428.199, temperature=2.72, humidity=0.39):
+    """Replace the weather source of t, independent of what get_weather reads."""
+    t.get_weather = MagicMock(return_value={
+        "pressure": pressure * u.Torr,
+        "temperature": temperature * u.deg_C,
+        "relative_humidity": humidity,
+    })
+
+
+def _assert_default_weather(params):
+    assert params["pressure"].to_value(u.bar) == pytest.approx(0.518)
+    assert params["temperature"].to_value(u.deg_C) == pytest.approx(-5.9)
+    assert params["relative_humidity"] == pytest.approx(0.24)
+
+
+def test_refraction_off_does_not_read_weather(translator_factory):
+    t = translator_factory()   # default: OFF
+    t.get_weather = MagicMock()
+
+    t._update_refraction_params(850.0)
+
+    t.get_weather.assert_not_called()
+    assert t._altaz_frame(Time("2026-10-19T12:00:00")).pressure == 0 * u.hPa
+
+
+def test_refraction_on_raises_elevation(translator_factory):
+    t = translator_factory()
+    _stub_weather(t)
+    obstime = Time("2026-10-19T12:00:00")
+    # south celestial pole: at elevation of about 23 deg for any time
+    pole = SkyCoord(ra=0 * u.deg, dec=-90 * u.deg, frame="icrs")
+    el_off = pole.transform_to(t._altaz_frame(obstime)).alt.deg
+
+    t.refraction_correction = True
+    t._update_refraction_params(850.0)
+    frame = t._altaz_frame(obstime)
+    el_on = pole.transform_to(frame).alt.deg
+
+    assert frame.obswl.to_value(u.micron) == pytest.approx(850.0)
+    assert 10.0 < (el_on - el_off) * 3600.0 < 300.0
+
+
+def test_refraction_not_applied_without_wavelength(translator_factory):
+    t = translator_factory()
+    t.refraction_correction = True
+    t._refraction_params = {"pressure": 500 * u.hPa}
+    t.get_weather = MagicMock()
+
+    t._update_refraction_params(0.0)
+
+    t.get_weather.assert_not_called()
+    assert t._refraction_params == {}
+
+
+@pytest.mark.parametrize("weather", [
+    pytest.param({"humidity": 1.2},             id="humidity_above_1"),
+    pytest.param({"humidity": -0.1},            id="negative_humidity"),
+    pytest.param({"humidity": "N/A"},           id="humidity_not_a_number"),
+    pytest.param({"pressure": 0.0},             id="zero_pressure"),
+    pytest.param({"temperature": float("nan")}, id="temperature_nan"),
+])
+def test_refraction_bad_weather_uses_defaults(translator_factory, weather):
+    t = translator_factory()
+    _stub_weather(t, **weather)
+    t.refraction_correction = True
+    t.log = MagicMock()
+
+    t._update_refraction_params(850.0)
+
+    t.log.warning.assert_called_once()
+    _assert_default_weather(t._refraction_params)
+    assert t._refraction_params["obswl"].to_value(u.micron) == pytest.approx(850.0)
+
+
+@pytest.mark.parametrize("side_effect", [
+    pytest.param(TypeError("missing arguments"), id="ocs_call_fails"),
+    pytest.param(None,                           id="no_weather_returned"),
+])
+def test_refraction_no_weather_source_uses_defaults(translator_factory, mock_ocs, side_effect):
+    mock_ocs.get_measurement_data.side_effect = side_effect
+    t = translator_factory()
+    t.refraction_correction = True
+    t.log = MagicMock()
+
+    t._update_refraction_params(850.0)
+
+    t.log.warning.assert_called_once()
+    _assert_default_weather(t._refraction_params)
+
+
+def test_path_uses_refraction_frame(slew_translator, mock_ocs, monkeypatch):
+    import kosma_ocs_translator as kot
+    monkeypatch.setattr(kot, "SLEW_BEFORE_PATH_MIN_DIST", 1e6)
+    altaz = MagicMock(side_effect=AltAz)
+    monkeypatch.setattr(kot, "AltAz", altaz)
+    t, _ = slew_translator()
+    _stub_weather(t)
+    t.refraction_correction = True
+
+    t._track_loop()
+
+    assert mock_ocs.scan_pattern.call_count == 1
+    assert altaz.call_count == 1
+    assert altaz.call_args.kwargs["pressure"].to_value(u.Torr) == pytest.approx(428.199)
+    assert altaz.call_args.kwargs["obswl"].to_value(u.micron) == pytest.approx(850.0)
+
+
+def test_path_uses_default_weather_if_missing(slew_translator, mock_ocs, monkeypatch):
+    import kosma_ocs_translator as kot
+    monkeypatch.setattr(kot, "SLEW_BEFORE_PATH_MIN_DIST", 1e6)
+    mock_ocs.get_measurement_data.side_effect = TypeError("missing arguments")
+    t, _ = slew_translator()
+    t.refraction_correction = True
+    t.log = MagicMock()
+
+    t._track_loop()
+
+    t.log.warning.assert_called_once()
+    _assert_default_weather(t._refraction_params)
+    assert mock_ocs.scan_pattern.call_count == 1
+    assert t.tel_path_failed is False
+
+
+@pytest.mark.parametrize("refraction,acu_on,warnings", [
+    pytest.param(True,  True,  1, id="both_on_warns_once"),
+    pytest.param(True,  False, 0, id="acu_off"),
+    pytest.param(False, True,  0, id="translator_off"),
+])
+def test_acu_refraction_check(translator_factory, mock_ocs, refraction, acu_on, warnings):
+    from helpers import DEFAULT_POINTING
+    mock_ocs.get_dataset.side_effect = lambda name: {
+        **DEFAULT_POINTING, "RF refraction correction on": acu_on,
+    }
+    t = translator_factory()
+    t.refraction_correction = refraction
+    t.log = MagicMock()
+
+    t.set_tel2obs_dict()
+    t.set_tel2obs_dict()
+
+    messages = [c.args[0] for c in t.log.warning.call_args_list]
+    assert len([m for m in messages if "RF refraction" in m]) == warnings
 
 
 # ---------------------------------------------------------------------------
