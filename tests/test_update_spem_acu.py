@@ -513,6 +513,16 @@ class TestConfirmUpdate:
         for key in usa.ignore_keys_acu + list(usa.acu_readonly_keys):
             assert key not in out
 
+    def test_unchanged_keys_not_printed(self, acu_spem, monkeypatch, capsys):
+        monkeypatch.setattr("builtins.input", answers("y"))
+        new_spem = dict(CURRENT_SPEM)
+        new_spem["IA"] = 2.0
+        new_spem["CA"] += 0.5 * usa.spem_abs_tol   # within tolerance -> unchanged
+        usa.confirm_update(acu_spem, new_spem)
+        lines = capsys.readouterr().out.splitlines()
+        printed = [l.split()[0] for l in lines if l.strip()]
+        assert printed == ["key", "IA"]
+
     def test_abort(self, acu_spem, monkeypatch):
         monkeypatch.setattr("builtins.input", answers("n"))
         with pytest.raises(SystemExit):

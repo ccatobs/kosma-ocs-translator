@@ -150,7 +150,7 @@ class TestWriteAtomic:
 
 
 def test_write_tel2obs_file_is_atomic(translator_factory, tmp_path):
-    t = translator_factory()
+    t = translator_factory(obs2tel_overrides={"obs_wavelength": 0.6})
     (tmp_path / "KOSMA_tel2obs.set").write_text("old\n")
     old_inode = (tmp_path / "KOSMA_tel2obs.set").stat().st_ino
 

@@ -440,7 +440,7 @@ def test_on_track_uses_payload_plus_pointing_correction(
     mock_ocs.get_dataset.side_effect = lambda name: (
         pointing if name == "CmdPointingCorrection" else {}
     )
-    t = translator_factory(status_overrides={
+    t = translator_factory(obs2tel_overrides={"obs_wavelength": 0.6}, status_overrides={
         "Azimuth current position": current[0],
         "Elevation current position": current[1],
     })
@@ -469,6 +469,7 @@ def test_ccdpos_offsets(translator_factory, coord_sys_on, coord_sys_del, expecte
         "obs_coord_sys_on": coord_sys_on, "obs_lam_on": 170.0, "obs_bet_on": 50.0,
         "obs_coord_sys_del": coord_sys_del,
         "obs_lam_del": 3600.0, "obs_bet_del": -1800.0,   # arcsec
+        "obs_wavelength": 0.6,
     })
 
     _, ccd = t.set_tel2obs_dict()
@@ -783,13 +784,11 @@ def test_superseded_slew_is_aborted_by_next_track(slew_translator, mock_ocs, mon
 ACU_SPEM_RAW = {"Time": 1.0, "Year": 2026, "Parameter IA": 1.5, "Parameter CA": -2.0}
 
 
-@pytest.mark.parametrize("wavelength,dumped", [
-    pytest.param(0.6,   True,  id="optical"),
-    pytest.param(99.9,  True,  id="just_below_100um"),
-    pytest.param(100.0, False, id="100um"),
-    pytest.param(850.0, False, id="submm"),
+@pytest.mark.parametrize("wavelength", [
+    pytest.param(0.6,   id="optical"),
+    pytest.param(850.0, id="submm"),
 ])
-def test_dump_spem_to_kosma(translator_factory, mock_ocs, monkeypatch, wavelength, dumped):
+def test_dump_spem_to_kosma(translator_factory, mock_ocs, monkeypatch, wavelength):
     import kosma_ocs_translator as kot
     put = MagicMock(return_value={"IA": 1.5, "CA": -2.0})
     monkeypatch.setattr(kot, "put_kosma_spem", put)
@@ -800,14 +799,9 @@ def test_dump_spem_to_kosma(translator_factory, mock_ocs, monkeypatch, wavelengt
 
     result = t.dump_spem_to_kosma()
 
-    if dumped:
-        put.assert_called_once()
-        assert put.call_args.args[0] == {"Time": 1.0, "Year": 2026, "IA": 1.5, "CA": -2.0}
-        assert result == {"IA": 1.5, "CA": -2.0}
-    else:
-        put.assert_not_called()
-        mock_ocs.get_dataset.assert_not_called()
-        assert result is None
+    put.assert_called_once()
+    assert put.call_args.args[0] == {"Time": 1.0, "Year": 2026, "IA": 1.5, "CA": -2.0}
+    assert result == {"IA": 1.5, "CA": -2.0}
 
 
 def test_dump_spem_to_kosma_failure_does_not_raise(translator_factory, mock_ocs, monkeypatch):
@@ -836,7 +830,7 @@ def _write_ccatacu_model(directory, model_type, model_date):
 
 def test_ccdpos_model_type_and_date_from_ccatacu_point(translator_factory, tmp_path):
     _write_ccatacu_model(tmp_path, "CCAT-ACU_VA_1.3", "2026-10-30:14:44:00Z")
-    t = translator_factory()
+    t = translator_factory(obs2tel_overrides={"obs_wavelength": 0.6})
 
     _, ccd = t.set_tel2obs_dict()
 
@@ -847,7 +841,7 @@ def test_ccdpos_model_type_and_date_from_ccatacu_point(translator_factory, tmp_p
 def test_ccdpos_model_type_with_blanks_takes_first_column(translator_factory, tmp_path):
     _write_ccatacu_model(tmp_path, "CCAT-ACU VA Error Compensations-document Release 1.3",
                          "2026-10-30:14:44:00Z")
-    t = translator_factory()
+    t = translator_factory(obs2tel_overrides={"obs_wavelength": 0.6})
 
     _, ccd = t.set_tel2obs_dict()
 
@@ -857,7 +851,8 @@ def test_ccdpos_model_type_with_blanks_takes_first_column(translator_factory, tm
 
 def test_ccdpos_model_defaults_without_ccatacu_point(translator_factory):
     from kosma_ocs_translator import POINTING_MODEL_DEFAULTS
-    t = translator_factory()   # tmp_path has no KOSMA_ccatacu_point.in
+    # tmp_path has no KOSMA_ccatacu_point.in
+    t = translator_factory(obs2tel_overrides={"obs_wavelength": 0.6})
 
     _, ccd = t.set_tel2obs_dict()
 
@@ -867,7 +862,7 @@ def test_ccdpos_model_defaults_without_ccatacu_point(translator_factory):
 def test_ccdpos_model_date_follows_file_update(translator_factory, tmp_path):
     import os
     _write_ccatacu_model(tmp_path, "CCAT-ACU", "2026-10-30:14:44:00Z")
-    t = translator_factory()
+    t = translator_factory(obs2tel_overrides={"obs_wavelength": 0.6})
     _, ccd = t.set_tel2obs_dict()
     assert ccd["op_tel_model_date"] == "2026-10-30:14:44:00Z"
 
@@ -884,7 +879,7 @@ def test_ccdpos_model_date_follows_file_update(translator_factory, tmp_path):
 def test_ccdpos_model_not_reread_if_file_unchanged(translator_factory, tmp_path, monkeypatch):
     import kosma_ocs_translator as kot
     _write_ccatacu_model(tmp_path, "CCAT-ACU", "2026-10-30:14:44:00Z")
-    t = translator_factory()
+    t = translator_factory(obs2tel_overrides={"obs_wavelength": 0.6})
     reads = []
     original = kot._read_first_column
     monkeypatch.setattr(kot, "_read_first_column",
@@ -898,7 +893,7 @@ def test_ccdpos_model_not_reread_if_file_unchanged(translator_factory, tmp_path,
 
 def test_ccdpos_file_contains_model_type_and_date(translator_factory, tmp_path):
     _write_ccatacu_model(tmp_path, "CCAT-ACU_VA_1.3", "2026-10-30:14:44:00Z")
-    t = translator_factory()
+    t = translator_factory(obs2tel_overrides={"obs_wavelength": 0.6})
 
     t.write_tel2obs_file()
 
@@ -907,6 +902,33 @@ def test_ccdpos_file_contains_model_type_and_date(translator_factory, tmp_path):
               for l in lines if "!" in l and "File update time stamp" not in l}
     assert fields["op_tel_model_type"] == "CCAT-ACU_VA_1.3"
     assert fields["op_tel_model_date"] == "2026-10-30:14:44:00Z"
+
+
+@pytest.mark.parametrize("wavelength,written", [
+    pytest.param(0.6,   True,  id="optical"),
+    pytest.param(99.9,  True,  id="just_below_100um"),
+    pytest.param(100.0, False, id="100um"),
+    pytest.param(850.0, False, id="submm"),
+])
+def test_ccdpos_file_written_only_below_submm(translator_factory, tmp_path, wavelength, written):
+    t = translator_factory(obs2tel_overrides={"obs_wavelength": wavelength})
+
+    t.write_tel2obs_file()
+
+    assert (tmp_path / "KOSMA_tel2obs.set").exists()
+    assert (tmp_path / "KOSMA_ccdpos.sim").exists() is written
+
+
+def test_ccdpos_params_not_built_for_submm(translator_factory, monkeypatch):
+    t = translator_factory(obs2tel_overrides={"obs_wavelength": 850.0})
+    build = MagicMock()
+    monkeypatch.setattr(t, "_build_ccdpos_params", build)
+
+    result, ccd = t.set_tel2obs_dict()
+
+    assert result is not None
+    assert ccd is None
+    build.assert_not_called()
 
 
 # ---------------------------------------------------------------------------
@@ -920,7 +942,8 @@ def _set_payload_el_velocity(t, vel_of_time):
 
 
 def test_op_vel_elv_zero_for_static_payload(translator_factory):
-    t = translator_factory()   # static payload: velocities are 0
+    # static payload: velocities are 0
+    t = translator_factory(obs2tel_overrides={"obs_wavelength": 0.6})
 
     _, ccd = t.set_tel2obs_dict()
 
@@ -928,7 +951,8 @@ def test_op_vel_elv_zero_for_static_payload(translator_factory):
 
 
 def test_op_vel_elv_interpolated_from_payload(translator_factory):
-    t = translator_factory()   # status time is 30 s after the payload start
+    # status time is 30 s after the payload start
+    t = translator_factory(obs2tel_overrides={"obs_wavelength": 0.6})
     _set_payload_el_velocity(t, lambda dt: 0.001 + 1e-6 * dt)
 
     result, ccd = t.set_tel2obs_dict()
@@ -939,7 +963,7 @@ def test_op_vel_elv_interpolated_from_payload(translator_factory):
 
 
 def test_op_vel_elv_zero_without_payload(translator_factory):
-    t = translator_factory()
+    t = translator_factory(obs2tel_overrides={"obs_wavelength": 0.6})
     t.last_payload = None
     t.last_obs2tel = None
     t._fail_path(2, 1)   # first path failed: status is still written
@@ -951,7 +975,8 @@ def test_op_vel_elv_zero_without_payload(translator_factory):
 
 def test_tel_vel_elv_stays_acu_measured_velocity(translator_factory):
     # tel2obs reports the ACU velocity, ccdpos the commanded one
-    t = translator_factory(status_overrides={"Elevation current velocity": 0.01})
+    t = translator_factory(obs2tel_overrides={"obs_wavelength": 0.6},
+                           status_overrides={"Elevation current velocity": 0.01})
     _set_payload_el_velocity(t, lambda dt: 0.002)
 
     result, ccd = t.set_tel2obs_dict()
@@ -961,7 +986,7 @@ def test_tel_vel_elv_stays_acu_measured_velocity(translator_factory):
 
 
 def test_op_vel_elv_written_only_to_ccdpos(translator_factory, tmp_path):
-    t = translator_factory()
+    t = translator_factory(obs2tel_overrides={"obs_wavelength": 0.6})
     _set_payload_el_velocity(t, lambda dt: 0.002)
 
     t.write_tel2obs_file()
@@ -995,7 +1020,7 @@ def test_write_tel2obs_file_produces_output(translator_factory, tmp_path):
     output_dir = Path(__file__).parent / "output"
     output_dir.mkdir(exist_ok=True)
 
-    t = translator_factory()
+    t = translator_factory(obs2tel_overrides={"obs_wavelength": 0.6})
     t.write_tel2obs_file()
 
     tel2obs_path = tmp_path / "KOSMA_tel2obs.set"

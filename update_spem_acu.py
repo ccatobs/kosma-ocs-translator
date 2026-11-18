@@ -277,8 +277,8 @@ def confirm_update(current_spem_acu, new_spem):
     """
     log = logging.getLogger(LOGGER_NAME)
 
-    # Print key - current - new for all keys except for ignore_keys_acu and
-    # acu_readonly_keys (never uploaded)
+    # Print key - current - new for the keys that differ (within spem_abs_tol),
+    # except for ignore_keys_acu and acu_readonly_keys (never uploaded)
     skip = set(ignore_keys_acu) | set(acu_readonly_keys)
     keys = [k for k in current_spem_acu if k not in skip]
     keys += [k for k in new_spem if k not in keys and k not in skip]
@@ -288,6 +288,8 @@ def confirm_update(current_spem_acu, new_spem):
         current = current_spem_acu.get(key)
         new = new_spem.get(key)
         if current is not None and new is not None:
+            if math.isclose(new, current, abs_tol=spem_abs_tol):
+                continue
             diff = format_value(new - current)
         else:
             diff = format_value("N/A")

@@ -331,9 +331,10 @@ def _read_first_column(path, names):
     return values
 
 
-# obs_wavelength [micron] below which the ACU SPEM parameters are dumped to
-# KOSMA_file_io at start-up (optical pointing)
-SPEM_DUMP_MAX_WAVELENGTH = 100.0
+# obs_wavelength [micron] separating submm observations (at or above this value)
+# from optical / infrared camera observations (below this value).
+# KOSMA_ccdpos.sim is written only for the latter.
+SUBMM_MIN_WAVELENGTH = 100.0
 
 
 def strip_parameter_prefix(spem):
@@ -818,7 +819,9 @@ class KOSMA_translator:
 
     def set_tel2obs_dict(self):
         """
-        Set dictionary of KOSMA_tel2obs and KOSMA_ccdpos.sim
+        Set dictionary of KOSMA_tel2obs and KOSMA_ccdpos.sim. The latter is None
+        for submm observations (obs_wavelength >= SUBMM_MIN_WAVELENGTH), for
+        which KOSMA_ccdpos.sim is not written.
         """
         if (self.last_payload is None or self.last_obs2tel is None) and not self.tel_path_failed:
             self.log.info('No record of successfully sent command to telescope. Wait...')
@@ -828,7 +831,10 @@ class KOSMA_translator:
         response_pointing = self.ocs.get_dataset("CmdPointingCorrection")
 
         input_dict = self._build_tel2obs_params(response, response_pointing)
-        ccd_input_dict = self._build_ccdpos_params(input_dict, response_pointing)
+        # KOSMA_ccdpos.sim is only for optical / infrared camera observations
+        ccd_input_dict = None
+        if self.obs2tel["obs_wavelength"] < SUBMM_MIN_WAVELENGTH:
+            ccd_input_dict = self._build_ccdpos_params(input_dict, response_pointing)
 
         return input_dict, ccd_input_dict
 
@@ -1413,27 +1419,16 @@ class KOSMA_translator:
 
     def dump_spem_to_kosma(self):
         """
-        For optical pointing (obs_wavelength < SPEM_DUMP_MAX_WAVELENGTH micron),
-        mirror the SPEM parameters currently used by the ACU into KOSMA_file_io,
+        Mirror the SPEM parameters currently used by the ACU into KOSMA_file_io,
         so that the pointing fit in KOSMA starts from the actual ACU model.
         Failures are logged but do not stop the translator.
 
         Returns
         -------
         spem : dict or None
-            SPEM parameters read back from KOSMA_file_io, None if not dumped
+            SPEM parameters read back from KOSMA_file_io, None if the dump failed
         """
-        obs_wavelength = self.obs2tel["obs_wavelength"]
-        if obs_wavelength >= SPEM_DUMP_MAX_WAVELENGTH:
-            self.log.info(
-                f"obs_wavelength = {obs_wavelength} micron, "
-                f"ACU SPEM parameters not dumped to {KOSMA_SPEM_FILE}"
-            )
-            return None
-        self.log.info(
-            f"obs_wavelength = {obs_wavelength} micron, "
-            f"dumping ACU SPEM parameters to {KOSMA_SPEM_FILE}"
-        )
+        self.log.info(f"dumping ACU SPEM parameters to {KOSMA_SPEM_FILE}")
         try:
             spem_acu = strip_parameter_prefix(self.ocs.get_dataset("CmdSPEMParameter"))
             self.log.info(f"ACU SPEM parameters: {spem_acu}")
@@ -1604,7 +1599,7 @@ def main():
         logger=logger,
     )
     translator = KOSMA_translator(ocs, abort_if_unknown=not args.no_abort_if_unknown)
-    # optical pointing: KOSMA needs the SPEM parameters currently used by the ACU
+    # KOSMA needs the SPEM parameters currently used by the ACU
     translator.dump_spem_to_kosma()
     background_thread = threading.Thread(
         target=run_write_tel2obs_file_in_background, args=(translator,)
