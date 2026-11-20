@@ -1106,7 +1106,7 @@ class KOSMA_translator:
                     f"move_to rejected: HTTP {response.status_code}, "
                     f"status={body.get('status')}, message={body.get('message')}"
                 )
-                self._fail_path(cookie, response.status_code)
+                self._fail_path(cookie, self._error_code(response))
             else:
                 self.log.info(f"move_to accepted: {body}")
                 # Bookkeeping only (not sent): the ACU starts moving on receipt
@@ -1331,7 +1331,7 @@ class KOSMA_translator:
                     f"start_time lead: {lead_send:.3f} s before send, "
                     f"{lead_done:.3f} s after response (TCS needs >= 9.8 s)"
                 )
-                if response.status_code == 503 and time.monotonic() < resend_deadline:
+                if self._is_busy(response) and time.monotonic() < resend_deadline:
                     # after a slew: TCS still finishing the move-to
                     self.log.warning(
                         "TCS still busy after the slew: recomputing path and resending"
@@ -1346,7 +1346,7 @@ class KOSMA_translator:
                     f"scan_pattern rejected: HTTP {response.status_code}, "
                     f"status={body.get('status')}, message={body.get('message')}"
                 )
-                self._fail_path(cookie, response.status_code)
+                self._fail_path(cookie, self._error_code(response))
             else:
                 self.log.info(f"scan_pattern accepted: {body}")
                 # "type" only for bookkeeping, not part of the payload sent to TCS
@@ -1407,7 +1407,7 @@ class KOSMA_translator:
                 f"slew move_to rejected: HTTP {response.status_code}, "
                 f"status={body.get('status')}, message={body.get('message')}"
             )
-            self._fail_path(cookie, response.status_code)
+            self._fail_path(cookie, self._error_code(response))
             return False
         self.slew_in_progress = True
         self.log.info(f"slew move_to accepted: {body}")
@@ -1461,6 +1461,32 @@ class KOSMA_translator:
             return {"status": None, "message": str(body)[:200]}
         return body
 
+    @classmethod
+    def _is_busy(cls, response):
+        """
+        True if TCS rejected the command because the previous one is still
+        running. TCS answers HTTP 503 with message "busy", but the OCS API passes
+        the TCS JSON body on with HTTP 200 (status "error", message "busy"),
+        so both forms are accepted.
+        """
+        if response.status_code == 503:
+            return True
+        body = cls._response_body(response)
+        return body.get("status") != "ok" and body.get("message") == "busy"
+
+    @classmethod
+    def _error_code(cls, response):
+        """
+        tel_error for a rejected command. The OCS reports TCS errors with HTTP
+        200 and status "error" in the body: busy is reported as 503, any other
+        rejection with HTTP 200 as 1, never as 0 or 200.
+        """
+        if cls._is_busy(response):
+            return 503
+        if response.status_code == 200:
+            return 1
+        return response.status_code
+
     def _scan_pattern_with_retry(self, payload, busy_timeout, retry_interval):
         """
         Send payload with ocs.scan_pattern, resending it while the TCS answers
@@ -1472,7 +1498,7 @@ class KOSMA_translator:
         attempt = 1
         while True:
             response = self.ocs.scan_pattern(data=payload)
-            if response.status_code != 503:
+            if not self._is_busy(response):
                 return response
             remaining = deadline - time.monotonic()
             if remaining <= 0:

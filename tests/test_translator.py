@@ -662,6 +662,37 @@ def test_scan_pattern_with_retry(translator_factory, mock_ocs, codes, busy_timeo
         assert call.kwargs == {"data": {"points": []}}
 
 
+def _ocs_busy():
+    """TCS busy as passed on by the OCS API: HTTP 200, error in the body."""
+    return MagicMock(status_code=200, json=lambda: {"status": "error", "message": "busy"})
+
+
+@pytest.mark.parametrize("status_code,body,busy,error", [
+    pytest.param(503, {"status": "error", "message": "busy"}, True,  503, id="tcs_503"),
+    pytest.param(200, {"status": "error", "message": "busy"}, True,  503, id="ocs_200_busy"),
+    pytest.param(200, {"status": "error", "message": "bad az"}, False, 1, id="ocs_200_other_error"),
+    pytest.param(400, {"status": "error", "message": "bad az"}, False, 400, id="http_400"),
+    pytest.param(200, {"status": "ok"},                       False, 1,   id="ok"),
+])
+def test_is_busy_and_error_code(translator_factory, status_code, body, busy, error):
+    t = translator_factory()
+    response = MagicMock(status_code=status_code, json=lambda: body)
+    assert t._is_busy(response) is busy
+    assert t._error_code(response) == error
+
+
+def test_scan_pattern_retry_on_ocs_busy(translator_factory, mock_ocs):
+    mock_ocs.scan_pattern.side_effect = [_ocs_busy(), _ocs_busy(), *_responses(200)]
+    t = translator_factory()
+
+    response = t._scan_pattern_with_retry({"points": []}, busy_timeout=1.0,
+                                          retry_interval=0.01)
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+    assert mock_ocs.scan_pattern.call_count == 3
+
+
 def test_scan_pattern_retry_stops_when_superseded(translator_factory, mock_ocs):
     mock_ocs.scan_pattern.side_effect = _responses(503, 200)
     t = translator_factory()
@@ -836,6 +867,31 @@ def test_busy_after_slew_resends_recomputed_path(slew_translator, mock_ocs):
     assert t.last_payload["start_time"] == starts[2]
     assert t.tel_path_failed is False
     assert t.tel_return_cookie == 2
+
+
+def test_ocs_busy_after_slew_resends(slew_translator, mock_ocs):
+    t, _ = slew_translator()
+    _send_once(t, mock_ocs)
+    mock_ocs.scan_pattern.side_effect = [_ocs_busy(), *_responses(200)]
+
+    t._track_loop()
+
+    assert mock_ocs.scan_pattern.call_count == 2
+    assert t.tel_path_failed is False
+    assert t.tel_return_cookie == 2
+
+
+def test_ocs_busy_after_slew_timeout_reports_503(slew_translator, mock_ocs, monkeypatch):
+    import kosma_ocs_translator as kot
+    monkeypatch.setattr(kot, "SLEW_BUSY_RESEND_TIMEOUT", 0.0)
+    t, _ = slew_translator()
+    _send_once(t, mock_ocs)
+    mock_ocs.scan_pattern.side_effect = [_ocs_busy()]
+
+    t._track_loop()
+
+    assert t.tel_path_failed is True
+    assert t.tel_error == 503     # not the HTTP 200 of the OCS
 
 
 def test_busy_after_slew_fails_after_timeout(slew_translator, mock_ocs, monkeypatch):
