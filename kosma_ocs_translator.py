@@ -64,6 +64,20 @@ SLEW_SPEED_TOLERANCE = 1e-4
 # [sec] interval of reading the ACU status while waiting for the slew
 SLEW_POLL_INTERVAL = 0.5
 
+# Path timing (see KOSMA_translator._track_loop).
+# [sec] start_time of a path is this far after the time its computation starts.
+# TCS requires start_time >= 9.8 sec ahead when it processes the path.
+TRACK_OVERHEAD = 11.0
+# [sec] minimum lead (start_time - now) right before sending the path. If the
+# computation left less, the path is recomputed with a larger overhead. The margin
+# above 9.8 sec covers transfer time and a clock offset between here and the TCS.
+TRACK_MIN_SEND_LEAD = 10.5
+# [sec] time step between path points sent to the TCS
+TRACK_TIME_STEP = 0.1
+# [sec] time step of the full (astropy) coordinate transform; the points in between
+# are cubic Hermite interpolated (errors << 0.01 arcsec for sidereal motion)
+TRACK_COARSE_STEP = 1.0
+
 
 def _apply_offset(coord, d_lam_arcsec, d_bet_arcsec, true_angle):
     """
@@ -103,6 +117,40 @@ def _apply_offset(coord, d_lam_arcsec, d_bet_arcsec, true_angle):
         coord.data.lat + d_bet_arcsec * u.arcsec,
         frame=coord.frame,
     )
+
+
+def _hermite_resample(t_coarse, y_coarse, t_fine):
+    """
+    Cubic Hermite interpolation of y_coarse(t_coarse), with the slopes at the
+    nodes from second-order finite differences.
+
+    Parameters
+    ----------
+    t_coarse : np.ndarray
+        Increasing node times, at least 3 [sec]
+    y_coarse : np.ndarray
+        Values at t_coarse (must be continuous, e.g. unwrapped azimuth)
+    t_fine : np.ndarray
+        Times to interpolate at, within [t_coarse[0], t_coarse[-1]] [sec]
+
+    Returns
+    -------
+    y, dydt : np.ndarray
+        Interpolated values and their time derivatives at t_fine
+    """
+    slope = np.gradient(y_coarse, t_coarse, edge_order=2)
+    i = np.clip(np.searchsorted(t_coarse, t_fine, side="right") - 1, 0, len(t_coarse) - 2)
+    h = t_coarse[i + 1] - t_coarse[i]
+    s = (t_fine - t_coarse[i]) / h
+    y0, y1 = y_coarse[i], y_coarse[i + 1]
+    m0, m1 = slope[i] * h, slope[i + 1] * h
+    s2 = s * s
+    s3 = s2 * s
+    y = ((2 * s3 - 3 * s2 + 1) * y0 + (s3 - 2 * s2 + s) * m0
+         + (-2 * s3 + 3 * s2) * y1 + (s3 - s2) * m1)
+    dydt = ((6 * s2 - 6 * s) * y0 + (3 * s2 - 4 * s + 1) * m0
+            + (-6 * s2 + 6 * s) * y1 + (3 * s2 - 2 * s) * m1) / h
+    return y, dydt
 
 
 def _get_time_from_acu_format(day_of_year, year):
@@ -1015,8 +1063,8 @@ class KOSMA_translator:
 
             # command move-to
             if if_extended:
-                cmd_az, cmd_el = get_overtop_altaz_from_nominal(
-                    coord.az.deg, coord.alt.deg)
+                cmd_el, cmd_az = get_overtop_altaz_from_nominal(
+                    alt_nominal=coord.alt.deg, az_nominal=coord.az.deg)
             else:
                 cmd_az = coord.az.deg
                 cmd_el = coord.alt.deg
@@ -1134,22 +1182,21 @@ class KOSMA_translator:
                 self._fail_path(cookie, 1)
                 return
 
-        def build_payload():
+        def build_payload(track_overhead=TRACK_OVERHEAD):
             """Path of track_duration seconds, starting track_overhead seconds from now."""
-            # make an array of times from now + overhead to now + overhead + track_duration,
-            # with time_step second steps
-            # Overhead [sec] to account for computation and communication delay
-            # TCS requires > 10 sec ahead
-            track_overhead = 11
-            # Time step [sec] between path points
-            time_step = 0.1
-            # If track_duration is not a multiple of time_step, the path ends at the
+            # Points every TRACK_TIME_STEP from now + overhead to now + overhead + track_duration.
+            # If track_duration is not a multiple of the step, the path ends at the
             # last full step before track_duration. The small tolerance avoids
             # dropping a step due to floating-point error (e.g. 600 / 0.1).
-            n_steps = int(track_duration / time_step + 1e-9) + 1
+            n_steps = int(track_duration / TRACK_TIME_STEP + 1e-9) + 1
+            t_fine = np.arange(n_steps) * TRACK_TIME_STEP
+            # The full transform runs only on a coarse grid covering the path
+            # (at least 3 nodes for the second-order slopes)
+            n_coarse = max(int(np.ceil(t_fine[-1] / TRACK_COARSE_STEP - 1e-9)) + 1, 3)
+            t_coarse = np.arange(n_coarse) * TRACK_COARSE_STEP
             t_build = time.perf_counter()
-            time_array = Time.now() + track_overhead * u.second + (
-                np.arange(n_steps) * time_step) * u.second
+            t_start = Time.now() + track_overhead * u.second
+            time_array = t_start + t_coarse * u.second
 
             # calculate the altaz coordinates for each time step
             altaz_frames = self._altaz_frame(time_array)
@@ -1168,23 +1215,28 @@ class KOSMA_translator:
                 altaz = _apply_offset(altaz, focal_plane_az, focal_plane_el, "Y")
 
             if if_extended:
-                az_array, el_array = get_overtop_altaz_from_nominal(
-                    altaz.az.deg, altaz.alt.deg)
+                el_coarse, az_coarse = get_overtop_altaz_from_nominal(
+                    alt_nominal=altaz.alt.deg, az_nominal=altaz.az.deg)
             else:
-                az_array = altaz.az.deg
-                el_array = altaz.alt.deg
+                az_coarse = altaz.az.deg
+                el_coarse = altaz.alt.deg
 
-            # calculate the velocities in azimuth and elevation using np.gradient
-            dt = np.gradient(time_array.unix)
-            az_velocities = np.gradient(az_array) / dt
-            el_velocities = np.gradient(el_array) / dt
+            # Interpolate to the path points; positions and velocities from the
+            # same cubic. Azimuth is unwrapped so a 0/360 crossing is interpolated
+            # (and its velocity computed) correctly, then wrapped back to [0, 360).
+            # NaN (unreachable overtop) would spread through the unwrap: skip it.
+            if np.all(np.isfinite(az_coarse)):
+                az_coarse = np.unwrap(az_coarse, period=360.0)
+            az_array, az_velocities = _hermite_resample(t_coarse, az_coarse, t_fine)
+            az_array = np.mod(az_array, 360.0)
+            el_array, el_velocities = _hermite_resample(t_coarse, el_coarse, t_fine)
 
             # program track mode, see definition here ICD-1000000-32000-02-00 VA Webserver
             # - Remote Protocol
             # Assuming all arrays are 1D and of the same length
             points = np.column_stack(
                 [
-                    time_array.unix - time_array.unix[0],  # time offset in seconds since start of track
+                    t_fine,  # time offset in seconds since start of track
                     az_array,
                     el_array,
                     az_velocities,
@@ -1192,7 +1244,7 @@ class KOSMA_translator:
                 ]
             )
             payload = {
-                "start_time": time_array[0].unix,
+                "start_time": t_start.unix,
                 "coordsys": "Horizon",
                 "points": points.tolist(),
             }
@@ -1216,6 +1268,17 @@ class KOSMA_translator:
                 return
             payload = build_payload()
 
+        # The computation (or anything else since) may have used up the margin:
+        # recompute once, with the overhead increased by the shortfall.
+        lead = payload["start_time"] - time.time()
+        if lead < TRACK_MIN_SEND_LEAD:
+            overhead = TRACK_OVERHEAD + (TRACK_MIN_SEND_LEAD - lead)
+            self.log.warning(
+                f"start_time lead {lead:.3f} s < {TRACK_MIN_SEND_LEAD} s: "
+                f"recomputing path with track_overhead {overhead:.3f} s"
+            )
+            payload = build_payload(overhead)
+
         try:
             # TODO: find out a way to pass obs_wavelength together with payload
             # A newer track has superseded this one while the payload was computed
@@ -1223,11 +1286,12 @@ class KOSMA_translator:
                 self.log.info("Track superseded, payload not sent")
                 return
             # TCS answers 503 (busy) until it is idle after the abort. Retry only
-            # within the margin left by track_overhead (11 sec vs 9.8 sec required
-            # by TCS); a later retry would be rejected as starting too soon anyway.
+            # while the lead stays >= TRACK_MIN_SEND_LEAD; a later retry would be
+            # rejected as starting too soon anyway.
             lead_send = payload["start_time"] - time.time()
             response = self._scan_pattern_with_retry(
-                payload, busy_timeout=1, retry_interval=0.3
+                payload, busy_timeout=max(lead_send - TRACK_MIN_SEND_LEAD, 0.0),
+                retry_interval=0.3
             )
             if response is None:
                 self.log.info("Track superseded while TCS was busy, payload not sent")

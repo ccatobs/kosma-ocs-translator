@@ -5,8 +5,54 @@ from astropy.coordinates import SkyCoord, AltAz
 from astropy import units as u
 from astropy.time import Time
 
-from kosma_ocs_translator import _apply_offset, _get_time_from_acu_format
+from kosma_ocs_translator import (
+    _apply_offset, _get_time_from_acu_format, _hermite_resample,
+    TRACK_COARSE_STEP, TRACK_TIME_STEP,
+)
 from helpers import CCAT_LOCATION
+
+
+class TestHermiteResample:
+
+    def test_quadratic_is_exact(self):
+        # second-order slopes are exact for a quadratic, so is the cubic Hermite
+        t_c = np.arange(11) * 1.0
+        t_f = np.arange(101) * 0.1
+        y, dydt = _hermite_resample(t_c, 3.0 + 2.0 * t_c - 0.5 * t_c**2, t_f)
+        np.testing.assert_allclose(y, 3.0 + 2.0 * t_f - 0.5 * t_f**2, atol=1e-12)
+        np.testing.assert_allclose(dydt, 2.0 - t_f, atol=1e-12)
+
+    def test_nodes_are_reproduced(self):
+        t_c = np.arange(5) * 1.0
+        y_c = np.array([0.0, 1.0, 4.0, 2.0, 7.0])
+        y, _ = _hermite_resample(t_c, y_c, t_c)
+        np.testing.assert_allclose(y, y_c, atol=1e-12)
+
+    def test_sidereal_track_near_zenith(self):
+        # source passing 3 deg from zenith (fast azimuth): interpolated track
+        # matches the full transform at every path point
+        t0 = Time("2026-10-19T03:00:00")
+        source = SkyCoord(
+            az=0.0 * u.deg, alt=87.0 * u.deg,
+            frame=AltAz(obstime=t0, location=CCAT_LOCATION)).icrs
+        t_f = np.arange(601) * TRACK_TIME_STEP
+        t_c = np.arange(int(t_f[-1] / TRACK_COARSE_STEP) + 1) * TRACK_COARSE_STEP
+
+        def altaz(t):
+            return source.transform_to(
+                AltAz(obstime=t0 - 30 * u.s + t * u.s, location=CCAT_LOCATION))
+
+        coarse, full = altaz(t_c), altaz(t_f)
+        az, vaz = _hermite_resample(t_c, np.unwrap(coarse.az.deg, period=360.0), t_f)
+        el, vel = _hermite_resample(t_c, coarse.alt.deg, t_f)
+        d_az = (np.mod(az, 360.0) - full.az.deg + 180.0) % 360.0 - 180.0
+        assert np.max(np.abs(d_az)) * 3600 < 0.01
+        assert np.max(np.abs(el - full.alt.deg)) * 3600 < 0.01
+        # velocities against finite differences of the full transform
+        full_vaz = np.gradient(np.unwrap(full.az.deg, period=360.0), t_f)
+        full_vel = np.gradient(full.alt.deg, t_f)
+        assert np.max(np.abs(vaz - full_vaz)[1:-1]) * 3600 < 0.1
+        assert np.max(np.abs(vel - full_vel)[1:-1]) * 3600 < 0.1
 
 
 class TestApplyOffset:
