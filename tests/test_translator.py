@@ -817,6 +817,74 @@ def test_slew_before_path_if_far(slew_translator, mock_ocs):
     assert t.tel_path_failed is False
 
 
+def _send_once(t, mock_ocs):
+    """Replace the short busy retry by a single send (fast tests)."""
+    t._scan_pattern_with_retry = (
+        lambda payload, busy_timeout, retry_interval: mock_ocs.scan_pattern(data=payload))
+
+
+def test_busy_after_slew_resends_recomputed_path(slew_translator, mock_ocs):
+    t, _ = slew_translator()
+    _send_once(t, mock_ocs)
+    mock_ocs.scan_pattern.side_effect = _responses(503, 503, 200)
+
+    t._track_loop()
+
+    assert mock_ocs.scan_pattern.call_count == 3
+    starts = [c.kwargs["data"]["start_time"] for c in mock_ocs.scan_pattern.call_args_list]
+    assert starts[0] < starts[1] < starts[2]     # recomputed with a fresh lead
+    assert t.last_payload["start_time"] == starts[2]
+    assert t.tel_path_failed is False
+    assert t.tel_return_cookie == 2
+
+
+def test_busy_after_slew_fails_after_timeout(slew_translator, mock_ocs, monkeypatch):
+    import kosma_ocs_translator as kot
+    monkeypatch.setattr(kot, "SLEW_BUSY_RESEND_TIMEOUT", 0.0)
+    t, _ = slew_translator()
+    _send_once(t, mock_ocs)
+    mock_ocs.scan_pattern.side_effect = _responses(503, 200)
+
+    t._track_loop()
+
+    assert mock_ocs.scan_pattern.call_count == 1
+    assert t.tel_path_failed is True
+    assert t.tel_error == 503
+    assert t.tel_return_cookie == 2
+
+
+def test_busy_without_slew_not_resent(slew_translator, mock_ocs, monkeypatch):
+    import kosma_ocs_translator as kot
+    monkeypatch.setattr(kot, "SLEW_BEFORE_PATH_MIN_DIST", 1e6)   # no slew
+    t, _ = slew_translator()
+    _send_once(t, mock_ocs)
+    mock_ocs.scan_pattern.side_effect = _responses(503, 200)
+
+    t._track_loop()
+
+    assert not mock_ocs.move_to.called
+    assert mock_ocs.scan_pattern.call_count == 1
+    assert t.tel_path_failed is True
+    assert t.tel_error == 503
+
+
+def test_slew_arrival_uses_own_tolerance(slew_translator, mock_ocs, monkeypatch):
+    import kosma_ocs_translator as kot
+    monkeypatch.setattr(kot, "SLEW_TIMEOUT", 0.05)
+    monkeypatch.setattr(kot, "SLEW_POLL_INTERVAL", 0.01)
+    t, target = slew_translator()
+    # stopped 0.5 deg from the target: within SLEW_BEFORE_PATH_MIN_DIST, but not arrived
+    t._acu_position = lambda: (
+        (target["azel"][0] + 0.5, target["azel"][1], 0.0, 0.0) if "azel" in target
+        else (-100.0, 5.0, 0.0, 0.0))
+
+    t._track_loop()
+
+    assert mock_ocs.move_to.call_count == 1
+    assert not mock_ocs.scan_pattern.called
+    assert t.tel_path_failed is True     # slew timed out
+
+
 def test_slew_timeout_fails_path(slew_translator, mock_ocs, monkeypatch):
     import kosma_ocs_translator as kot
     monkeypatch.setattr(kot, "SLEW_TIMEOUT", 0.05)

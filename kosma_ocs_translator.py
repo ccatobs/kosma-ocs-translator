@@ -59,8 +59,17 @@ _frame_epochs = {
 SLEW_BEFORE_PATH_MIN_DIST = 1.0
 # [sec] give up waiting for the slew to finish after this
 SLEW_TIMEOUT = 300.0
-# [deg/s] the slew has finished once both axes are slower than this
+# [deg] the slew has finished once both axes are this close to the target (in
+# azimuth and in elevation, ACU position minus pointing correction) ...
+SLEW_ARRIVAL_TOLERANCE = 0.01
+# [deg/s] ... and slower than this.
+# TCS finishes the move-to only once |current - commanded| < 1e-4 deg and the
+# speed < 1e-4 deg/s on both axes (telescope-control-system commands.go); until
+# then a path is rejected as busy, see SLEW_BUSY_RESEND_TIMEOUT.
 SLEW_SPEED_TOLERANCE = 1e-4
+# [sec] after a slew, a path rejected as busy (TCS still finishing the move-to)
+# is recomputed with a fresh lead and resent until this time after the first send
+SLEW_BUSY_RESEND_TIMEOUT = 10.0
 # [sec] interval of reading the ACU status while waiting for the slew
 SLEW_POLL_INTERVAL = 0.5
 
@@ -1283,40 +1292,54 @@ class KOSMA_translator:
             if not self._slew_to(first_az, first_el, cookie):
                 return
             payload = build_payload()
-
-        # The computation (or anything else since) may have used up the margin:
-        # recompute once, with the overhead increased by the shortfall.
-        lead = payload["start_time"] - time.time()
-        if lead < TRACK_MIN_SEND_LEAD:
-            overhead = TRACK_OVERHEAD + (TRACK_MIN_SEND_LEAD - lead)
-            self.log.warning(
-                f"start_time lead {lead:.3f} s < {TRACK_MIN_SEND_LEAD} s: "
-                f"recomputing path with track_overhead {overhead:.3f} s"
-            )
-            payload = build_payload(overhead)
+            # TCS may still be finishing the move-to: resend busy-rejected paths
+            resend_deadline = time.monotonic() + SLEW_BUSY_RESEND_TIMEOUT
+        else:
+            resend_deadline = time.monotonic()   # no resending
 
         try:
-            # TODO: find out a way to pass obs_wavelength together with payload
-            # A newer track has superseded this one while the payload was computed
-            if self._track_stop_event.is_set():
-                self.log.info("Track superseded, payload not sent")
-                return
-            # TCS answers 503 (busy) until it is idle after the abort. Retry only
-            # while the lead stays >= TRACK_MIN_SEND_LEAD; a later retry would be
-            # rejected as starting too soon anyway.
-            lead_send = payload["start_time"] - time.time()
-            response = self._scan_pattern_with_retry(
-                payload, busy_timeout=max(lead_send - TRACK_MIN_SEND_LEAD, 0.0),
-                retry_interval=0.3
-            )
-            if response is None:
-                self.log.info("Track superseded while TCS was busy, payload not sent")
-                return
-            lead_done = payload["start_time"] - time.time()
-            self.log.info(
-                f"start_time lead: {lead_send:.3f} s before send, "
-                f"{lead_done:.3f} s after response (TCS needs >= 9.8 s)"
-            )
+            while True:
+                # The computation (or anything else since) may have used up the margin:
+                # recompute once, with the overhead increased by the shortfall.
+                lead = payload["start_time"] - time.time()
+                if lead < TRACK_MIN_SEND_LEAD:
+                    overhead = TRACK_OVERHEAD + (TRACK_MIN_SEND_LEAD - lead)
+                    self.log.warning(
+                        f"start_time lead {lead:.3f} s < {TRACK_MIN_SEND_LEAD} s: "
+                        f"recomputing path with track_overhead {overhead:.3f} s"
+                    )
+                    payload = build_payload(overhead)
+
+                # TODO: find out a way to pass obs_wavelength together with payload
+                # A newer track has superseded this one while the payload was computed
+                if self._track_stop_event.is_set():
+                    self.log.info("Track superseded, payload not sent")
+                    return
+                # TCS answers 503 (busy) until it is idle after the abort. Retry only
+                # while the lead stays >= TRACK_MIN_SEND_LEAD; a later retry would be
+                # rejected as starting too soon anyway.
+                lead_send = payload["start_time"] - time.time()
+                response = self._scan_pattern_with_retry(
+                    payload, busy_timeout=max(lead_send - TRACK_MIN_SEND_LEAD, 0.0),
+                    retry_interval=0.3
+                )
+                if response is None:
+                    self.log.info("Track superseded while TCS was busy, payload not sent")
+                    return
+                lead_done = payload["start_time"] - time.time()
+                self.log.info(
+                    f"start_time lead: {lead_send:.3f} s before send, "
+                    f"{lead_done:.3f} s after response (TCS needs >= 9.8 s)"
+                )
+                if response.status_code == 503 and time.monotonic() < resend_deadline:
+                    # after a slew: TCS still finishing the move-to
+                    self.log.warning(
+                        "TCS still busy after the slew: recomputing path and resending"
+                    )
+                    payload = build_payload()
+                    continue
+                break
+
             body = self._response_body(response)
             if response.status_code != 200 or body.get("status") != "ok":
                 self.log.error(
@@ -1393,10 +1416,9 @@ class KOSMA_translator:
         # after the slew, has started (a failure later still sets tel_error).
         self._return_cookie(cookie, np.inf)
 
-        # Arrived = stopped close to the target. Close: within the same limit as
-        # for starting a path without a slew (robust against the pointing
-        # correction); stopped: TCS finishes move-to at the same speed tolerance,
-        # so the path will not be rejected as busy.
+        # Arrived = stopped close to the target. TCS uses a tighter position
+        # tolerance (against the ACU commanded position), so it may still be
+        # finishing the move-to: _send_track then resends the path.
         t0 = time.monotonic()
         while True:
             # interruptible: stop waiting as soon as a newer track arrives
@@ -1405,7 +1427,7 @@ class KOSMA_translator:
                 self.log.info("Track superseded during slew")
                 return False
             cur_az, cur_el, vel_az, vel_el = self._acu_position()
-            if (max(abs(az - cur_az), abs(el - cur_el)) < SLEW_BEFORE_PATH_MIN_DIST
+            if (max(abs(az - cur_az), abs(el - cur_el)) < SLEW_ARRIVAL_TOLERANCE
                     and abs(vel_az) < SLEW_SPEED_TOLERANCE
                     and abs(vel_el) < SLEW_SPEED_TOLERANCE):
                 self.slew_in_progress = False
