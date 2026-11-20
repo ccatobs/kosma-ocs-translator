@@ -526,12 +526,19 @@ class KOSMA_translator:
         self.tel_return_cookie = 0
         self.old_tel_return_cookie = 0
         self.next_tel_return_cookie = 0
-        # cookie of an accepted path that has not started yet; published as
-        # tel_return_cookie only once the ACU is executing the new path
-        self.pending_tel_return_cookie = None
-        # [sec] after path start_time before the cookie is returned, so that the
-        # ACU commanded position has switched to the new path
-        self.cookie_start_margin = 1.0
+        # The cookie is returned as soon as TCS has accepted the command, but
+        # tel_on_track is "N" until the ACU executes it: before the path starts, the
+        # telescope is still on the previous target and would give a stale "Y".
+        # [unix sec] tel_on_track is "N" for ACU status times before this, i.e. the
+        # path start_time (inf while slewing to the start of a path not sent yet).
+        # No margin: the ACU and this host are NTP synchronized, and settling onto
+        # the path is handled by tel_was_on_track.
+        self.on_track_not_before = -np.inf
+        self._logged_on_track_not_before = -np.inf   # log "path started" once
+        # True once tel_on_track was "Y" for the current cookie. tel_lost_track is
+        # set only after that, so the time the telescope needs to settle onto a
+        # new path is not reported as lost track.
+        self.tel_was_on_track = False
         # [sec] length of a path sent to TCS (and of the move-to bookkeeping payload)
         self.track_duration = 600
         # [sec] minimum remaining time of the last path to keep it for a new obs2tel
@@ -724,18 +731,16 @@ class KOSMA_translator:
         else:
             t_rel = status_time.unix - self.last_payload["start_time"]
 
-        # Return the new cookie only once the ACU is executing the new path
-        if self.pending_tel_return_cookie is not None and t_rel >= self.cookie_start_margin:
+        # Only the track thread sets on_track_not_before; read it once here
+        on_track_not_before = self.on_track_not_before
+        path_started = status_time.unix >= on_track_not_before
+        if (path_started and np.isfinite(on_track_not_before)
+                and on_track_not_before != self._logged_on_track_not_before):
+            self._logged_on_track_not_before = on_track_not_before
             self.log.info(
                 f"path started (t_rel={t_rel:.2f} s), "
-                f"returning cookie {self.pending_tel_return_cookie}"
+                f"tel_on_track evaluated for cookie {self.tel_return_cookie}"
             )
-            self.old_tel_return_cookie = self.tel_return_cookie
-            self.tel_return_cookie = self.pending_tel_return_cookie
-            self.pending_tel_return_cookie = None
-            self.tel_lost_track = "N"    # initialize for the new cookie
-            self.tel_error = 0
-            self.tel_path_failed = False
 
         # values set elsewhere
         input_dict["tel_return_cookie"] = self.tel_return_cookie
@@ -745,20 +750,19 @@ class KOSMA_translator:
         current_azi = response["Azimuth current position"]
         current_ele = response["Elevation current position"]
 
+        # The ACU "commanded position" is not used.
         # cmd_azi = response["Azimuth commanded position"]
         # cmd_ele = response["Elevation commanded position"]
         # acu_azm_del = current_azi - cmd_azi
         # acu_elv_del = current_ele - cmd_ele
 
-        # actdiff = 3600 * ((acu_azm_del*np.cos(np.deg2rad(cmd_ele)))**2 + acu_elv_del**2) ** 0.5
-
+        # Use delta reported by ACU instead
         # KOSMA expects the positions of a perfect telescope: with refraction,
         # without the pointing model. The ACU current position is the encoder position:
         #   current = path position + total pointing correction + tracking error
         #   tel_*_cmd = path position (interpolated from the last payload), which
         #               includes the refraction applied by the translator
         #   tel_*_act = current - total pointing correction
-        # The ACU "commanded position" is not used.
         del_tot_azm, del_tot_elv = _total_pointing_correction(response_pointing)
         input_dict["tel_azm_act"] = current_azi - del_tot_azm
         input_dict["tel_elv_act"] = current_ele - del_tot_elv
@@ -786,11 +790,17 @@ class KOSMA_translator:
         if self.tel_path_failed:
             # the ACU is not executing the commanded path
             input_dict["tel_on_track"] = "N"
+        elif not path_started:
+            # still on the previous target (or slewing): not on track, not lost
+            input_dict["tel_on_track"] = "N"
         elif actdiff < self.obs_tolerance:
             input_dict["tel_on_track"] = "Y"
+            self.tel_was_on_track = True
         else:
             input_dict["tel_on_track"] = "N"
-            self.tel_lost_track = "Y"
+            if self.tel_was_on_track:
+                # was on track for this cookie and left it; not while settling
+                self.tel_lost_track = "Y"
         input_dict["tel_lost_track"] = self.tel_lost_track
 
         # velocity
@@ -1094,7 +1104,7 @@ class KOSMA_translator:
                                [float(track_duration), cmd_az, cmd_el, 0.0, 0.0]],
                 }
                 self.last_obs2tel = self.obs2tel
-                self.pending_tel_return_cookie = cookie
+                self._return_cookie(cookie, self.last_payload["start_time"])
             return
 
         # non-HORIZON source: make into an astropy coordinate object,
@@ -1313,9 +1323,9 @@ class KOSMA_translator:
                 # "type" only for bookkeeping, not part of the payload sent to TCS
                 self.last_payload = {**payload, "type": "path"}
                 self.last_obs2tel = self.obs2tel
-                # Do not return the cookie yet: until start_time the ACU still holds
-                # the previous target and tel_on_track would be a stale "Y".
-                self.pending_tel_return_cookie = cookie
+                # Until start_time the ACU still holds the previous target:
+                # tel_on_track stays "N" until then.
+                self._return_cookie(cookie, payload["start_time"])
         except Exception as e:
             self.log.error(f"Track error: {e}")
             self._fail_path(cookie, 1)
@@ -1372,6 +1382,10 @@ class KOSMA_translator:
             return False
         self.slew_in_progress = True
         self.log.info(f"slew move_to accepted: {body}")
+        # The command is accepted: return the cookie now, so that the observer is
+        # not blocked for the slew. tel_on_track stays "N" until the path, sent
+        # after the slew, has started (a failure later still sets tel_error).
+        self._return_cookie(cookie, np.inf)
 
         # Arrived = stopped close to the target. Close: within the same limit as
         # for starting a path without a slew (robust against the pointing
@@ -1459,10 +1473,31 @@ class KOSMA_translator:
             return
         self.tel_error = error
         self.tel_path_failed = True
-        self.pending_tel_return_cookie = None
-        self.old_tel_return_cookie = self.tel_return_cookie
-        self.tel_return_cookie = cookie
+        # the cookie may already be returned (failure after an accepted slew)
+        if cookie != self.tel_return_cookie:
+            self.old_tel_return_cookie = self.tel_return_cookie
+            self.tel_return_cookie = cookie
         self.tel_lost_track = "N"
+        self.tel_was_on_track = False
+
+    def _return_cookie(self, cookie, on_track_not_before):
+        """
+        The command for cookie is accepted by TCS: return the cookie, with
+        tel_on_track "N" for ACU status times before on_track_not_before [unix sec].
+        """
+        if self._track_stop_event.is_set():
+            # superseded by a newer obs2tel; its own thread returns the new cookie
+            self.log.info(f"Track for cookie {cookie} superseded, cookie not returned")
+            return
+        self.log.info(f"returning cookie {cookie}")
+        if cookie != self.tel_return_cookie:
+            self.old_tel_return_cookie = self.tel_return_cookie
+            self.tel_return_cookie = cookie
+        self.on_track_not_before = on_track_not_before
+        self.tel_lost_track = "N"    # initialize for the new cookie
+        self.tel_was_on_track = False
+        self.tel_error = 0
+        self.tel_path_failed = False
 
     # obs2tel variables that define the commanded path; obs2tel files that differ
     # only in other variables (e.g. the cookie) command the same path
@@ -1500,15 +1535,13 @@ class KOSMA_translator:
 
         cookie = self.next_tel_return_cookie
         self.last_obs2tel = self.obs2tel
-        if self.pending_tel_return_cookie is not None:
-            # path not started yet: return the new cookie instead, once it started
-            self.log.info(f"same target, cookie {cookie} replaces pending cookie")
-            self.pending_tel_return_cookie = cookie
-        else:
-            self.log.info(f"same target, last path kept, returning cookie {cookie}")
-            self.old_tel_return_cookie = self.tel_return_cookie
-            self.tel_return_cookie = cookie
-            self.tel_lost_track = "N"    # initialize for the new cookie
+        # on_track_not_before is kept: if the path has not started yet,
+        # tel_on_track stays "N" until it has
+        self.log.info(f"same target, last path kept, returning cookie {cookie}")
+        self.old_tel_return_cookie = self.tel_return_cookie
+        self.tel_return_cookie = cookie
+        self.tel_lost_track = "N"    # initialize for the new cookie
+        self.tel_was_on_track = False
         return True
 
     def dump_spem_to_kosma(self):
@@ -1838,9 +1871,7 @@ def main():
             #)
             continue
         translator.read_obs2tel_file()
-        if translator.next_tel_return_cookie in (
-            translator.tel_return_cookie, translator.pending_tel_return_cookie
-        ):
+        if translator.next_tel_return_cookie == translator.tel_return_cookie:
             translator.log.info(
                 f"obs2tel cookie has not changed ({translator.next_tel_return_cookie}), no action taken"
             )
@@ -1860,59 +1891,3 @@ def main():
 if __name__ == "__main__":
     main()
 
-# TODO
-# check if obs2tel has changed
-# read obs2tel file
-# move telescope to commanded position
-# if obs2tel had changed, abort previous command and send new one
-
-
-"""
-tel_return_cookie = kio_files["KOSMA_obs2tel.set"]["obs_cookie"]
-obs_tolerance = kio_files["KOSMA_obs2tel.set"]["obs_tolerance"]
-obs_tel_info_update_time = kio_files["KOSMA_obs2tel.set"]["obs_tel_info_update_time"]
-
-
-# commanded position
-cmd_lam = kio_files["KOSMA_obs2tel.set"]["obs_lam_on"]
-cmd_bet = kio_files["KOSMA_obs2tel.set"]["obs_bet_on"]
-cmd_coord_sys_on = kio_files["KOSMA_obs2tel.set"]["obs_coord_sys_on"]
-
-#
-coord_sys_translator = {
-    "J2000": "icrs",
-    "B1950": "fk4",
-    "GALACTIC": "galactic",
-    "ECLIPTIC": "geocentrictrueecliptic",
-    "HORIZON": "altaz",
-}
-
-if cmd_coord_sys_on not in coord_sys_translator.keys():
-    logger.error("coordinate system {0} not recognized".format(cmd_coord_sys_on))
-    raise SystemExit
-
-if coord_sys_translator[cmd_coord_sys_on].lower() not in ocs.supported_coord_systems:
-    logger.info("coordinate system not {0} supported by OCS".format(cmd_coord_sys_on))
-    logger.info("following systems are supported:   ")
-    logger.info(ocs.supported_coord_systems)
-    raise SystemExit
-
-star_position = SkyCoord(
-    cmd_lam, cmd_bet, unit=(u.deg, u.deg), frame=coord_sys_translator[cmd_coord_sys_on]
-)
-logger.info(
-    "tracking to {0} {1} in {2} frame".format(cmd_lam, cmd_bet, cmd_coord_sys_on)
-)
-#
-if coord_sys_translator[cmd_coord_sys_on].lower() == "horizon":
-    ocs.move_to(azimuth=cmd_lam, elevation=cmd_bet)
-elif coord_sys_translator[cmd_coord_sys_on].lower() in "icrs":
-    ocs.track(star_position)
-
-# wait for telescope to move and get to position
-time.sleep(1)
-response = ocs.get_status()
-current_azi = response["Azimuth current position"]
-current_ele = response["Elevation current position"]
-print("current pos. az: {0:3.0f} ele: {1:3.0f}".format(current_azi, current_ele))
-"""

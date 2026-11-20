@@ -95,12 +95,14 @@ CASES = [
         checks={"tel_on_track": "N"},
     ),
     Case(
-        id="off_track_sets_tel_lost_track",
+        # never on track for this cookie yet: settling, not lost
+        # (lost after being on track: test_lost_track_only_after_on_track)
+        id="off_track_before_on_track_not_lost",
         status={
             "Azimuth current position": 182.0,
             "Elevation current position": 45.0,
         },
-        checks={"tel_lost_track": "Y"},
+        checks={"tel_lost_track": "N"},
     ),
     Case(
         id="tight_tolerance_small_error_off_track",
@@ -333,33 +335,89 @@ def test_tel_vel_converted_to_arcsec_per_sec(translator_factory, vel_azi, vel_el
 
 
 # ---------------------------------------------------------------------------
-# Dedicated test: cookie of an accepted path is returned only after it started
+# Dedicated test: cookie of an accepted path is returned at once, but
+# tel_on_track stays "N" until the path has started
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("t_rel,returned", [
-    pytest.param(-10.0, False, id="before_start"),
-    pytest.param(  0.5, False, id="within_margin"),
-    pytest.param( 30.0, True,  id="after_start"),
+@pytest.mark.parametrize("t_rel,on_track", [
+    pytest.param(-10.0, "N", id="before_start"),
+    pytest.param( -0.5, "N", id="just_before_start"),
+    pytest.param(  0.5, "Y", id="just_after_start"),
+    pytest.param( 30.0, "Y", id="after_start"),
 ])
-def test_pending_cookie_returned_after_path_start(translator_factory, mock_ocs, t_rel, returned):
-    t = translator_factory()
+def test_on_track_held_until_path_start(translator_factory, mock_ocs, t_rel, on_track):
+    t = translator_factory()   # actual == commanded: on track once started
     status = mock_ocs.get_status.return_value
     status_time = _get_time_from_acu_format(status["Time"], status["Year"])
     t.last_payload["start_time"] = status_time.unix - t_rel
     t.tel_return_cookie = 1
-    t.pending_tel_return_cookie = 2
     t.tel_lost_track = "Y"
+    t._return_cookie(2, t.last_payload["start_time"])
 
     result, _ = t.set_tel2obs_dict()
 
-    if returned:
-        assert result["tel_return_cookie"] == 2
-        assert t.pending_tel_return_cookie is None
-        assert t.old_tel_return_cookie == 1
-        assert result["tel_lost_track"] == "N"
-    else:
-        assert result["tel_return_cookie"] == 1
-        assert t.pending_tel_return_cookie == 2
+    assert result["tel_return_cookie"] == 2
+    assert t.old_tel_return_cookie == 1
+    assert result["tel_on_track"] == on_track
+    # not started yet is not lost track
+    assert result["tel_lost_track"] == "N"
+
+
+def test_lost_track_only_after_on_track(translator_factory, mock_ocs):
+    t = translator_factory()   # path started 30 s ago, static at az=180, el=45
+    status = mock_ocs.get_status.return_value
+    t.tel_return_cookie = 1
+    t._return_cookie(2, t.last_payload["start_time"])
+
+    # settling: off track, but never on track yet -> not lost
+    status["Azimuth current position"] = 182.0
+    result, _ = t.set_tel2obs_dict()
+    assert (result["tel_on_track"], result["tel_lost_track"]) == ("N", "N")
+
+    # arrived
+    status["Azimuth current position"] = 180.0
+    result, _ = t.set_tel2obs_dict()
+    assert (result["tel_on_track"], result["tel_lost_track"]) == ("Y", "N")
+
+    # left the track: lost, and it stays lost when back on track
+    status["Azimuth current position"] = 182.0
+    result, _ = t.set_tel2obs_dict()
+    assert (result["tel_on_track"], result["tel_lost_track"]) == ("N", "Y")
+    status["Azimuth current position"] = 180.0
+    result, _ = t.set_tel2obs_dict()
+    assert (result["tel_on_track"], result["tel_lost_track"]) == ("Y", "Y")
+
+    # a new cookie starts settling afresh
+    t._return_cookie(3, t.last_payload["start_time"])
+    status["Azimuth current position"] = 182.0
+    result, _ = t.set_tel2obs_dict()
+    assert (result["tel_on_track"], result["tel_lost_track"]) == ("N", "N")
+
+
+def test_on_track_held_while_slewing(translator_factory):
+    t = translator_factory()
+    t.tel_return_cookie = 1
+    t._return_cookie(2, np.inf)   # slew accepted, path not sent yet
+
+    result, _ = t.set_tel2obs_dict()
+
+    assert result["tel_return_cookie"] == 2
+    assert result["tel_on_track"] == "N"
+    assert result["tel_lost_track"] == "N"
+
+
+def test_failure_after_returned_cookie_sets_error(translator_factory):
+    t = translator_factory()
+    t.tel_return_cookie = 1
+    t._return_cookie(2, np.inf)   # slew accepted
+    t._fail_path(2, 503)          # path rejected after the slew
+
+    result, _ = t.set_tel2obs_dict()
+
+    assert result["tel_return_cookie"] == 2
+    assert t.old_tel_return_cookie == 1
+    assert result["tel_error"] == 503
+    assert result["tel_on_track"] == "N"
 
 
 def test_failed_path_returns_cookie_with_error(translator_factory):
@@ -379,7 +437,7 @@ def test_failed_path_returns_cookie_with_error(translator_factory):
 def test_started_path_clears_previous_failure(translator_factory):
     t = translator_factory()  # status time is 30 s after the payload start
     t._fail_path(2, 1)
-    t.pending_tel_return_cookie = 3
+    t._return_cookie(3, t.last_payload["start_time"])
 
     result, _ = t.set_tel2obs_dict()
 
@@ -538,12 +596,11 @@ def test_move_to_response_check(translator_factory, mock_ocs, status_code, body,
     assert mock_ocs.move_to.called
     if accepted:
         assert t.last_payload["type"] == "move_to"
-        assert t.pending_tel_return_cookie == 2
-        assert t.tel_return_cookie == 1
+        assert t.tel_return_cookie == 2
+        assert t.on_track_not_before == pytest.approx(t.last_payload["start_time"])
         assert t.tel_path_failed is False
     else:
         assert t.last_payload["type"] == "path"   # previous one kept
-        assert t.pending_tel_return_cookie is None
         assert t.tel_return_cookie == 2
         assert t.tel_path_failed is True
         assert t.tel_error == 503
@@ -608,8 +665,8 @@ def test_reuse_last_track(translator_factory, changes, start_offset, pending, re
     t = translator_factory()   # payload is 600 s long, reuse needs >= 300 s left
     t.last_payload["start_time"] = time.time() + start_offset
     t.tel_return_cookie = 1
-    if pending:
-        t.pending_tel_return_cookie = 2
+    hold = time.time() + 5.0 if pending else -np.inf   # path not started yet
+    t.on_track_not_before = hold
     t.tel_lost_track = "Y"
     _new_obs2tel(t, 3, **changes)
 
@@ -617,13 +674,12 @@ def test_reuse_last_track(translator_factory, changes, start_offset, pending, re
 
     if not reused:
         assert t.tel_return_cookie == 1
-    elif pending:
-        assert t.pending_tel_return_cookie == 3
-        assert t.tel_return_cookie == 1
     else:
         assert t.tel_return_cookie == 3
         assert t.old_tel_return_cookie == 1
         assert t.tel_lost_track == "N"
+    # a not yet started path keeps holding tel_on_track at "N"
+    assert t.on_track_not_before == hold
 
 
 def test_reuse_last_track_not_after_failure(translator_factory):
@@ -711,7 +767,7 @@ def test_no_slew_if_close_to_path_start(slew_translator, mock_ocs, monkeypatch):
 
     assert not mock_ocs.move_to.called
     assert mock_ocs.scan_pattern.call_count == 1
-    assert t.pending_tel_return_cookie == 2
+    assert t.tel_return_cookie == 2
 
 
 def test_slew_before_path_if_far(slew_translator, mock_ocs):
@@ -727,7 +783,9 @@ def test_slew_before_path_if_far(slew_translator, mock_ocs):
     assert sent["points"][0][2] == pytest.approx(target["azel"][1], abs=0.1)
     assert t.slew_in_progress is False
     assert t.last_payload["type"] == "path"
-    assert t.pending_tel_return_cookie == 2
+    assert t.tel_return_cookie == 2
+    # held "N" until the path sent after the slew starts
+    assert t.on_track_not_before == pytest.approx(sent["start_time"])
     assert t.tel_path_failed is False
 
 
