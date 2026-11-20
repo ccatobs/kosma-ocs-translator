@@ -254,6 +254,34 @@ def test_tel_angle_focal_plane_j2000_matches_reference(translator_factory, mock_
 # Dedicated test: tel_angle_focal_plane equals parallactic angle for J2000
 # ---------------------------------------------------------------------------
 
+@pytest.mark.parametrize("az_nom,el_nom", [
+    pytest.param(180.0, 45.0, id="south_midsky"),   # over-the-top az 0
+    pytest.param( 30.0, 49.0, id="northeast"),      # over-the-top az 210, el 131
+    pytest.param(300.0, 80.0, id="near_zenith"),
+])
+def test_tel_angle_focal_plane_extended_range(translator_factory, az_nom, el_nom):
+    """
+    In the extended range, tel_*_cmd is the over-the-top position (el > 90).
+    tel_angle_focal_plane is computed at the nominal sky position, as astra does.
+    """
+    def angle(az, el):
+        t = translator_factory(
+            obs2tel_overrides={"obs_coord_sys_del": "J2000"},
+            status_overrides={
+                "Azimuth commanded position": az,
+                "Elevation commanded position": el,
+                "Azimuth current position": az,
+                "Elevation current position": el,
+            },
+        )
+        result, _ = t.set_tel2obs_dict()
+        return result["tel_angle_focal_plane"]
+
+    nominal = angle(az_nom, el_nom)
+    overtop = angle((az_nom + 180.0) % 360.0, 180.0 - el_nom)
+    assert overtop == pytest.approx(nominal, abs=1e-6)
+
+
 @pytest.mark.parametrize("az_cmd,el_cmd", [
     pytest.param(180.0, 45.0, id="south_midsky"),
     pytest.param( 90.0, 30.0, id="east_low"),    # rising:  HA < 0 → q < 0

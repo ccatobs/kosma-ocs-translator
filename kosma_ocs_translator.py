@@ -827,9 +827,15 @@ class KOSMA_translator:
 
             altaz_frame = self._altaz_frame(status_time)
 
-            pos = SkyCoord(
-                az=input_dict["tel_azm_cmd"], alt=input_dict["tel_elv_cmd"],
-                unit='deg', frame=altaz_frame)
+            # In the extended range tel_*_cmd is the over-the-top position
+            # (elevation > 90 deg). The angle is computed at the nominal sky
+            # position, as astra computes a_parang before its extended-range
+            # conversion (astra_track.c).
+            azm_cmd, elv_cmd = input_dict["tel_azm_cmd"], input_dict["tel_elv_cmd"]
+            if elv_cmd > 90.0:
+                azm_cmd, elv_cmd = (azm_cmd + 180.0) % 360.0, 180.0 - elv_cmd
+
+            pos = SkyCoord(az=azm_cmd, alt=elv_cmd, unit='deg', frame=altaz_frame)
 
             epsilon = 1e-3  # about 4 arcsec, small angle approximation is sufficient
             north = _apply_offset(
