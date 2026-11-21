@@ -655,6 +655,12 @@ class TestMain:
         assert updated["ccatacu_model_date"] != MODEL_DATE
         assert (tmp_path / "update-spem-acu.log").exists()
 
+        # KOSMA_point.status refreshed from KOSMA_point.in (same lines after the header)
+        status = (tmp_path / usa.KOSMA_POINT_STATUS_FILE).read_text().splitlines(keepends=True)
+        point_in = (tmp_path / usa.KOSMA_POINT_IN_FILE).read_text()
+        assert "File update time stamp" in status[0]
+        assert "".join(status[1:]) == point_in
+
     def test_only_changed_parameters_sent_to_acu(self, tmp_path, monkeypatch, acu_spem):
         apoint = self.apoint_reproducing_current()
         apoint[4] = 2.0   # only AW changes
@@ -721,3 +727,4 @@ class TestMain:
         with pytest.raises(SystemExit):
             self.run_main(tmp_path, monkeypatch, acu_spem, replies=["n"])
         assert usa.get_kosma_spem()["ccatacu_model_date"] == MODEL_DATE
+        assert not (tmp_path / usa.KOSMA_POINT_STATUS_FILE).exists()

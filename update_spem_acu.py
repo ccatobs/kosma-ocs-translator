@@ -14,6 +14,9 @@ from kosma_ocs_lib import (
     setup_logging,
     setup_ocs,
     KOSMA_SPEM_FILE,
+    KOSMA_POINT_IN_FILE,
+    KOSMA_POINT_STATUS_FILE,
+    copy_point_in_to_status,
     IGNORE_KEYS_ACU,
     IGNORE_KEYS_KOSMA,
     ACU_READONLY_KEYS,
@@ -322,7 +325,7 @@ def print_spem(spem):
 
 def parse_arguments():
     kosma_readwrite_dir = os.environ.get("WRITE_DIR", "/net/KOSMA_file_io/ReadWrite/")
-    def_point_in = f"{kosma_readwrite_dir}/KOSMA_point.in"
+    def_point_in = f"{kosma_readwrite_dir}/{KOSMA_POINT_IN_FILE}"
 
     def_cpath = "../CCAT/observatory-control-system/tls"
 
@@ -409,6 +412,24 @@ def main():
     # so that KOSMA never holds values the ACU did not apply
     updated_spem_kosma = put_kosma_spem(updated_spem_acu, logger=log)
     print_spem(updated_spem_kosma)
+
+    # KOSMA_point.in has been edited by hand for this update: refresh
+    # KOSMA_point.status as well, so that kosma_ocs_translator (which copies it
+    # only at its start) does not have to be restarted
+    kosma_readwrite_dir = os.environ.get("WRITE_DIR", "/net/KOSMA_file_io/ReadWrite/")
+    point_in_kosma = os.path.join(kosma_readwrite_dir, KOSMA_POINT_IN_FILE)
+    if os.path.realpath(args.point_in) != os.path.realpath(point_in_kosma):
+        log.warning(
+            f"pointing model read from {args.point_in}, but {KOSMA_POINT_STATUS_FILE} "
+            f"is copied from {point_in_kosma}"
+        )
+    try:
+        copy_point_in_to_status(logger=log)
+    except Exception as e:
+        log.error(
+            f"Failed to copy {KOSMA_POINT_IN_FILE} to {KOSMA_POINT_STATUS_FILE}: {e}. "
+            f"Restart kosma_ocs_translator after fixing it."
+        )
 
 
 if __name__ == "__main__":

@@ -20,6 +20,7 @@ except ImportError:
 from kosma_ocs_lib import (
     DEFAULT_LOGGER_NAME,
     KOSMA_SPEM_FILE,
+    copy_point_in_to_status,
     setup_logging,
     setup_ocs,
     ImportKOSMAReadWriteIntoDictionary,
@@ -497,6 +498,23 @@ class KOSMA_translator:
             return None
         self.log.info(f"SPEM parameters in {KOSMA_SPEM_FILE}: {spem_kosma}")
         return spem_kosma
+
+    def copy_point_status(self):
+        """
+        Copy the astra pointing model KOSMA_point.in to KOSMA_point.status (as
+        astra does at its start). Failures are logged but do not stop the translator.
+
+        Returns
+        -------
+        bool
+            True if KOSMA_point.status was written
+        """
+        try:
+            copy_point_in_to_status(logger=self.log)
+        except Exception as e:
+            self.log.error(f"Failed to copy KOSMA_point.in to KOSMA_point.status: {e}")
+            return False
+        return True
 
     # =======================================================================
     # obs2tel input (main thread)
@@ -1776,6 +1794,8 @@ def main():
     )
     # KOSMA needs the SPEM parameters currently used by the ACU
     translator.dump_spem_to_kosma()
+    # and the astra pointing model in KOSMA_point.status
+    translator.copy_point_status()
     background_thread = threading.Thread(
         target=run_write_tel2obs_file_in_background, args=(translator,)
     )

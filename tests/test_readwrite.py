@@ -1,4 +1,4 @@
-"""Unit tests for ImportKOSMAReadWriteIntoDictionary and write_atomic."""
+"""Unit tests for ImportKOSMAReadWriteIntoDictionary, write_atomic and copy_point_in_to_status."""
 import os
 import stat
 import time
@@ -163,3 +163,61 @@ def test_write_tel2obs_file_is_atomic(translator_factory, tmp_path):
     assert sorted(os.listdir(tmp_path)) == [
         "KOSMA_ccdpos.sim", "KOSMA_obs2tel.set", "KOSMA_tel2obs.set",
     ]
+
+
+class TestCopyPointInToStatus:
+
+    HEADER_IN = "02-Dec-2001  19:20:32  1007320832.947312   File update time stamp   ! \n"
+    BODY = (
+        "CCAT_ASYMMETRIC model_type ! identifier string for pointing model type\n"
+        "2025-06-17T00:00:00Z model_date ! creation date of pointing model\n"
+        "1.500  a_point[0]   ! coefficient\n"
+        "-2.25  a_point[1]   ! coefficient\n"
+        "CCAT: -CA   KOSMA: C   string_a_point[1]   ! text with blanks\n"
+    )
+    POINT_IN = HEADER_IN + BODY
+
+    @pytest.fixture
+    def kosma_dir(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("WRITE_DIR", str(tmp_path))
+        return tmp_path
+
+    def test_lines_copied_unchanged(self, kosma_dir):
+        (kosma_dir / "KOSMA_point.in").write_text(self.POINT_IN)
+        kosma_ocs_lib.copy_point_in_to_status()
+        lines = (kosma_dir / "KOSMA_point.status").read_text().splitlines(keepends=True)
+        # new time stamp header, then the body of KOSMA_point.in as it is
+        assert "File update time stamp" in lines[0]
+        assert "ccat_translator" in lines[0]
+        assert "".join(lines[1:]) == self.BODY
+
+    def test_nothing_added(self, kosma_dir):
+        # variables missing in KOSMA_point.in are not filled in
+        (kosma_dir / "KOSMA_point.in").write_text(self.POINT_IN)
+        kosma_ocs_lib.copy_point_in_to_status()
+        status = (kosma_dir / "KOSMA_point.status").read_text()
+        assert "string_a_point[0]" not in status
+        assert "a_point[2]" not in status
+
+    def test_status_readable_by_kosma_file_io_reader(self, kosma_dir):
+        (kosma_dir / "KOSMA_point.in").write_text(self.POINT_IN)
+        kosma_ocs_lib.copy_point_in_to_status()
+        d = ImportKOSMAReadWriteIntoDictionary(files=["KOSMA_point.status"])
+        d = d["KOSMA_point.status"]
+        assert d["a_point[0]"] == pytest.approx(1.5)
+        assert d["a_point[1]"] == pytest.approx(-2.25)
+        assert d["model_type"] == "CCAT_ASYMMETRIC"
+
+    def test_missing_file_raises(self, kosma_dir):
+        with pytest.raises(FileNotFoundError):
+            kosma_ocs_lib.copy_point_in_to_status()
+        assert not (kosma_dir / "KOSMA_point.status").exists()
+
+
+def test_translator_copy_point_status(translator_factory, tmp_path):
+    t = translator_factory()
+    # no KOSMA_point.in: logged, not raised
+    assert t.copy_point_status() is False
+    (tmp_path / "KOSMA_point.in").write_text(TestCopyPointInToStatus.POINT_IN)
+    assert t.copy_point_status() is True
+    assert (tmp_path / "KOSMA_point.status").exists()

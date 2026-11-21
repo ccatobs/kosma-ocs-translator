@@ -7,6 +7,7 @@ Sections
 - OCS access: connection and credentials (setup_ocs)
 - KOSMA_file_io: reading and writing files in the KOSMA_file_io ReadWrite directory
 - SPEM: ACU SPEM parameters stored in KOSMA_file_io
+- Astra pointing model: KOSMA_point.in -> KOSMA_point.status
 """
 
 import contextlib
@@ -15,8 +16,10 @@ import glob
 import logging
 import os
 import re
+import socket
 import stat
 import subprocess
+import time
 
 from astropy import units as u
 from ocs import observatory_control_system
@@ -59,6 +62,14 @@ ACU_READONLY_KEYS = {"LEL velocity": "ccatacu_velelvmax"}   # [deg/s]
 # that it starts with "CCAT-ACU" (first 8 characters). No blanks: KOSMA_file_io reads
 # the value with %s and Kset_point gets it as one argument.
 CCAT_ACU_MODEL_TYPE = "CCAT-ACU-VA-Error-Compensations-document-Release-1.4"
+
+# ---------------------------------------------------------------------------
+# KOSMA_file_io: astra pointing model
+# ---------------------------------------------------------------------------
+# Astra pointing model, edited by hand, and its status copy read by astra_track,
+# astra_point and starpoint (Astra_config.acfg: written by astra or CCAT_TRANSLATOR)
+KOSMA_POINT_IN_FILE = "KOSMA_point.in"
+KOSMA_POINT_STATUS_FILE = "KOSMA_point.status"
 
 
 # ===========================================================================
@@ -294,6 +305,7 @@ def read_first_column(path, names):
     return values
 
 
+
 def write_atomic(path, text):
     """
     Replace the file path with text, so that a reader sees either the complete
@@ -436,3 +448,38 @@ def put_kosma_spem(spem, logger=None):
     )
 
     return get_kosma_spem()
+
+
+# ===========================================================================
+# Astra pointing model
+# ===========================================================================
+
+def copy_point_in_to_status(logger=None):
+    """
+    Copy the astra pointing model KOSMA_point.in to KOSMA_point.status, as astra
+    does at its start (astra_fileio.c). All lines are copied unchanged, only the
+    "File update time stamp" header line is replaced by a new one.
+
+    Parameters
+    ----------
+    logger : logging.Logger, optional
+        Logger to use. Defaults to the DEFAULT_LOGGER_NAME logger.
+
+    Raises
+    ------
+    FileNotFoundError
+        KOSMA_point.in does not exist (KOSMA_point.status is not touched)
+    """
+    log = logger if logger is not None else logging.getLogger(DEFAULT_LOGGER_NAME)
+    kosma_readwrite_dir = os.environ.get("WRITE_DIR", "/net/KOSMA_file_io/ReadWrite/")
+    src = os.path.join(kosma_readwrite_dir, KOSMA_POINT_IN_FILE)
+    dst = os.path.join(kosma_readwrite_dir, KOSMA_POINT_STATUS_FILE)
+
+    with open(src) as f:
+        lines = [line for line in f if "File update time stamp" not in line]
+    header = (
+        f"{time.strftime('%d-%b-%Y  %H:%M:%S')}  {time.time()}   File update time stamp"
+        f"   ! ccat_translator ({socket.gethostname()}:{os.getpid()})\n"
+    )
+    write_atomic(dst, header + "".join(lines))
+    log.info(f"{src} copied to {dst}")
