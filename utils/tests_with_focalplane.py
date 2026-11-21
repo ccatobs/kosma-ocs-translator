@@ -12,7 +12,8 @@ Author: Generated conversion from legacy control code
 """
 
 from dataclasses import dataclass
-from kosma_ocs_translator import KOSMA_translator, ImportKOSMAReadWriteIntoDictionary
+from kosma_ocs_translator import KOSMA_translator
+from kosma_ocs_lib import ImportKOSMAReadWriteIntoDictionary
 import math
 import subprocess
 import os

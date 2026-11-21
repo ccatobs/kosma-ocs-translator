@@ -11,6 +11,7 @@ import pytest
 # update_spem_acu.py is a script at the repository root, not an installed module
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import kosma_ocs_lib
 import update_spem_acu as usa
 
 
@@ -187,7 +188,7 @@ class TestSetupLogging:
 
     def test_file_only_messages_not_on_console(self, tmp_path, monkeypatch, capsys):
         monkeypatch.chdir(tmp_path)
-        log = usa.setup_logging(logging.INFO)
+        log = usa.setup_logging(usa.LOGGER_NAME, usa.LOG_FILE, logging.INFO)
         log.info("to both")
         log.info("to file only", extra=usa.FILE_ONLY)
         for handler in log.handlers:
@@ -269,14 +270,14 @@ class TestPutKosmaSpem:
 
     def test_commands_use_correct_index(self, kosma_dir, monkeypatch):
         fake = FakeKsetPoint(kosma_dir)
-        monkeypatch.setattr(usa.subprocess, "run", fake)
+        monkeypatch.setattr(kosma_ocs_lib.subprocess, "run", fake)
         usa.put_kosma_spem(self.new_spem())
         for i, name in enumerate(ACU_NAMES):
             assert f"Kset_point ccatacu_point[{i}] {10.0 + i:.6f}" in fake.commands
 
     def test_model_date_is_set(self, kosma_dir, monkeypatch):
         fake = FakeKsetPoint(kosma_dir)
-        monkeypatch.setattr(usa.subprocess, "run", fake)
+        monkeypatch.setattr(kosma_ocs_lib.subprocess, "run", fake)
         usa.put_kosma_spem(self.new_spem())
         date_cmds = [c for c in fake.commands if "ccatacu_model_date" in c]
         assert len(date_cmds) == 1
@@ -285,8 +286,24 @@ class TestPutKosmaSpem:
             date_cmds[0],
         )
 
+    def test_model_type_is_set(self, kosma_dir, monkeypatch):
+        fake = FakeKsetPoint(kosma_dir)
+        monkeypatch.setattr(kosma_ocs_lib.subprocess, "run", fake)
+        usa.put_kosma_spem(self.new_spem())
+        type_cmds = [c for c in fake.commands if "ccatacu_model_type" in c]
+        assert type_cmds == [f"Kset_point ccatacu_model_type {kosma_ocs_lib.CCAT_ACU_MODEL_TYPE}"]
+        # file now holds the constant (first column, as read by KOSMA_file_io)
+        found = kosma_ocs_lib.read_first_column(
+            str(kosma_dir / usa.KOSMA_SPEM_FILE), ["ccatacu_model_type"])
+        assert found["ccatacu_model_type"] == kosma_ocs_lib.CCAT_ACU_MODEL_TYPE
+
+    def test_model_type_constant_format(self):
+        model_type = kosma_ocs_lib.CCAT_ACU_MODEL_TYPE
+        assert model_type[:8] == "CCAT-ACU"   # starpoint strncmp(..., "CCAT-ACU", 8)
+        assert not any(c.isspace() for c in model_type)
+
     def test_round_trip(self, kosma_dir, monkeypatch):
-        monkeypatch.setattr(usa.subprocess, "run", FakeKsetPoint(kosma_dir))
+        monkeypatch.setattr(kosma_ocs_lib.subprocess, "run", FakeKsetPoint(kosma_dir))
         new_spem = self.new_spem()
         updated = usa.put_kosma_spem(new_spem)
         for name in ACU_NAMES:
@@ -296,27 +313,27 @@ class TestPutKosmaSpem:
 
     def test_ignored_keys_are_skipped(self, kosma_dir, monkeypatch):
         fake = FakeKsetPoint(kosma_dir)
-        monkeypatch.setattr(usa.subprocess, "run", fake)
+        monkeypatch.setattr(kosma_ocs_lib.subprocess, "run", fake)
         spem = self.new_spem()
         spem.update({"Time": 1.0, "Year": 2026, "ccatacu_model_date": "old"})
         usa.put_kosma_spem(spem)
-        # one command per coefficient plus one for the date
-        assert len(fake.commands) == len(ACU_NAMES) + 1
+        # one command per coefficient plus model type and date
+        assert len(fake.commands) == len(ACU_NAMES) + 2
         assert not any("old" in c for c in fake.commands)
 
     def test_lel_velocity_written_to_velelvmax(self, kosma_dir, monkeypatch):
         fake = FakeKsetPoint(kosma_dir)
-        monkeypatch.setattr(usa.subprocess, "run", fake)
+        monkeypatch.setattr(kosma_ocs_lib.subprocess, "run", fake)
         spem = self.new_spem()
         spem["LEL velocity"] = 0.8
         updated = usa.put_kosma_spem(spem)
         assert "Kset_point ccatacu_velelvmax 0.800000" in fake.commands
-        assert len(fake.commands) == len(ACU_NAMES) + 2
+        assert len(fake.commands) == len(ACU_NAMES) + 3
         assert updated["LEL velocity"] == pytest.approx(0.8)
 
     def test_unknown_key_raises_before_any_command(self, kosma_dir, monkeypatch):
         fake = FakeKsetPoint(kosma_dir)
-        monkeypatch.setattr(usa.subprocess, "run", fake)
+        monkeypatch.setattr(kosma_ocs_lib.subprocess, "run", fake)
         spem = self.new_spem()
         spem["UNKNOWN"] = 1.0
         with pytest.raises(KeyError, match="UNKNOWN"):
@@ -325,11 +342,11 @@ class TestPutKosmaSpem:
 
     def test_failed_command_raises(self, kosma_dir, monkeypatch):
         fake = FakeKsetPoint(kosma_dir, fail_on="ccatacu_point[5]")
-        monkeypatch.setattr(usa.subprocess, "run", fake)
+        monkeypatch.setattr(kosma_ocs_lib.subprocess, "run", fake)
         with pytest.raises(RuntimeError, match=r"ccatacu_point\[5\]"):
             usa.put_kosma_spem(self.new_spem())
         # the other commands are still executed
-        assert len(fake.commands) == len(ACU_NAMES) + 1
+        assert len(fake.commands) == len(ACU_NAMES) + 2
 
 
 class TestCheckSpemSets:
@@ -365,13 +382,13 @@ class TestCheckSpemSets:
         out = capsys.readouterr().out
         assert "differs" not in out
         # ignored keys are not listed
-        for key in usa.ignore_keys_acu + usa.ignore_keys_kosma:
+        for key in usa.IGNORE_KEYS_ACU + usa.IGNORE_KEYS_KOSMA:
             assert key not in out
 
     def test_difference_within_tolerance_matches(self, acu_spem, monkeypatch):
         monkeypatch.setattr("builtins.input", no_input)
         kosma = self.kosma_spem()
-        kosma["IA"] += 0.5 * usa.spem_abs_tol
+        kosma["IA"] += 0.5 * usa.SPEM_ABS_TOL
         usa.check_spem_sets(acu_spem, kosma)
 
     def test_mismatch_continue(self, acu_spem, monkeypatch, capsys):
@@ -477,7 +494,7 @@ class TestKosma2Spem:
         assert spem["AW"] == 27.778
         assert spem["NRX"] == 1.235
         for key, value in spem.items():
-            assert value == round(value, usa.spem_decimals), key
+            assert value == round(value, usa.SPEM_DECIMALS), key
 
     def test_missing_coefficient_raises(self, tmp_path):
         point_in = write_point_in(
@@ -510,14 +527,14 @@ class TestConfirmUpdate:
         out = capsys.readouterr().out
         ia_line = next(l for l in out.splitlines() if l.startswith("IA "))
         assert ia_line.split() == ["IA", "0.000", "2.000", "2.000"]
-        for key in usa.ignore_keys_acu + list(usa.acu_readonly_keys):
+        for key in usa.IGNORE_KEYS_ACU + list(usa.ACU_READONLY_KEYS):
             assert key not in out
 
     def test_unchanged_keys_not_printed(self, acu_spem, monkeypatch, capsys):
         monkeypatch.setattr("builtins.input", answers("y"))
         new_spem = dict(CURRENT_SPEM)
         new_spem["IA"] = 2.0
-        new_spem["CA"] += 0.5 * usa.spem_abs_tol   # within tolerance -> unchanged
+        new_spem["CA"] += 0.5 * usa.SPEM_ABS_TOL   # within tolerance -> unchanged
         usa.confirm_update(acu_spem, new_spem)
         lines = capsys.readouterr().out.splitlines()
         printed = [l.split()[0] for l in lines if l.strip()]
@@ -543,7 +560,7 @@ class TestChangedSpem:
     def test_only_changed_keys(self):
         new = dict(CURRENT_SPEM)
         new["IA"] += 1.0
-        new["CA"] += 0.5 * usa.spem_abs_tol   # within tolerance -> unchanged
+        new["CA"] += 0.5 * usa.SPEM_ABS_TOL   # within tolerance -> unchanged
         assert usa.changed_spem(new, CURRENT_SPEM) == {"IA": new["IA"]}
 
     def test_missing_in_current_is_changed(self):
@@ -598,7 +615,7 @@ class TestMain:
 
         def get_dataset(name):
             assert name == "CmdSPEMParameter"
-            return {(k if k in usa.ignore_keys_acu else f"Parameter {k}"): v
+            return {(k if k in usa.IGNORE_KEYS_ACU else f"Parameter {k}"): v
                     for k, v in acu.items()}
 
         def set_spem(**params):
@@ -611,7 +628,7 @@ class TestMain:
         ocs.set_spem.side_effect = set_spem
         monkeypatch.setattr(usa, "setup_ocs", lambda **kwargs: ocs)
         fake = FakeKsetPoint(tmp_path)
-        monkeypatch.setattr(usa.subprocess, "run", fake)
+        monkeypatch.setattr(kosma_ocs_lib.subprocess, "run", fake)
 
         usa.main()
         return ocs, fake

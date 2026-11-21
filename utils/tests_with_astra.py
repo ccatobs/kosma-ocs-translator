@@ -28,7 +28,8 @@ logging.basicConfig(
 logger = logging.getLogger("tests_with_astra")
 
 
-from kosma_ocs_translator import KOSMA_translator, ImportKOSMAReadWriteIntoDictionary
+from kosma_ocs_translator import KOSMA_translator
+from kosma_ocs_lib import ImportKOSMAReadWriteIntoDictionary
 
 # generate a table of obs2tel files and export to a csv file
 

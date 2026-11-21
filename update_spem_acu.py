@@ -8,14 +8,15 @@ import logging
 import math
 import os
 import re
-import subprocess  # used by put_kosma_spem in kosma_ocs_translator (patched in tests)
 
-from kosma_ocs_translator import (
+from kosma_ocs_lib import (
+    FILE_ONLY,
+    setup_logging,
     setup_ocs,
     KOSMA_SPEM_FILE,
-    ignore_keys_acu,
-    ignore_keys_kosma,
-    acu_readonly_keys,
+    IGNORE_KEYS_ACU,
+    IGNORE_KEYS_KOSMA,
+    ACU_READONLY_KEYS,
     strip_parameter_prefix,
     get_kosma_spem,
     put_kosma_spem,
@@ -24,15 +25,15 @@ from kosma_ocs_translator import (
 # logger name follows the script name (without .py), also when run as __main__
 LOGGER_NAME = os.path.splitext(os.path.basename(__file__))[0]
 
-# tolerance [mdeg] to treat two SPEM parameter values as identical
+# log file, written into the current directory
+LOG_FILE = "update-spem-acu.log"
+
+# [mdeg] tolerance to treat two SPEM parameter values as identical
 # (0.01 mdeg = 0.036 arcsec)
-spem_abs_tol = 1e-2
+SPEM_ABS_TOL = 1e-2
 
 # SPEM parameters derived from the pointing fit are rounded to 0.001 mdeg
-spem_decimals = 3
-
-# pass as extra= to a log call to write the message to the log file only
-FILE_ONLY = {"file_only": True}
+SPEM_DECIMALS = 3
 
 
 def ask_continue(question):
@@ -76,9 +77,9 @@ def check_spem_sets(spem_acu, spem_kosma):
     """
     log = logging.getLogger(LOGGER_NAME)
 
-    # Compare the keys first. Ignore ignore_keys_acu and ignore_keys_kosma
-    keys_acu = [k for k in spem_acu if k not in ignore_keys_acu]
-    keys_kosma = [k for k in spem_kosma if k not in ignore_keys_kosma]
+    # Compare the keys first. Ignore IGNORE_KEYS_ACU and IGNORE_KEYS_KOSMA
+    keys_acu = [k for k in spem_acu if k not in IGNORE_KEYS_ACU]
+    keys_kosma = [k for k in spem_kosma if k not in IGNORE_KEYS_KOSMA]
     only_acu = [k for k in keys_acu if k not in keys_kosma]
     only_kosma = [k for k in keys_kosma if k not in keys_acu]
     if only_acu:
@@ -90,7 +91,7 @@ def check_spem_sets(spem_acu, spem_kosma):
     keys = keys_acu + only_kosma
     differ = []
     print("")
-    # acu_readonly_keys (e.g. LEL velocity [deg/s]) are compared as well
+    # ACU_READONLY_KEYS (e.g. LEL velocity [deg/s]) are compared as well
     print(f"{'key':<12s} {'ACU [mdeg]':>12s} {'KOSMA_ccatacu_point.in [mdg]':>30s}")
     for key in keys:
         value_acu = spem_acu.get(key)
@@ -98,7 +99,7 @@ def check_spem_sets(spem_acu, spem_kosma):
         match = (
             value_acu is not None
             and value_kosma is not None
-            and math.isclose(value_acu, value_kosma, abs_tol=spem_abs_tol)
+            and math.isclose(value_acu, value_kosma, abs_tol=SPEM_ABS_TOL)
         )
         if not match:
             differ.append(key)
@@ -231,7 +232,7 @@ def kosma2spem(point_in, current_spem):
         raise ValueError(f"Unknown model_type {apoint['model_type']} in {point_in}")
 
     # e.g. 100 arcsec = 27.77777777777778 mdeg -> 27.778 mdeg
-    spem = {key: round(value, spem_decimals) for key, value in spem.items()}
+    spem = {key: round(value, SPEM_DECIMALS) for key, value in spem.items()}
 
     return spem
 
@@ -251,15 +252,15 @@ def changed_spem(new_spem, current_spem):
     -------
     changed : dict
         Entries of new_spem missing in current_spem or differing by more than
-        spem_abs_tol [mdeg]. acu_readonly_keys are never included, since they
+        SPEM_ABS_TOL [mdeg]. ACU_READONLY_KEYS are never included, since they
         must not be sent to the ACU.
     """
     changed = {}
     for key, value in new_spem.items():
-        if key in ignore_keys_acu or key in ignore_keys_kosma or key in acu_readonly_keys:
+        if key in IGNORE_KEYS_ACU or key in IGNORE_KEYS_KOSMA or key in ACU_READONLY_KEYS:
             continue
         current = current_spem.get(key)
-        if current is None or not math.isclose(value, current, abs_tol=spem_abs_tol):
+        if current is None or not math.isclose(value, current, abs_tol=SPEM_ABS_TOL):
             changed[key] = value
     return changed
 
@@ -277,9 +278,9 @@ def confirm_update(current_spem_acu, new_spem):
     """
     log = logging.getLogger(LOGGER_NAME)
 
-    # Print key - current - new for the keys that differ (within spem_abs_tol),
-    # except for ignore_keys_acu and acu_readonly_keys (never uploaded)
-    skip = set(ignore_keys_acu) | set(acu_readonly_keys)
+    # Print key - current - new for the keys that differ (within SPEM_ABS_TOL),
+    # except for IGNORE_KEYS_ACU and ACU_READONLY_KEYS (never uploaded)
+    skip = set(IGNORE_KEYS_ACU) | set(ACU_READONLY_KEYS)
     keys = [k for k in current_spem_acu if k not in skip]
     keys += [k for k in new_spem if k not in keys and k not in skip]
     print("")
@@ -288,7 +289,7 @@ def confirm_update(current_spem_acu, new_spem):
         current = current_spem_acu.get(key)
         new = new_spem.get(key)
         if current is not None and new is not None:
-            if math.isclose(new, current, abs_tol=spem_abs_tol):
+            if math.isclose(new, current, abs_tol=SPEM_ABS_TOL):
                 continue
             diff = format_value(new - current)
         else:
@@ -317,42 +318,6 @@ def print_spem(spem):
     for key, value in spem.items():
         print(f"{key:<16s} {format_value(value)}")
     log.info(f"SPEM parameters: {spem}", extra=FILE_ONLY)
-
-
-def setup_logging(log_level):
-    # setup logging to file and to screen
-    log = logging.getLogger(LOGGER_NAME)
-    log.setLevel(log_level)
-
-    # Remove existing handlers to avoid conflicts
-    # if log.hasHandlers():
-    #    log.handlers.clear()
-
-    # Prevent propagation to the root logger
-    log.propagate = False
-
-    # create console handler and set level to debug
-    ch = logging.StreamHandler()
-    ch.setLevel(log_level)
-    # create simpler formatter for console output
-    console_formatter = logging.Formatter("%(levelname)s: %(message)s")
-    ch.setFormatter(console_formatter)
-    # log.info(..., extra=FILE_ONLY) goes to the log file only, e.g. when the
-    # same information is already printed to the terminal as a table
-    ch.addFilter(lambda record: not getattr(record, "file_only", False))
-    log.addHandler(ch)
-
-    # file handler
-    fh = logging.FileHandler("update-spem-acu.log")
-    fh.setLevel(log_level)
-    # detailed formatter for file output
-    file_formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-    fh.setFormatter(file_formatter)
-    log.addHandler(fh)
-
-    return log
 
 
 def parse_arguments():
@@ -393,7 +358,7 @@ def parse_arguments():
 def main():
     args = parse_arguments()
     log_level = getattr(logging, args.log_level)
-    log = setup_logging(log_level)
+    log = setup_logging(LOGGER_NAME, LOG_FILE, log_level)
     ocs = setup_ocs(
         use_local_dev=args.use_local_dev,
         certificates_path=args.certificates_path,

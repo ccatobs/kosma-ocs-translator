@@ -6,6 +6,7 @@ fields that differ from the defaults in helpers.py.  The parametrised test
 function handles the rest.
 
 """
+import time
 from pathlib import Path
 from unittest.mock import MagicMock
 import pytest
@@ -592,15 +593,27 @@ def test_abort_only_if_previous_path_not_ended(
     assert mock_ocs.abort.called is aborted
 
 
-def test_no_abort_after_move_to(translator_factory, mock_ocs):
-    import time
+def test_abort_after_move_to(translator_factory, mock_ocs, monkeypatch):
+    """
+    A path after a move-to is preceded by an abort, even long after the
+    move-to: it may still be moving, and TCS would reject the path as busy.
+    """
+    import kosma_ocs_translator as kot
+    monkeypatch.setattr(kot, "SLEW_BEFORE_PATH_MIN_DIST", 1e6)   # no slew
+    mock_ocs.scan_pattern.return_value = _ok()
     t = translator_factory()
     t.last_payload["type"] = "move_to"
-    t.last_payload["start_time"] = time.time()
+    t.last_payload["start_time"] = time.time() - 10000.0
+    order = MagicMock()
+    order.attach_mock(mock_ocs.abort, "abort")
+    order.attach_mock(mock_ocs.scan_pattern, "scan_pattern")
 
     t._track_loop()
 
-    assert not mock_ocs.abort.called
+    assert mock_ocs.abort.call_count == 1
+    assert not mock_ocs.move_to.called
+    assert [c[0] for c in order.mock_calls] == ["abort", "scan_pattern"]
+    assert t.last_aborted is False     # the new path is running
 
 
 HORIZON_OBS2TEL = {
@@ -613,7 +626,10 @@ HORIZON_OBS2TEL = {
     pytest.param(200, {"status": "ok"},    True,  id="accepted"),
     pytest.param(503, {"status": "busy"},  False, id="rejected"),
 ])
-def test_move_to_response_check(translator_factory, mock_ocs, status_code, body, accepted):
+def test_move_to_response_check(translator_factory, mock_ocs, monkeypatch,
+                                status_code, body, accepted):
+    import kosma_ocs_translator as kot
+    monkeypatch.setattr(kot, "MOVE_TO_BUSY_TIMEOUT", 0.0)
     mock_ocs.move_to.return_value = MagicMock(status_code=status_code, json=lambda: body)
     t = translator_factory(obs2tel_overrides=HORIZON_OBS2TEL)
     t.tel_return_cookie = 1
@@ -632,6 +648,80 @@ def test_move_to_response_check(translator_factory, mock_ocs, status_code, body,
         assert t.tel_return_cookie == 2
         assert t.tel_path_failed is True
         assert t.tel_error == 503
+
+
+@pytest.mark.parametrize("last,abort_if_unknown,aborted", [
+    pytest.param("path_running", True,  True,  id="path_running"),
+    pytest.param("path_ended",   True,  False, id="path_ended"),
+    pytest.param("move_to",      True,  True,  id="move_to_may_still_move"),
+    pytest.param("aborted",      True,  False, id="already_aborted"),
+    pytest.param(None,           True,  True,  id="unknown"),
+    pytest.param(None,           False, False, id="unknown_no_abort_if_unknown"),
+])
+def test_horizon_move_to_aborts_previous(
+    translator_factory, mock_ocs, last, abort_if_unknown, aborted
+):
+    """ocs.move_to does not abort by itself: the translator does it when needed."""
+    import time
+    mock_ocs.move_to.return_value = _ok()
+    t = translator_factory(obs2tel_overrides=HORIZON_OBS2TEL)
+    t.abort_if_unknown = abort_if_unknown
+    # the fixture path starts at the mock ACU status time (in the past)
+    if t.last_payload is not None:
+        t.last_payload["start_time"] = time.time() - 10.0
+    if last is None:
+        t.last_payload = None
+    elif last == "path_ended":
+        t.last_payload["start_time"] = time.time() - 10000.0
+    elif last == "move_to":
+        t.last_payload["type"] = "move_to"
+    elif last == "aborted":
+        t.last_aborted = True
+    order = MagicMock()
+    order.attach_mock(mock_ocs.abort, "abort")
+    order.attach_mock(mock_ocs.move_to, "move_to")
+
+    t._track_loop()
+
+    assert mock_ocs.abort.called is aborted
+    assert mock_ocs.move_to.call_count == 1
+    if aborted:
+        assert [c[0] for c in order.mock_calls][:2] == ["abort", "move_to"]
+    assert t.last_aborted is False     # the move-to is running now
+
+
+def test_move_to_retried_while_busy_after_abort(translator_factory, mock_ocs, monkeypatch):
+    import kosma_ocs_translator as kot
+    monkeypatch.setattr(kot, "MOVE_TO_BUSY_RETRY_INTERVAL", 0.01)
+    mock_ocs.move_to.side_effect = [_ocs_busy(), *_responses(503, 200)]
+    t = translator_factory(obs2tel_overrides=HORIZON_OBS2TEL)
+    t.last_payload["start_time"] = time.time() - 10.0   # previous path still running
+
+    t._track_loop()
+
+    assert mock_ocs.abort.call_count == 1
+    assert mock_ocs.move_to.call_count == 3
+    assert t.last_payload["type"] == "move_to"
+    assert t.tel_path_failed is False
+
+
+def test_abort_failure_fails_move_to(translator_factory, mock_ocs):
+    mock_ocs.abort.side_effect = RuntimeError("no connection")
+    t = translator_factory(obs2tel_overrides=HORIZON_OBS2TEL)
+    t.last_payload["start_time"] = time.time() - 10.0   # previous path still running
+    t.next_tel_return_cookie = 2
+
+    t._track_loop()
+
+    assert not mock_ocs.move_to.called
+    assert t.tel_path_failed is True
+    assert t.tel_error == 1
+
+
+def test_no_reuse_of_aborted_path(translator_factory):
+    t = translator_factory()
+    t.last_aborted = True
+    assert t.reuse_last_track() is False
 
 
 def _responses(*codes):
@@ -674,11 +764,11 @@ def _ocs_busy():
     pytest.param(400, {"status": "error", "message": "bad az"}, False, 400, id="http_400"),
     pytest.param(200, {"status": "ok"},                       False, 1,   id="ok"),
 ])
-def test_is_busy_and_error_code(translator_factory, status_code, body, busy, error):
-    t = translator_factory()
+def test_is_busy_and_error_code(status_code, body, busy, error):
+    import kosma_ocs_translator as kot
     response = MagicMock(status_code=status_code, json=lambda: body)
-    assert t._is_busy(response) is busy
-    assert t._error_code(response) == error
+    assert kot._is_busy(response) is busy
+    assert kot._error_code(response) == error
 
 
 def test_scan_pattern_retry_on_ocs_busy(translator_factory, mock_ocs):
@@ -955,7 +1045,9 @@ def test_slew_timeout_fails_path(slew_translator, mock_ocs, monkeypatch):
     assert t.tel_error == 1
 
 
-def test_slew_rejected_fails_path(slew_translator, mock_ocs):
+def test_slew_rejected_fails_path(slew_translator, mock_ocs, monkeypatch):
+    import kosma_ocs_translator as kot
+    monkeypatch.setattr(kot, "MOVE_TO_BUSY_TIMEOUT", 0.0)
     t, _ = slew_translator()
     mock_ocs.move_to.side_effect = None
     mock_ocs.move_to.return_value = MagicMock(status_code=503, json=lambda: {"status": "busy"})
@@ -983,7 +1075,10 @@ def test_superseded_slew_is_aborted_by_next_track(slew_translator, mock_ocs, mon
     t.last_obs2tel = dict(t.obs2tel)
     assert t.reuse_last_track() is False
 
-    # ... and the next path aborts it (normally no abort after a move-to)
+    # ... and the next path aborts it, even if the last accepted command was
+    # a path that has ended (no abort then without the slew)
+    t.last_payload = {"type": "path", "start_time": 0.0,
+                      "points": [[0.0, 0.0, 0.0, 0.0, 0.0]]}
     t._track_stop_event.clear()
     monkeypatch.setattr(kot, "SLEW_BEFORE_PATH_MIN_DIST", 1e6)
     t._acu_position = lambda: (0.0, 0.0, 0.0, 0.0)
@@ -991,6 +1086,32 @@ def test_superseded_slew_is_aborted_by_next_track(slew_translator, mock_ocs, mon
     assert mock_ocs.abort.called
     assert t.slew_in_progress is False
     assert mock_ocs.scan_pattern.call_count == 1
+
+
+@pytest.mark.parametrize("last_type,n_aborts", [
+    pytest.param("path",    1, id="running_path_aborted_once"),
+    pytest.param("move_to", 1, id="previous_move_to_aborted_once"),
+])
+def test_slew_abort(slew_translator, mock_ocs, last_type, n_aborts):
+    """
+    A running path or a previous move-to is aborted once by _send_track,
+    not again by _slew_to before its own move-to.
+    """
+    import time
+    t, _ = slew_translator()
+    t.last_payload = {"type": last_type, "start_time": time.time() - 10.0,
+                      "points": [[0.0, 0.0, 0.0, 0.0, 0.0],
+                                 [600.0, 0.0, 0.0, 0.0, 0.0]]}
+    order = MagicMock()
+    order.attach_mock(mock_ocs.abort, "abort")
+    order.attach_mock(mock_ocs.move_to, "move_to")
+
+    t._track_loop()
+
+    assert mock_ocs.abort.call_count == n_aborts
+    assert [c[0] for c in order.mock_calls][:2] == ["abort", "move_to"]
+    assert mock_ocs.scan_pattern.call_count == 1
+    assert t.last_aborted is False
 
 
 # ---------------------------------------------------------------------------
@@ -1213,14 +1334,41 @@ def test_ccdpos_model_type_with_blanks_takes_first_column(translator_factory, tm
     assert ccd["op_tel_model_date"] == "2026-10-30:14:44:00Z"
 
 
-def test_ccdpos_model_defaults_without_ccatacu_point(translator_factory):
-    from kosma_ocs_translator import POINTING_MODEL_DEFAULTS
+def test_ccdpos_model_marker_without_ccatacu_point(translator_factory):
+    from kosma_ocs_translator import POINTING_MODEL_MISSING
     # tmp_path has no KOSMA_ccatacu_point.in
     t = translator_factory(obs2tel_overrides={"obs_wavelength": 0.6})
 
     _, ccd = t.set_tel2obs_dict()
 
-    assert (ccd["op_tel_model_type"], ccd["op_tel_model_date"]) == POINTING_MODEL_DEFAULTS
+    assert (ccd["op_tel_model_type"], ccd["op_tel_model_date"]) == POINTING_MODEL_MISSING
+
+
+@pytest.mark.parametrize("drop,expected", [
+    ("ccatacu_model_type", ("CCAT-ACU-MISSING", "2026-10-30:14:44:00Z")),
+    ("ccatacu_model_date", ("CCAT-ACU_VA_1.3", "MISSING")),
+])
+def test_ccdpos_model_marker_for_missing_entry(translator_factory, tmp_path, drop, expected):
+    _write_ccatacu_model(tmp_path, "CCAT-ACU_VA_1.3", "2026-10-30:14:44:00Z")
+    path = tmp_path / "KOSMA_ccatacu_point.in"
+    path.write_text("".join(
+        line for line in path.read_text().splitlines(keepends=True) if drop not in line
+    ))
+    t = translator_factory(obs2tel_overrides={"obs_wavelength": 0.6})
+
+    _, ccd = t.set_tel2obs_dict()
+
+    assert (ccd["op_tel_model_type"], ccd["op_tel_model_date"]) == expected
+
+
+def test_ccdpos_model_marker_differs_from_acfg_defaults():
+    # starpoint holds the ACFG defaults if the entries are missing; the markers must
+    # differ from them (strcmp fails) but keep the "CCAT-ACU" prefix (strncmp passes)
+    from kosma_ocs_translator import POINTING_MODEL_MISSING
+    model_type, model_date = POINTING_MODEL_MISSING
+    assert model_type.startswith("CCAT-ACU") and model_type != "CCAT-ACU"
+    assert model_date != "YYYY-MM-DDTHH:MM:SSZ"
+    assert " " not in model_type and " " not in model_date   # read with %s
 
 
 def test_ccdpos_model_date_follows_file_update(translator_factory, tmp_path):
@@ -1245,8 +1393,8 @@ def test_ccdpos_model_not_reread_if_file_unchanged(translator_factory, tmp_path,
     _write_ccatacu_model(tmp_path, "CCAT-ACU", "2026-10-30:14:44:00Z")
     t = translator_factory(obs2tel_overrides={"obs_wavelength": 0.6})
     reads = []
-    original = kot._read_first_column
-    monkeypatch.setattr(kot, "_read_first_column",
+    original = kot.read_first_column
+    monkeypatch.setattr(kot, "read_first_column",
                         lambda *a, **kw: reads.append(a) or original(*a, **kw))
 
     for _ in range(3):

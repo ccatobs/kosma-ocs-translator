@@ -1,12 +1,12 @@
-"""Unit tests for ImportKOSMAReadWriteIntoDictionary and _write_atomic."""
+"""Unit tests for ImportKOSMAReadWriteIntoDictionary and write_atomic."""
 import os
 import stat
 import time
 import pytest
 from pathlib import Path
 
-import kosma_ocs_translator
-from kosma_ocs_translator import ImportKOSMAReadWriteIntoDictionary, _write_atomic
+import kosma_ocs_lib
+from kosma_ocs_lib import ImportKOSMAReadWriteIntoDictionary, write_atomic
 from helpers import BASE_OBS2TEL, DATA_DIR, write_obs2tel
 
 
@@ -100,7 +100,7 @@ class TestWriteAtomic:
 
     def test_creates_new_file(self, tmp_path):
         path = tmp_path / "KOSMA_tel2obs.set"
-        _write_atomic(str(path), "new\n")
+        write_atomic(str(path), "new\n")
         assert path.read_text() == "new\n"
         # no temporary file left behind
         assert os.listdir(tmp_path) == ["KOSMA_tel2obs.set"]
@@ -111,7 +111,7 @@ class TestWriteAtomic:
         old_inode = path.stat().st_ino
         # a reader that opened the file before the update
         with open(path) as reader:
-            _write_atomic(str(path), "new\n")
+            write_atomic(str(path), "new\n")
             # still sees the complete old content, not an emptied file
             assert reader.read() == "old\n"
         assert path.read_text() == "new\n"
@@ -124,14 +124,14 @@ class TestWriteAtomic:
         path = tmp_path / "KOSMA_tel2obs.set"
         path.write_text("old\n")
         os.chmod(path, mode)
-        _write_atomic(str(path), "new\n")
+        write_atomic(str(path), "new\n")
         assert stat.S_IMODE(path.stat().st_mode) == mode
 
     def test_write_error_keeps_old_file(self, tmp_path):
         path = tmp_path / "KOSMA_tel2obs.set"
         path.write_text("old\n")
         with pytest.raises(TypeError):
-            _write_atomic(str(path), None)   # f.write(None) fails
+            write_atomic(str(path), None)   # f.write(None) fails
         assert path.read_text() == "old\n"
         assert os.listdir(tmp_path) == ["KOSMA_tel2obs.set"]
 
@@ -142,9 +142,9 @@ class TestWriteAtomic:
         def failing_replace(src, dst):
             raise OSError("rename failed")
 
-        monkeypatch.setattr(kosma_ocs_translator.os, "replace", failing_replace)
+        monkeypatch.setattr(kosma_ocs_lib.os, "replace", failing_replace)
         with pytest.raises(OSError, match="rename failed"):
-            _write_atomic(str(path), "new\n")
+            write_atomic(str(path), "new\n")
         assert path.read_text() == "old\n"
         assert os.listdir(tmp_path) == ["KOSMA_tel2obs.set"]
 

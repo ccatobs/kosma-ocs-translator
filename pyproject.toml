@@ -14,6 +14,9 @@ dependencies = ["astropy","requests"]
 [project.scripts]
 kosma-ocs-translator = "kosma_ocs_translator:main"
 
+[tool.setuptools]
+py-modules = ["kosma_ocs_translator", "kosma_ocs_lib", "update_spem_acu"]
+
 [tool.pytest.ini_options]
 minversion = "6.0"
 testpaths = ["tests"]

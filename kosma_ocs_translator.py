@@ -1,35 +1,43 @@
-import urllib.request, json, requests
-import time, datetime
-import random
+import time
 import logging
-import os, glob, re
+import os
 import socket
-import subprocess
-import stat
-import contextlib
-from ocs import observatory_control_system
-from astropy.coordinates import SkyCoord, EarthLocation, AltAz, Distance
+from astropy.coordinates import SkyCoord, AltAz, Distance
 from astropy import units as u
 from astropy.time import Time
 import numpy as np
 import argparse
 import threading
 import signal,sys
-# PH1 root mount
-try:
-    from roof_mount import RoofMount
-except:
-    print("roof_mount package not found, make sure it is installed and in the PYTHONPATH")
-    print("install from git@git.ph1.uni-koeln.de:receiver/pointing-camera-rpi.git")
+from dataclasses import dataclass
 # sun avoidance
 try:
     from sun_avoidance.telescope import get_overtop_altaz_from_nominal
-except:
+except ImportError:
     print("sun-avoidance not found. Install from git@github.com:ccatobs/sun-avoidance.git")
     sys.exit(1)
 
+from kosma_ocs_lib import (
+    DEFAULT_LOGGER_NAME,
+    KOSMA_SPEM_FILE,
+    setup_logging,
+    setup_ocs,
+    ImportKOSMAReadWriteIntoDictionary,
+    read_first_column,
+    write_atomic,
+    strip_parameter_prefix,
+    put_kosma_spem,
+)
 
-coord_sys_map = {
+
+# log file, written into the current directory
+LOG_FILE = "kosma-ocs-translator.log"
+
+# ---------------------------------------------------------------------------
+# Coordinate systems
+# ---------------------------------------------------------------------------
+# KOSMA obs_coord_sys_* -> astropy frame name
+COORD_SYS_MAP = {
     "J2000": "icrs",
     "B1950": "fk4",
     "GALACTIC": "galactic",
@@ -37,7 +45,7 @@ coord_sys_map = {
 }
 
 # Proper-motion keyword names in astropy SkyCoord differ by frame
-_frame_pm_keys = {
+_FRAME_PM_KEYS = {
     "icrs":     ("pm_ra_cosdec", "pm_dec"),
     "fk4":      ("pm_ra_cosdec", "pm_dec"),
     "galactic": ("pm_l_cosb",    "pm_b"),
@@ -45,17 +53,45 @@ _frame_pm_keys = {
 
 # Reference epoch for catalogue coordinates by frame
 # only matters for proper motion correction
-_frame_epochs = {
+_FRAME_EPOCHS = {
     "icrs":     Time("J2000"),
     "fk4":      Time(1950.0, format="byear"),
     "galactic": Time("J2000"),
 }
 
-# Slew before a path (see KOSMA_translator._slew_to).
+# ---------------------------------------------------------------------------
+# Pointing model (KOSMA_SPEM_FILE and the other SPEM constants: kosma_ocs_lib)
+# ---------------------------------------------------------------------------
+# op_tel_model_type / op_tel_model_date written to KOSMA_ccdpos.sim if
+# KOSMA_SPEM_FILE or its ccatacu_model_type / ccatacu_model_date is missing.
+# Deliberately not the ACFG defaults ("CCAT-ACU", "YYYY-MM-DDTHH:MM:SSZ"): starpoint
+# then also holds these defaults for ccatacu_model_type / ccatacu_model_date and
+# its consistency check (strcmp, starpoint.c) would pass on placeholders. The type
+# keeps the "CCAT-ACU" prefix, so that starpoint runs the check and aborts.
+POINTING_MODEL_MISSING = ("CCAT-ACU-MISSING", "MISSING")
+
+# ---------------------------------------------------------------------------
+# Observing wavelength and refraction
+# ---------------------------------------------------------------------------
+# [micron] obs_wavelength separating submm observations (at or above this value)
+# from optical / infrared camera observations (below this value).
+# KOSMA_ccdpos.sim is written only for the latter.
+SUBMM_MIN_WAVELENGTH = 100.0
+
+# used for the refraction correction if the weather parameters are bad or missing
+DEFAULT_WEATHER = {
+    "pressure": 0.518 * u.bar,
+    "temperature": -5.9 * u.deg_C,
+    "relative_humidity": 0.24,
+}
+
+# ---------------------------------------------------------------------------
+# Slew before a path (see KOSMA_translator._slew_to)
+# ---------------------------------------------------------------------------
 # [deg] If the telescope is at least this far from the first point of a new path
 # (in azimuth or in elevation, not distance on sky), it is first slewed there with move-to
-# and the path is sent only after it has arrived. Otherwise the path is sent directly and the
-# ACU itself moves to the first point with its spline path definition.
+# and the path is sent only after it has arrived. Otherwise the path is sent directly
+# and the ACU itself moves to the first point with its spline path definition.
 SLEW_BEFORE_PATH_MIN_DIST = 1.0
 # [sec] give up waiting for the slew to finish after this
 SLEW_TIMEOUT = 300.0
@@ -72,15 +108,21 @@ SLEW_SPEED_TOLERANCE = 1e-4
 SLEW_BUSY_RESEND_TIMEOUT = 10.0
 # [sec] interval of reading the ACU status while waiting for the slew
 SLEW_POLL_INTERVAL = 0.5
+# [sec] a move-to rejected as busy (TCS not yet idle after the abort sent just
+# before it) is resent for at most this long, MOVE_TO_BUSY_RETRY_INTERVAL apart
+MOVE_TO_BUSY_TIMEOUT = 5.0
+MOVE_TO_BUSY_RETRY_INTERVAL = 0.3
 
-# Path timing (see KOSMA_translator._track_loop).
+# ---------------------------------------------------------------------------
+# Path timing (see KOSMA_translator._send_track)
+# ---------------------------------------------------------------------------
 # [sec] start_time of a path is this far after the time its computation starts.
 # TCS requires start_time >= 9.8 sec ahead when it processes the path.
 TRACK_OVERHEAD = 11.0
 # [sec] minimum lead (start_time - now) right before sending the path. If the
 # computation left less, the path is recomputed with a larger overhead. The margin
 # above 9.8 sec covers transfer time and a clock offset between here and the TCS.
-TRACK_MIN_SEND_LEAD = 10.5
+TRACK_MIN_SEND_LEAD = 10.3
 # [sec] time step between path points sent to the TCS
 TRACK_TIME_STEP = 0.1
 # [sec] time step of the full (astropy) coordinate transform; the points in between
@@ -187,38 +229,6 @@ def _get_time_from_acu_format(day_of_year, year):
     return t
 
 
-def _write_atomic(path, text):
-    """
-    Replace the file path with text, so that a reader sees either the complete
-    old or the complete new file, never an empty or partly written one.
-    Same scheme as WriteVarSetList in KOSMA_file_io.c: write a temporary file
-    in the same directory, copy the mode of the existing file, rename it over path.
-
-    Parameters
-    ----------
-    path : str
-        File to be replaced
-    text : str
-        New content of the file
-    """
-    # same directory, so that the rename stays within one filesystem (atomic)
-    tmp = f"{path}_{os.getpid()}"
-    try:
-        with open(tmp, "w") as f:
-            f.write(text)
-        # keep the mode of the existing file (KOSMA processes may run as other users)
-        try:
-            os.chmod(tmp, stat.S_IMODE(os.stat(path).st_mode))
-        except FileNotFoundError:
-            pass
-        os.replace(tmp, path)
-    except BaseException:
-        # no leftover temporary file on error
-        with contextlib.suppress(FileNotFoundError):
-            os.remove(tmp)
-        raise
-
-
 def _total_pointing_correction(response_pointing):
     """
     Total pointing correction (SPEM + tiltmeters) applied by the ACU.
@@ -253,285 +263,120 @@ def _total_pointing_correction(response_pointing):
     return del_tot_azm, del_tot_elv
 
 
-def ImportKOSMAReadWriteIntoDictionary(files=None, variable=None, update_mod_time=True):
-    log = logging.getLogger("kosma-ocs-translator")
-    readwrite_dict = {}
-    kosma_readwrite_dir = os.environ.get("WRITE_DIR", "/net/KOSMA_file_io/ReadWrite/")
-    # log.debug("polling for changes from {0}".format(kosma_readwrite_dir))
-    not_changed_count = 0
-    if files == None:
-        readwrite_files = glob.glob("%s/*" % (kosma_readwrite_dir))
-    else:
-        readwrite_files = []
-        for filename in files:
-            # check mod time here, if hasn't changed from last time.. skip it
-            full_path_filename = kosma_readwrite_dir + "/" + filename
-            if not os.path.exists(full_path_filename):
-                log.warning("WARNING: {0} not found".format(full_path_filename))
-                continue
-            else:
-                readwrite_files.append(kosma_readwrite_dir + "/" + filename)
-    #
-    if len(readwrite_files) == 0:
-        # print "No files active, check servers and %s path" % (kosma_readwrite_dir)
-        return {}
-    # create global dictionary to store kosma_read acfg values
-    for readwrite_file_full in readwrite_files:
-        log.debug("reading {0}".format(readwrite_file_full))
-        if os.path.isdir(readwrite_file_full):
-            continue
-        if not os.path.exists(readwrite_file_full):
-            continue
-        f = open(readwrite_file_full, "r")
-        lines = f.readlines()
-        f.close()
-        # strip full path from readwrite_file
-        readwrite_file = os.path.basename(readwrite_file_full)
-        # create dictionary for each filename
-        if readwrite_file not in readwrite_dict.keys():
-            readwrite_dict[readwrite_file] = {}
-        readwrite_dict[readwrite_file]["file_timestamp"] = os.path.getmtime(
-            readwrite_file_full
-        )
-        for i, line in enumerate(lines):
-            # check for timestamp in header
-            if re.match(".+File update time stamp.+", line):
-                timestamp = re.search(r".+\s(\d+\.\d+)\s+\S+.+", line).groups()[0]
-                # if 'timestamp' not in readwrite_dict[readwrite_file].keys():
-                readwrite_dict[readwrite_file]["timestamp"] = timestamp
-                continue
-            elif re.match(".+!.+", line):
-                result = re.search("(.+)!(.+)", line)
-                if result:
-                    data, description = result.groups()
-            else:
-                continue
-            # log.debug("found {0} {1}".format(data, description))
-            # if no timestamp found in file, use file timestamp
-            if "timestamp" not in readwrite_dict[readwrite_file].keys():
-                readwrite_dict[readwrite_file]["timestamp"] = readwrite_dict[
-                    readwrite_file
-                ]["file_timestamp"]
-            # populate dictionary
-            try:
-                result = re.search(r"(\S+)\s+(\S+)", data)
-                if result:
-                    value, variable_found = result.groups()
-            except:
-                result = re.search(r"\s+(\S+)", data)
-                if result:
-                    (variable_found,) = result.groups()
-                print("{0} variable found with no value ".format(variable_found))
-                value = "None "
-            # variable_found = variable_found.strip()
-            # convert parse value to string, int or float
-
-            try:
-                if type(value) in [int, float]:
-                    continue
-                if "." in value:
-                    value = float(value)
-                else:
-                    value = int(value)
-            except ValueError:
-                value = value.strip()
-            except Exception as e:
-                # include readwrite_file in error log
-                log.error(
-                    f"error parsing value {value} for variable {variable_found} from file {readwrite_file}"
-                )
-                log.error(e)
-                continue
-            #
-            if (variable is not None) and (variable != variable_found):
-                continue
-            if variable_found not in readwrite_dict[readwrite_file]:
-                readwrite_dict[readwrite_file][variable_found] = value
-    # remove entries that just have a timestamp and no variable values
-    # for
-    return readwrite_dict
-
-
-# KOSMA_file_io file holding the ACU SPEM parameters (used for optical pointing)
-KOSMA_SPEM_FILE = "KOSMA_ccatacu_point.in"
-
-# keys in the ACU SPEM set not used for the comparison or the update
-ignore_keys_acu = ["Time", "Year"]
-ignore_keys_kosma = ["ccatacu_model_date"]
-
-# ACU SPEM parameters that are compared between ACU and KOSMA_file_io and
-# dumped from the ACU to KOSMA_file_io, but never sent to the ACU (set_spem).
-# They do not follow the string_ccatacu_point[i] / ccatacu_point[i] scheme:
-# ACU name (without "Parameter ") -> KOSMA_file_io variable
-acu_readonly_keys = {"LEL velocity": "ccatacu_velelvmax"}   # [deg/s]
-
-# ACFG defaults of op_tel_model_type / op_tel_model_date (KOSMA_ccdpos.sim),
-# used if KOSMA_SPEM_FILE or its ccatacu_model_type / ccatacu_model_date is missing
-POINTING_MODEL_DEFAULTS = ("CCAT-ACU", "YYYY-MM-DDTHH:MM:SSZ")
-
-
-def _read_first_column(path, names):
+def _response_body(response):
     """
-    Values of the variables names in a KOSMA_file_io file, as strings.
-    Lines are "<value>   <name>   ! <comment>"; the name is the last field
-    before "!", the value is the first field (a value containing blanks is cut
-    at the first blank). The first occurrence of a variable is used.
-
-    Returns
-    -------
-    values : dict
-        name -> value for the names found
+    JSON body of an OCS response as a dict. Errors raised in front of the
+    API (e.g. an nginx 413 for a too large path payload) come back as HTML,
+    not JSON: then return status None and the start of the raw text as
+    message, so that the caller logs the real HTTP error instead of a
+    JSONDecodeError.
     """
-    values = {}
-    with open(path) as f:
-        for line in f:
-            fields = line.partition("!")[0].split()
-            if len(fields) >= 2 and fields[-1] in names and fields[-1] not in values:
-                values[fields[-1]] = fields[0]
-    return values
+    try:
+        body = response.json()
+    except ValueError:
+        return {"status": None, "message": response.text[:200].strip()}
+    if not isinstance(body, dict):
+        return {"status": None, "message": str(body)[:200]}
+    return body
 
 
-# obs_wavelength [micron] separating submm observations (at or above this value)
-# from optical / infrared camera observations (below this value).
-# KOSMA_ccdpos.sim is written only for the latter.
-SUBMM_MIN_WAVELENGTH = 100.0
-
-# used for the refraction correction if the weather parameters are bad or missing
-DEFAULT_WEATHER = {
-    "pressure": 0.518 * u.bar,
-    "temperature": -5.9 * u.deg_C,
-    "relative_humidity": 0.24,
-}
-
-
-def strip_parameter_prefix(spem):
+def _is_busy(response):
     """
-    Strip "Parameter " from the keys of the ACU dataset CmdSPEMParameter
+    True if TCS rejected the command because the previous one is still
+    running. TCS answers HTTP 503 with message "busy", but the OCS API passes
+    the TCS JSON body on with HTTP 200 (status "error", message "busy"),
+    so both forms are accepted.
     """
-    return {k.removeprefix("Parameter "): v for k, v in spem.items()}
+    if response.status_code == 503:
+        return True
+    body = _response_body(response)
+    return body.get("status") != "ok" and body.get("message") == "busy"
 
 
-def get_kosma_spem():
+def _error_code(response):
     """
-    Get ACU parameters stored in KOSMA_file_io
-
-    Returns
-    -------
-    spem : dict
-        Dictionary of ACU SPEM parameters
+    tel_error for a rejected command. The OCS reports TCS errors with HTTP
+    200 and status "error" in the body: busy is reported as 503, any other
+    rejection with HTTP 200 as 1, never as 0 or 200.
     """
-
-    spem_kosma_format = ImportKOSMAReadWriteIntoDictionary(
-        files = [KOSMA_SPEM_FILE])
-    if KOSMA_SPEM_FILE not in spem_kosma_format:
-        raise FileNotFoundError(f"{KOSMA_SPEM_FILE} not found in KOSMA_file_io")
-    spem_kosma_format = spem_kosma_format[KOSMA_SPEM_FILE]
-
-    # Make a dictionary of key = string_ccatacu_point[i], value = ccatacu_point[i]
-    spem = {}
-    for var, name in spem_kosma_format.items():
-        m = re.fullmatch(r"string_ccatacu_point\[(\d+)\]", var)
-        if not m:
-            continue
-        value_var = f"ccatacu_point[{m.group(1)}]"
-        if value_var not in spem_kosma_format:
-            raise ValueError(f"{KOSMA_SPEM_FILE} lacks {value_var} for {name}")
-        spem[name] = float(spem_kosma_format[value_var])
-
-    # ACU read-only parameters, stored under their ACU name for the comparison.
-    # If missing in the file, the comparison reports them as only in ACU.
-    for acu_name, kosma_var in acu_readonly_keys.items():
-        if kosma_var in spem_kosma_format:
-            spem[acu_name] = float(spem_kosma_format[kosma_var])
-
-    # also include ccatacu_model_date
-    spem["ccatacu_model_date"] = spem_kosma_format.get("ccatacu_model_date")
-
-    return spem
+    if _is_busy(response):
+        return 503
+    if response.status_code == 200:
+        return 1
+    return response.status_code
 
 
-def put_kosma_spem(spem, logger=None):
+@dataclass(frozen=True)
+class PathTarget:
     """
-    Update ACU parameters stored in KOSMA_file_io
+    Target of a path (non-HORIZON source): everything needed to compute the
+    path points except the time (see KOSMA_translator._build_path_payload).
 
-    Parameters
+    Attributes
     ----------
-    spem : dict
-        New SPEM parameters
-    logger : logging.Logger, optional
-        Logger to use. Defaults to the "kosma-ocs-translator" logger.
-
-    Returns
-    -------
-    spem : dict
-        SPEM parameters read back from KOSMA_file_io after the update
+    coord : astropy.SkyCoord
+        Source position in its catalogue frame, with proper motion and the
+        non-HORIZON sky/map and off-position offsets already applied
+    horizon_offsets : tuple of (d_lam_arcsec, d_bet_arcsec, true_angle)
+        Offsets applied in AltAz after the transform, in this order:
+        HORIZON sky/map offset, HORIZON off-position offset, focal plane offset.
+        Zero offsets are left out.
+    extended : bool
+        Extended elevation range (over the top)
     """
-    log = logger if logger is not None else logging.getLogger("kosma-ocs-translator")
-
-    # inverse of get_kosma_spem is needed to map key to the idx in string_ccatacu_point
-    spem_kosma_format = ImportKOSMAReadWriteIntoDictionary(
-        files = [KOSMA_SPEM_FILE]).get(KOSMA_SPEM_FILE, {})
-    name2idx = {}
-    for var, name in spem_kosma_format.items():
-        m = re.fullmatch(r"string_ccatacu_point\[(\d+)\]", var)
-        if m:
-            name2idx[name] = int(m.group(1))
-
-    commands = []
-    for key, value in spem.items():
-        if key in ignore_keys_acu or key in ignore_keys_kosma:
-            continue
-        if key in acu_readonly_keys:
-            commands.append(f"Kset_point {acu_readonly_keys[key]} {value:.6f}")
-            continue
-        if key not in name2idx:
-            raise KeyError(f"{key} not found in string_ccatacu_point")
-        commands.append(f"Kset_point ccatacu_point[{name2idx[key]}] {value:.6f}")
-    model_date = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d:%H:%M:%SZ")
-    commands.append(f"Kset_point ccatacu_model_date {model_date}")
-
-    # use a shell command, e.g. Kset_point ccatacu_point[0] 1
-    failed = []
-    for cmd in commands:
-        result = subprocess.run(
-            cmd.split(), stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
-        )
-        if result.returncode != 0:
-            log.error(f"Error running command {cmd}: {result.stderr}")
-            failed.append(cmd)
-        else:
-            log.debug(f"Command {cmd} ran successfully.")
-    if failed:
-        raise RuntimeError(f"Failed to update {KOSMA_SPEM_FILE}: {failed}")
-    log.info(f"{KOSMA_SPEM_FILE} updated (ccatacu_model_date = {model_date})")
-
-    return get_kosma_spem()
+    coord: SkyCoord
+    horizon_offsets: tuple = ()
+    extended: bool = False
 
 
 class KOSMA_translator:
+    """
+    Translates KOSMA obs2tel commands into OCS/TCS commands and reports the
+    telescope status back to KOSMA. Three threads use this object:
+
+    - main thread: watches KOSMA_obs2tel.set and dispatches new commands
+      (sections "obs2tel input" and "Command dispatch")
+    - track thread: one per command, computes and sends it to TCS
+      (sections "Tracking", "TCS communication", "Cookie handshake")
+    - background thread: polls the ACU and writes KOSMA_tel2obs.set and
+      KOSMA_ccdpos.sim (section "Status output")
+
+    The track thread and the background thread share the cookie handshake
+    state (tel_return_cookie, tel_error, on_track_not_before, ...) and
+    last_payload / last_obs2tel.
+    """
+
+    # =======================================================================
+    # Set-up (main thread, at start-up)
+    # =======================================================================
+
     def __init__(self, ocs, abort_if_unknown=True, refraction_correction=False):
+        # --- configuration --------------------------------------------------
         self.ocs = ocs
-        # abort before the first path if there is no record of the previous command
-        self.abort_if_unknown = abort_if_unknown
-        # apply the atmospheric refraction in the AltAz transforms
-        self.refraction_correction = refraction_correction
-        # AltAz keyword arguments for refraction, updated for each new track.
-        # Empty: no refraction (AltAz default pressure is 0)
-        self._refraction_params = {}
-        # last known state of the ACU RF refraction correction
-        self._acu_refraction_on = False
-        #
-        self.log = logging.getLogger("kosma-ocs-translator")
+        self.log = logging.getLogger(DEFAULT_LOGGER_NAME)
         self._host_pid = f"({socket.gethostname()}:{os.getpid()})"
-        #
         self.read_write_dir = os.environ.get(
             "WRITE_DIR", "/net/KOSMA_file_io/ReadWrite/"
         )
         self.log.info(f"Using KOSMA ReadWrite directory: {self.read_write_dir}")
-        #
+        # ocs.earth_location is set when the OCS client connects: it is fetched from
+        # TCS /telescope-position (hard-coded FYST constants in TCS astro.go, same as
+        # the TCS uses for its own az/el), with a built-in default if that fails.
+        self.location = ocs.earth_location
+        self.log.info(f"Telescope location: {self.location}")
+        # abort before the first path if there is no record of the previous command
+        self.abort_if_unknown = abort_if_unknown
+        # [sec] length of a path sent to TCS (and of the move-to bookkeeping payload)
+        self.track_duration = 600
+        # [sec] minimum remaining time of the last path to keep it for a new obs2tel
+        # commanding the same target (see reuse_last_track)
+        self.reuse_min_remaining = self.track_duration / 2
+
+        # --- status output templates ----------------------------------------
         self.load_tel2obs_template()
         self.load_ccdpossim_template()
-        #
+
+        # --- cookie handshake (track thread -> background thread) ------------
         self.tel_return_cookie = 0
         self.old_tel_return_cookie = 0
         self.next_tel_return_cookie = 0
@@ -548,78 +393,114 @@ class KOSMA_translator:
         # set only after that, so the time the telescope needs to settle onto a
         # new path is not reported as lost track.
         self.tel_was_on_track = False
-        # [sec] length of a path sent to TCS (and of the move-to bookkeeping payload)
-        self.track_duration = 600
-        # [sec] minimum remaining time of the last path to keep it for a new obs2tel
-        # commanding the same target (see reuse_last_track)
-        self.reuse_min_remaining = self.track_duration / 2
         # True if the path for tel_return_cookie was rejected or failed to be sent
         self.tel_path_failed = False
         self.tel_error = 0
         self.tel_lost_track = "N"
+
+        # --- commands (main thread / track thread) ---------------------------
+        self._track_thread = None
+        self._track_stop_event = threading.Event()
+        # record of the last accepted command and the obs2tel it was sent for
+        self.last_payload = None
+        self.last_obs2tel = None
         # True while a move-to sent by _slew_to may still be running on TCS
         # (e.g. its track was superseded before arrival): the next command aborts it
         self.slew_in_progress = False
-        self.read_obs2tel_file()
-        # ocs.earth_location is set when the OCS client connects: it is fetched from
-        # TCS /telescope-position (hard-coded FYST constants in TCS astro.go, same as
-        # the TCS uses for its own az/el), with a built-in default if that fails.
-        self.location = ocs.earth_location
-        self.log.info(f"Telescope location: {self.location}")
+        # True after the last command (path, move-to or slew) was aborted and
+        # nothing was accepted by TCS since: nothing is running, so no further
+        # abort is needed and the last path must not be reused
+        self.last_aborted = False
+
+        # --- coordinates and refraction -------------------------------------
+        # apply the atmospheric refraction in the AltAz transforms
+        self.refraction_correction = refraction_correction
         self.log.info(f"Refraction correction: {'ON' if refraction_correction else 'OFF'}")
-        # Add tracking thread management
-        self._track_thread = None
-        self._track_stop_event = threading.Event()
-        # Keep the record of the last payload and corresponding obs2tel
-        self.last_payload = None
-        self.last_obs2tel = None
+        # AltAz keyword arguments for refraction, updated for each new track.
+        # Empty: no refraction (AltAz default pressure is 0)
+        self._refraction_params = {}
+        # last known state of the ACU RF refraction correction
+        self._acu_refraction_on = False
+
+        # --- status output ---------------------------------------------------
         # pointing model identifier for KOSMA_ccdpos.sim, cached by the
         # modification time of KOSMA_ccatacu_point.in (see _pointing_model_info)
         self._model_info_key = None
-        self._model_info = POINTING_MODEL_DEFAULTS
+        self._model_info = POINTING_MODEL_MISSING
 
-    def _pointing_model_info(self):
+        # --- obs2tel input (sets obs2tel, next_tel_return_cookie, ...) -------
+        self.read_obs2tel_file()
+
+    def load_tel2obs_template(self):
+        self.tel2obs = """\
+        {0[timestring]}  {0[timestamp]}   File update time stamp   ! ccat_translator {0[host_pid]}
+        {0[tel_telescope]}   tel_telescope   ! Telescope Identifier (for display and backend_name in FITS header)
+        {0[tel_on_track]}   tel_on_track   ! Y if tracking on commanded position/track within tolerance [Y/N]
+        {0[tel_lost_track]}   tel_lost_track   ! Y if tracking got beyond tolerance since start of track [Y/N]
+        {0[tel_pos_in_range]}   tel_pos_in_range   ! Y if commanded position is within telescope range [Y/N]
+        {0[tel_error]}   tel_error   ! flags telescope command syntax/consistency and functional errors (=0: ok)
+        NONE   tel_error_string   ! Error message associated with telescope command (=NONE: OK)
+        5   tel_error_level   ! Error level for message in tel_error_string [1: trace, 2: debug, 4: info, 5: message, 7: warn, 8: error, 9: fatal]
+        {0[tel_return_cookie]}  tel_return_cookie   ! return cookie to identify proper observation
+        {0[tel_plate_scale]}  tel_plate_scale   ! plate scale of focal plane [arcsec/mm]
+        {0[tel_latitude]}   tel_latitude   ! latitude of observatory (needed for Doppler correction) [degree]
+        {0[tel_longitude]}  tel_longitude   ! longitude of observatory (needed for Doppler correction) [degree, +west (astronomical notation)]
+        {0[tel_altitude]}  tel_altitude   ! height above sea level (needed for Doppler correction) [meter]
+        {0[tel_angle_focal_plane]}   tel_angle_focal_plane   ! ccw angle from 2nd coordinate of obs_coord_sys_del to 2nd coordinate of telescope reference system (TARF,HORIZON) [degree] (NOTE: was formerly opposite, but wrong)
+        0   tel_los_act   ! actual los-angle [degree]
+        {0[tel_time_act]}   tel_time_act   ! time when status data were valid [seconds since 1970 UTC]
+        {0[tel_time_del]}   tel_time_del   ! time since start of track (may be negative, if start in the future) [seconds]
+        {0[tel_azm_cmd]:3.4f}   tel_azm_cmd   ! commanded azimuth (for tracking display) [degree,cw toward east]
+        {0[tel_elv_cmd]:3.4f}   tel_elv_cmd   ! commanded elevation (for tracking display and for atmospheric calibration) [degree]
+        {0[tel_azm_act]:3.4f}   tel_azm_act   ! actual azimuth (for tracking display) [degree,cw toward east]
+        {0[tel_elv_act]:3.4f}   tel_elv_act   ! actual elevation (for tracking display) [degree]
+        {0[tel_supports_ephemeris]}   tel_supports_ephemeris   ! Telescope supports ephemeris tracking [Y/N] !
+        {0[tel_mjd1]}    tel_mjd1 ! modified Julian Date UT1 [days]
+        {0[tel_vel_azm]} tel_vel_azm ! azimuth velocity [arcsec/sec]
+        {0[tel_vel_elv]} tel_vel_elv ! elevation velocity [arcsec/sec]
         """
-        Pointing model type and date applied by the ACU, for op_tel_model_type /
-        op_tel_model_date in KOSMA_ccdpos.sim. Copied from ccatacu_model_type /
-        ccatacu_model_date in KOSMA_ccatacu_point.in  The file is re-read only when its
-        modification time changes; ACFG defaults are used if it is missing.
+
+    def load_ccdpossim_template(self):
+        self.ccdpossim = """\
+        {0[timestring]}  {0[timestamp]}   File update time stamp   ! ccat_translator {0[host_pid]}
+        {0[op_azm]}  op_azm   ! azimuth [radian] for optical pointing (commanded to telescope, without pointing model corrections)
+        {0[op_elv]}  op_elv   ! elevatin [radian] for optical pointing (commanded to telescope, without pointing model corrections)
+        {0[op_vel_elv]}  op_vel_elv   ! elevation velocity [arcsec/sec], recorded for optical pointing simulation
+        {0[op_oazm]}  op_oazm   ! azimuth pointing offset [rad]; optical pointing (HORIZON system)
+        {0[op_oelv]}  op_oelv   ! elevation pointing offset [rad]; optical pointing (HORIZON system)
+        {0[op_tel_model_type]}   op_tel_model_type   ! identifier string for telescope task pointing model applied [KOSMA_3m,CCAT_*,CCAT-ACU*]
+        {0[op_tel_model_date]}   op_tel_model_date   ! creation date for telescope task pointing model applied
+        {0[del_tel_tot_azm]}   del_tel_tot_azm   ! azimuth  pointing offset [rad] from telescope pointing model (including non repeatable terms)
+        {0[del_tel_tot_elv]}   del_tel_tot_elv   ! elevation pointing offset [rad] from telescope pointing model (including non repeatable terms)
+        {0[del_tel_rep_azm]}   del_tel_rep_azm   ! azimuth  pointing offset [rad] from telescope pointing model (only repeatable terms)
+        {0[del_tel_rep_elv]}   del_tel_rep_elv   ! elevation pointing offset [rad] from telescope pointing model (only repeatable terms)
+        """
+
+    def dump_spem_to_kosma(self):
+        """
+        Mirror the SPEM parameters currently used by the ACU into KOSMA_file_io,
+        so that the pointing fit in KOSMA starts from the actual ACU model.
+        Failures are logged but do not stop the translator.
 
         Returns
         -------
-        model_type, model_date : str
+        spem : dict or None
+            SPEM parameters read back from KOSMA_file_io, None if the dump failed
         """
-        path = f"{self.read_write_dir}/{KOSMA_SPEM_FILE}"
+        self.log.info(f"dumping ACU SPEM parameters to {KOSMA_SPEM_FILE}")
         try:
-            st = os.stat(path)
-            key = (st.st_mtime_ns, st.st_size)
-        except FileNotFoundError:
-            key = "missing"
-        if key == self._model_info_key:
-            return self._model_info
+            spem_acu = strip_parameter_prefix(self.ocs.get_dataset("CmdSPEMParameter"))
+            self.log.info(f"ACU SPEM parameters: {spem_acu}")
+            spem_kosma = put_kosma_spem(spem_acu, logger=self.log)
+        except Exception as e:
+            self.log.error(f"Failed to dump ACU SPEM parameters to {KOSMA_SPEM_FILE}: {e}")
+            return None
+        self.log.info(f"SPEM parameters in {KOSMA_SPEM_FILE}: {spem_kosma}")
+        return spem_kosma
 
-        self._model_info_key = key
-        if key == "missing":
-            self.log.warning(
-                f"{path} not found, using default pointing model type/date "
-                f"{POINTING_MODEL_DEFAULTS} in KOSMA_ccdpos.sim"
-            )
-            self._model_info = POINTING_MODEL_DEFAULTS
-            return self._model_info
-
-        found = _read_first_column(path, ["ccatacu_model_type", "ccatacu_model_date"])
-        missing = [k for k in ("ccatacu_model_type", "ccatacu_model_date") if k not in found]
-        if missing:
-            self.log.warning(f"{', '.join(missing)} not found in {path}, using default")
-        self._model_info = (
-            found.get("ccatacu_model_type", POINTING_MODEL_DEFAULTS[0]),
-            found.get("ccatacu_model_date", POINTING_MODEL_DEFAULTS[1]),
-        )
-        self.log.info(
-            f"pointing model for KOSMA_ccdpos.sim: type={self._model_info[0]} "
-            f"date={self._model_info[1]}"
-        )
-        return self._model_info
+    # =======================================================================
+    # obs2tel input (main thread)
+    # =======================================================================
 
     def check_for_obs2tel_update(self):
         # check modification time of obs2tel file and store
@@ -669,50 +550,161 @@ class KOSMA_translator:
             self.log.error(f"Missing required obs2tel keys: {missing}")
             raise KeyError(f"Missing required obs2tel keys: {missing}")
 
-    def load_tel2obs_template(self):
-        self.tel2obs = """\
-        {0[timestring]}  {0[timestamp]}   File update time stamp   ! ccat_translator {0[host_pid]}
-        {0[tel_telescope]}   tel_telescope   ! Telescope Identifier (for display and backend_name in FITS header)
-        {0[tel_on_track]}   tel_on_track   ! Y if tracking on commanded position/track within tolerance [Y/N]
-        {0[tel_lost_track]}   tel_lost_track   ! Y if tracking got beyond tolerance since start of track [Y/N]
-        {0[tel_pos_in_range]}   tel_pos_in_range   ! Y if commanded position is within telescope range [Y/N]
-        {0[tel_error]}   tel_error   ! flags telescope command syntax/consistency and functional errors (=0: ok)
-        NONE   tel_error_string   ! Error message associated with telescope command (=NONE: OK)
-        5   tel_error_level   ! Error level for message in tel_error_string [1: trace, 2: debug, 4: info, 5: message, 7: warn, 8: error, 9: fatal]
-        {0[tel_return_cookie]}  tel_return_cookie   ! return cookie to identify proper observation
-        {0[tel_plate_scale]}  tel_plate_scale   ! plate scale of focal plane [arcsec/mm]
-        {0[tel_latitude]}   tel_latitude   ! latitude of observatory (needed for Doppler correction) [degree]
-        {0[tel_longitude]}  tel_longitude   ! longitude of observatory (needed for Doppler correction) [degree, +west (astronomical notation)]
-        {0[tel_altitude]}  tel_altitude   ! height above sea level (needed for Doppler correction) [meter]
-        {0[tel_angle_focal_plane]}   tel_angle_focal_plane   ! ccw angle from 2nd coordinate of obs_coord_sys_del to 2nd coordinate of telescope reference system (TARF,HORIZON) [degree] (NOTE: was formerly opposite, but wrong)
-        0   tel_los_act   ! actual los-angle [degree]
-        {0[tel_time_act]}   tel_time_act   ! time when status data were valid [seconds since 1970 UTC]
-        {0[tel_time_del]}   tel_time_del   ! time since start of track (may be negative, if start in the future) [seconds]
-        {0[tel_azm_cmd]:3.4f}   tel_azm_cmd   ! commanded azimuth (for tracking display) [degree,cw toward east]
-        {0[tel_elv_cmd]:3.4f}   tel_elv_cmd   ! commanded elevation (for tracking display and for atmospheric calibration) [degree]
-        {0[tel_azm_act]:3.4f}   tel_azm_act   ! actual azimuth (for tracking display) [degree,cw toward east]
-        {0[tel_elv_act]:3.4f}   tel_elv_act   ! actual elevation (for tracking display) [degree]
-        {0[tel_supports_ephemeris]}   tel_supports_ephemeris   ! Telescope supports ephemeris tracking [Y/N] !
-        {0[tel_mjd1]}    tel_mjd1 ! modified Julian Date UT1 [days]
-        {0[tel_vel_azm]} tel_vel_azm ! azimuth velocity [arcsec/sec]
-        {0[tel_vel_elv]} tel_vel_elv ! elevation velocity [arcsec/sec]
-        """
+    # =======================================================================
+    # Command dispatch (main thread)
+    # =======================================================================
 
-    def load_ccdpossim_template(self):
-        self.ccdpossim = """\
-        {0[timestring]}  {0[timestamp]}   File update time stamp   ! ccat_translator {0[host_pid]}
-        {0[op_azm]}  op_azm   ! azimuth [radian] for optical pointing (commanded to telescope, without pointing model corrections)
-        {0[op_elv]}  op_elv   ! elevatin [radian] for optical pointing (commanded to telescope, without pointing model corrections)
-        {0[op_vel_elv]}  op_vel_elv   ! elevation velocity [arcsec/sec], recorded for optical pointing simulation
-        {0[op_oazm]}  op_oazm   ! azimuth pointing offset [rad]; optical pointing (HORIZON system)
-        {0[op_oelv]}  op_oelv   ! elevation pointing offset [rad]; optical pointing (HORIZON system)
-        {0[op_tel_model_type]}   op_tel_model_type   ! identifier string for telescope task pointing model applied [KOSMA_3m,CCAT_*,CCAT-ACU*]
-        {0[op_tel_model_date]}   op_tel_model_date   ! creation date for telescope task pointing model applied
-        {0[del_tel_tot_azm]}   del_tel_tot_azm   ! azimuth  pointing offset [rad] from telescope pointing model (including non repeatable terms)
-        {0[del_tel_tot_elv]}   del_tel_tot_elv   ! elevation pointing offset [rad] from telescope pointing model (including non repeatable terms)
-        {0[del_tel_rep_azm]}   del_tel_rep_azm   ! azimuth  pointing offset [rad] from telescope pointing model (only repeatable terms)
-        {0[del_tel_rep_elv]}   del_tel_rep_elv   ! elevation pointing offset [rad] from telescope pointing model (only repeatable terms)
+    def process_obs2tel(self):
         """
+        Read the changed KOSMA_obs2tel.set and act on it: ignore it if the
+        cookie has not changed, keep the last path for the same target, or
+        start a new command depending on obs_otf_mode.
+
+        Returns
+        -------
+        handled : bool
+            True if a new cookie was handled (path reused or track started).
+            False if nothing was done; the caller then waits before polling again.
+        """
+        self.read_obs2tel_file()
+        if self.next_tel_return_cookie == self.tel_return_cookie:
+            self.log.info(
+                f"obs2tel cookie has not changed ({self.next_tel_return_cookie}), no action taken"
+            )
+            return False
+        if self.reuse_last_track():
+            return True
+        otf_mode = self.obs2tel["obs_otf_mode"]
+        if otf_mode in ["C", "P"]:
+            # see section "OTF" at the end of the class
+            self.log.info("OTF mode command received, not yet implemented")
+            return False
+        if otf_mode == "N":
+            self.log.info("track mode command received")
+            self.track()
+            return True
+        self.log.warning(f"unknown obs_otf_mode {otf_mode!r}, no action taken")
+        return False
+
+    # obs2tel variables that define the commanded path; obs2tel files that differ
+    # only in other variables (e.g. the cookie) command the same path
+    SAME_TARGET_KEYS = [
+        "obs_lam_on", "obs_bet_on", "obs_coord_sys_on",
+        "obs_lam_del", "obs_bet_del", "obs_coord_sys_del",
+        "obs_lam_off", "obs_bet_off", "obs_coord_sys_off",
+        "obs_extended_elevation_range",
+        "obs_x_focal_plane", "obs_y_focal_plane",
+        "obs_otf_mode", "obs_lam_vel", "obs_bet_vel",
+        "obs_wavelength",   # the refraction depends on it
+    ]
+
+    def reuse_last_track(self):
+        """
+        If the new obs2tel commands the same target as the last accepted path
+        and that path has at least reuse_min_remaining left, keep it instead of
+        aborting and resending it (e.g. control_tel presets the next position,
+        then commands the same position again with a new cookie).
+        Returns True if the last path is reused.
+        """
+        if self.last_payload is None or self.last_obs2tel is None or self.tel_path_failed:
+            return False
+        if self.slew_in_progress:
+            # the telescope has left the last path for a (superseded) slew
+            return False
+        if self.last_aborted:
+            # the last path was aborted for a (superseded) newer command
+            return False
+        if self._track_thread and self._track_thread.is_alive():
+            return False
+        if any(self.obs2tel[k] != self.last_obs2tel[k] for k in self.SAME_TARGET_KEYS):
+            return False
+        if self.last_payload["type"] != "move_to":
+            last_end_time = self.last_payload["start_time"] + self.last_payload["points"][-1][0]
+            if last_end_time - time.time() < self.reuse_min_remaining:
+                return False
+
+        cookie = self.next_tel_return_cookie
+        self.last_obs2tel = self.obs2tel
+        # on_track_not_before is kept: if the path has not started yet,
+        # tel_on_track stays "N" until it has
+        self.log.info(f"same target, last path kept, returning cookie {cookie}")
+        self.old_tel_return_cookie = self.tel_return_cookie
+        self.tel_return_cookie = cookie
+        self.tel_lost_track = "N"    # initialize for the new cookie
+        self.tel_was_on_track = False
+        return True
+
+    def track(self):
+
+        # 1. If a track is already running → stop it
+        if self._track_thread and self._track_thread.is_alive():
+            self.log.info("Stopping previous track before starting new one")
+            self.stop_track()
+
+        # 2. Reset stop event
+        self._track_stop_event.clear()
+
+        # 3. Start new thread
+        self._track_thread = threading.Thread(
+            target=self._track_loop,
+            daemon=True
+        )
+        self._track_thread.start()
+
+    def stop_track(self):
+        if self._track_thread and self._track_thread.is_alive():
+            self.log.info("Signaling track thread to stop")
+
+            self._track_stop_event.set()   # signal thread
+
+            self._track_thread.join()      # WAIT until thread exits
+
+            self.log.info("Track thread stopped")
+
+            self._track_thread = None
+
+    # =======================================================================
+    # Status output (background thread): KOSMA_tel2obs.set, KOSMA_ccdpos.sim
+    # =======================================================================
+
+    def write_tel2obs_file(self):
+        input_dict, ccd_input_dict = self.set_tel2obs_dict()
+        if input_dict is None:
+            return
+
+        self.log.debug(
+            f"writing tel2obs file with obs cookie: {self.tel_return_cookie}"
+        )
+        write_atomic(
+            f"{self.read_write_dir}/KOSMA_tel2obs.set", self.tel2obs.format(input_dict)
+        )
+
+        if ccd_input_dict:
+            write_atomic(
+                f"{self.read_write_dir}/KOSMA_ccdpos.sim", self.ccdpossim.format(ccd_input_dict)
+            )
+
+    def set_tel2obs_dict(self):
+        """
+        Set dictionary of KOSMA_tel2obs and KOSMA_ccdpos.sim. The latter is None
+        for submm observations (obs_wavelength >= SUBMM_MIN_WAVELENGTH), for
+        which KOSMA_ccdpos.sim is not written.
+        """
+        if (self.last_payload is None or self.last_obs2tel is None) and not self.tel_path_failed:
+            self.log.info('No record of successfully sent command to telescope. Wait...')
+            return None, None
+
+        response = self.ocs.get_status()
+        response_pointing = self.ocs.get_dataset("CmdPointingCorrection")
+        self._check_acu_refraction(response_pointing)
+
+        input_dict = self._build_tel2obs_params(response, response_pointing)
+        # KOSMA_ccdpos.sim is only for optical / infrared camera observations
+        ccd_input_dict = None
+        if self.obs2tel["obs_wavelength"] < SUBMM_MIN_WAVELENGTH:
+            ccd_input_dict = self._build_ccdpos_params(input_dict, response_pointing)
+
+        return input_dict, ccd_input_dict
 
     def _build_tel2obs_params(self, response: dict, response_pointing: dict) -> dict:
         """
@@ -732,7 +724,7 @@ class KOSMA_translator:
         #       follow-up how this is used in combination of
         #       instrument plate scale factor
 
-        # time stamp of the status, relative to the start of the last sent path
+        # time stamp of the status and its relative time to the start of the last sent path
         status_time = _get_time_from_acu_format(response["Time"], response["Year"])
         if self.last_payload is None:
             # no path accepted yet; only reached when the first path failed
@@ -769,8 +761,8 @@ class KOSMA_translator:
         # KOSMA expects the positions of a perfect telescope: with refraction,
         # without the pointing model. The ACU current position is the encoder position:
         #   current = path position + total pointing correction + tracking error
-        #   tel_*_cmd = path position (interpolated from the last payload), which
-        #               includes the refraction applied by the translator
+        #   tel_*_cmd = path position (interpolated from the last payload)
+        #               including refraction correction
         #   tel_*_act = current - total pointing correction
         del_tot_azm, del_tot_elv = _total_pointing_correction(response_pointing)
         input_dict["tel_azm_act"] = current_azi - del_tot_azm
@@ -784,6 +776,9 @@ class KOSMA_translator:
             input_dict["tel_vel_elv_cmd"] = 0.0
         else:
             pts = np.array(self.last_payload["points"])   # shape (N, 5): dt, az, el, vaz, vel
+            # TODO: if the refraction correction is done at OCS or ACU, corresponding
+            # correction has to be added here. If it is done at translator,
+            # the path already includes the refraction correction.
             input_dict["tel_azm_cmd"] = np.interp(t_rel, pts[:, 0], pts[:, 1])
             input_dict["tel_elv_cmd"] = np.interp(t_rel, pts[:, 0], pts[:, 2])
             # interpolated here, from the same payload as tel_elv_cmd
@@ -848,7 +843,7 @@ class KOSMA_translator:
 
             epsilon = 1e-3  # about 4 arcsec, small angle approximation is sufficient
             north = _apply_offset(
-                pos.transform_to(coord_sys_map[cmd_coord_sys_del]), 0, epsilon, 'Y'
+                pos.transform_to(COORD_SYS_MAP[cmd_coord_sys_del]), 0, epsilon, 'Y'
             ).transform_to(altaz_frame)
 
             angle = np.arctan2(
@@ -915,62 +910,56 @@ class KOSMA_translator:
 
         return ccd_input_dict
 
-    def set_tel2obs_dict(self):
+    def _pointing_model_info(self):
         """
-        Set dictionary of KOSMA_tel2obs and KOSMA_ccdpos.sim. The latter is None
-        for submm observations (obs_wavelength >= SUBMM_MIN_WAVELENGTH), for
-        which KOSMA_ccdpos.sim is not written.
+        Pointing model type and date applied by the ACU, for op_tel_model_type /
+        op_tel_model_date in KOSMA_ccdpos.sim. Copied from ccatacu_model_type /
+        ccatacu_model_date in KOSMA_ccatacu_point.in. The file is re-read only when its
+        modification time changes. A missing file or entry is an error: the
+        POINTING_MODEL_MISSING marker is used for it, which makes starpoint abort.
+
+        Returns
+        -------
+        model_type, model_date : str
         """
-        if (self.last_payload is None or self.last_obs2tel is None) and not self.tel_path_failed:
-            self.log.info('No record of successfully sent command to telescope. Wait...')
-            return None, None
+        path = f"{self.read_write_dir}/{KOSMA_SPEM_FILE}"
+        try:
+            st = os.stat(path)
+            key = (st.st_mtime_ns, st.st_size)
+        except FileNotFoundError:
+            key = "missing"
+        if key == self._model_info_key:
+            return self._model_info
 
-        response = self.ocs.get_status()
-        response_pointing = self.ocs.get_dataset("CmdPointingCorrection")
-        self._check_acu_refraction(response_pointing)
-
-        input_dict = self._build_tel2obs_params(response, response_pointing)
-        # KOSMA_ccdpos.sim is only for optical / infrared camera observations
-        ccd_input_dict = None
-        if self.obs2tel["obs_wavelength"] < SUBMM_MIN_WAVELENGTH:
-            ccd_input_dict = self._build_ccdpos_params(input_dict, response_pointing)
-
-        return input_dict, ccd_input_dict
-
-    def write_tel2obs_file(self):
-        input_dict, ccd_input_dict = self.set_tel2obs_dict()
-        if input_dict is None:
-            return
-
-        self.log.debug(
-            f"writing tel2obs file with obs cookie: {self.tel_return_cookie}"
-        )
-        _write_atomic(
-            f"{self.read_write_dir}/KOSMA_tel2obs.set", self.tel2obs.format(input_dict)
-        )
-
-        if ccd_input_dict:
-            _write_atomic(
-                f"{self.read_write_dir}/KOSMA_ccdpos.sim", self.ccdpossim.format(ccd_input_dict)
+        self._model_info_key = key
+        if key == "missing":
+            self.log.error(
+                f"{path} not found, writing pointing model type/date "
+                f"{POINTING_MODEL_MISSING} to KOSMA_ccdpos.sim (starpoint will abort)"
             )
+            self._model_info = POINTING_MODEL_MISSING
+            return self._model_info
 
-
-    def track(self):
-
-        # 1. If a track is already running → stop it
-        if self._track_thread and self._track_thread.is_alive():
-            self.log.info("Stopping previous track before starting new one")
-            self.stop_track()
-
-        # 2. Reset stop event
-        self._track_stop_event.clear()
-
-        # 3. Start new thread
-        self._track_thread = threading.Thread(
-            target=self._track_loop,
-            daemon=True
+        found = read_first_column(path, ["ccatacu_model_type", "ccatacu_model_date"])
+        missing = [k for k in ("ccatacu_model_type", "ccatacu_model_date") if k not in found]
+        if missing:
+            self.log.error(
+                f"{', '.join(missing)} not found in {path}, writing "
+                f"{POINTING_MODEL_MISSING} for it to KOSMA_ccdpos.sim (starpoint will abort)"
+            )
+        self._model_info = (
+            found.get("ccatacu_model_type", POINTING_MODEL_MISSING[0]),
+            found.get("ccatacu_model_date", POINTING_MODEL_MISSING[1]),
         )
-        self._track_thread.start()
+        self.log.info(
+            f"pointing model for KOSMA_ccdpos.sim: type={self._model_info[0]} "
+            f"date={self._model_info[1]}"
+        )
+        return self._model_info
+
+    # =======================================================================
+    # Tracking (track thread): compute the command for obs2tel and send it
+    # =======================================================================
 
     def _track_loop(self):
         """
@@ -988,139 +977,152 @@ class KOSMA_translator:
 
     def _send_track(self, cookie):
         """
-        This routine is called every time when KOSMA_obs2tel.set is updated. If a 
+        Send the command for the current obs2tel to TCS: a move-to for a HORIZON
+        source (_send_move_to), otherwise a path (_send_path).
+
+        This routine is called every time when KOSMA_obs2tel.set is updated. If a
         track is already running, the previous one is stopped and the new one starts.
         Therefore practically the duration of the track in this routine is overwritten
         by a new track triggered by the KOSMA_obs2tel update.
         This justifies to use the fixed obs_x/y_focal_plane, which is a function of
         elevation and changes over time: once the value changes more than a tolerance,
         a new track is triggered with updated obs_x/y_focal_plane values.
+
+        obs2tel variables used:
+        - obs_lam_on, obs_bet_on [deg], obs_coord_sys_on: commanded position
+        - obs_lam_del, obs_bet_del [arcsec], obs_coord_sys_del, obs_true_angle_del (Y/N):
+          sky/map offsets, applied before the AltAz transform unless HORIZON frame
+        - obs_lam_off, obs_bet_off [arcsec], obs_coord_sys_off, obs_true_angle_off (Y/N):
+          off-position offsets, applied before the AltAz transform unless HORIZON frame
+        - obs_x_focal_plane, obs_y_focal_plane [arcsec]: focal plane offsets, always
+          applied after the AltAz transform, always with cos-correction (true_angle=Y).
+          For CCAT obs_coord_sys_focal_plane is always set to HORIZON.
+        - obs_pm_lam, obs_pm_bet [arcsec/yr], obs_paralx [arcsec]: proper motion and
+          parallax of the source (path only). obs_pm_lam/obs_pm_bet are raw coordinate
+          rates dlam/dt, not cos(bet)*dlam/dt; slalib h2fk5.c note 1: "proper motions
+          in RA are dRA/dt rather than cos(Dec)*dRA/dt"
+        - obs_extended_elevation_range (Y/N)
+        - obs_wavelength [micron]: used for the refraction correction
         """
-
-        # commanded position
-        cmd_lam = self.obs2tel["obs_lam_on"]
-        cmd_bet = self.obs2tel["obs_bet_on"]
-        cmd_coord_sys_on = self.obs2tel["obs_coord_sys_on"]
-
-        # sky/map offsets (arcsec, applied before AltAz transform unless HORIZON frame)
-        lam_del = self.obs2tel["obs_lam_del"]
-        bet_del = self.obs2tel["obs_bet_del"]
-        coord_sys_del = self.obs2tel["obs_coord_sys_del"]
-        true_angle_del = self.obs2tel["obs_true_angle_del"]  # Y/N
-
-        # off-position offsets (arcsec, applied before AltAz transform unless HORIZON frame)
-        lam_off = self.obs2tel["obs_lam_off"]
-        bet_off = self.obs2tel["obs_bet_off"]
-        coord_sys_off = self.obs2tel["obs_coord_sys_off"]
-        true_angle_off = self.obs2tel["obs_true_angle_off"]  # Y/N
-
-        # focal plane offsets (arcsec, always applied after AltAz transform,
-        # and always apply cos-correction (corresponding true_angle=Y).
-        # for CCAT obs_coord_sys_focal_plane is always set to HORIZON
-        focal_plane_az = self.obs2tel["obs_x_focal_plane"]
-        focal_plane_el = self.obs2tel["obs_y_focal_plane"]
-
-        # proper motion (arcsec/yr) and parallax (arcsec) of the source
-        # obs_pm_lam/obs_pm_bet are raw coordinate rates dlam/dt, not cos(bet)*dlam/dt;
-        # slalib h2fk5.c note 1: "proper motions in RA are dRA/dt 
-        #                         rather than cos(Dec)*dRA/dt"
-        pm_lam = self.obs2tel["obs_pm_lam"]
-        pm_bet = self.obs2tel["obs_pm_bet"]
-        paralx = self.obs2tel["obs_paralx"]
-
-        # extended elevation range
-        if self.obs2tel["obs_extended_elevation_range"] == "Y":
-            if_extended = True
-        else:
-            if_extended = False
-
-        # obs wavelength (used for refraction correction)
-        obs_wavelength = self.obs2tel["obs_wavelength"]
-
         # validate coordinate systems
-        for label, csys in [
-            ("obs_coord_sys_on", cmd_coord_sys_on),
-            ("obs_coord_sys_del", coord_sys_del),
-            ("obs_coord_sys_off", coord_sys_off),
-        ]:
-            if csys not in coord_sys_map:
-                msg = f"Unknown coordinate system {label}={csys!r}, must be one of {list(coord_sys_map)}"
+        for label in ("obs_coord_sys_on", "obs_coord_sys_del", "obs_coord_sys_off"):
+            csys = self.obs2tel[label]
+            if csys not in COORD_SYS_MAP:
+                msg = f"Unknown coordinate system {label}={csys!r}, must be one of {list(COORD_SYS_MAP)}"
                 self.log.error(msg)
                 raise ValueError(msg)
 
         # get weather
-        self._update_refraction_params(obs_wavelength)
-
-        # track details
-        track_duration = self.track_duration  # seconds
-        frame = coord_sys_map[cmd_coord_sys_on]
+        self._update_refraction_params(self.obs2tel["obs_wavelength"])
 
         # If coordinate system of ON is Horizon, use move-to.
         # For this case, it does not make much sense if map or off offset is given
-        # by other coordinate system but such a case is also covered below.
-        if frame.lower() == "altaz":
-            now_frame = self._altaz_frame(Time.now())
-            coord = SkyCoord(cmd_lam * u.deg, cmd_bet * u.deg, frame=now_frame)
-            if lam_del != 0.0 or bet_del != 0.0:
-                if coord_sys_del == "HORIZON":
-                    coord = _apply_offset(coord, lam_del, bet_del, true_angle_del)
-                else:
-                    coord = _apply_offset(
-                        coord.transform_to(coord_sys_map[coord_sys_del]),
-                        lam_del, bet_del, true_angle_del,
-                    ).transform_to(now_frame)
-            if lam_off != 0.0 or bet_off != 0.0:
-                if coord_sys_off == "HORIZON":
-                    coord = _apply_offset(coord, lam_off, bet_off, true_angle_off)
-                else:
-                    coord = _apply_offset(
-                        coord.transform_to(coord_sys_map[coord_sys_off]),
-                        lam_off, bet_off, true_angle_off,
-                    ).transform_to(now_frame)
+        # by other coordinate system but such a case is also covered in _send_move_to.
+        if COORD_SYS_MAP[self.obs2tel["obs_coord_sys_on"]] == "altaz":
+            self._send_move_to(cookie)
+        else:
+            self._send_path(cookie)
 
-            self.log.info(
-                f"tracking to {coord.az.deg} {coord.alt.deg} in {cmd_coord_sys_on} frame"
-            )
+    def _send_move_to(self, cookie):
+        """
+        HORIZON source: apply the offsets to the AltAz position now and command
+        it with a move-to (constant position, no path). See _send_track for the
+        obs2tel variables.
+        """
+        o = self.obs2tel
+        cmd_lam, cmd_bet, cmd_coord_sys_on = o["obs_lam_on"], o["obs_bet_on"], o["obs_coord_sys_on"]
+        lam_del, bet_del = o["obs_lam_del"], o["obs_bet_del"]
+        coord_sys_del, true_angle_del = o["obs_coord_sys_del"], o["obs_true_angle_del"]
+        lam_off, bet_off = o["obs_lam_off"], o["obs_bet_off"]
+        coord_sys_off, true_angle_off = o["obs_coord_sys_off"], o["obs_true_angle_off"]
+        focal_plane_az, focal_plane_el = o["obs_x_focal_plane"], o["obs_y_focal_plane"]
+        if_extended = o["obs_extended_elevation_range"] == "Y"
+        track_duration = self.track_duration  # seconds
 
-            # Apply focal plane offsets
-            if focal_plane_az != 0.0 or focal_plane_el != 0.0:
-                coord = _apply_offset(coord, focal_plane_az, focal_plane_el, "Y")
-
-            # command move-to
-            if if_extended:
-                cmd_el, cmd_az = get_overtop_altaz_from_nominal(
-                    alt_nominal=coord.alt.deg, az_nominal=coord.az.deg)
+        now_frame = self._altaz_frame(Time.now())
+        coord = SkyCoord(cmd_lam * u.deg, cmd_bet * u.deg, frame=now_frame)
+        if lam_del != 0.0 or bet_del != 0.0:
+            if coord_sys_del == "HORIZON":
+                coord = _apply_offset(coord, lam_del, bet_del, true_angle_del)
             else:
-                cmd_az = coord.az.deg
-                cmd_el = coord.alt.deg
-
-            if self._track_stop_event.is_set():
-                self.log.info("Track superseded, move-to not sent")
-                return
-            # ocs.move_to aborts the previous command itself
-            response = self.ocs.move_to(cmd_az, cmd_el)
-            self.slew_in_progress = False   # aborted by ocs.move_to
-            body = self._response_body(response)
-            if response.status_code != 200 or body.get("status") != "ok":
-                self.log.error(
-                    f"move_to rejected: HTTP {response.status_code}, "
-                    f"status={body.get('status')}, message={body.get('message')}"
-                )
-                self._fail_path(cookie, self._error_code(response))
+                coord = _apply_offset(
+                    coord.transform_to(COORD_SYS_MAP[coord_sys_del]),
+                    lam_del, bet_del, true_angle_del,
+                ).transform_to(now_frame)
+        if lam_off != 0.0 or bet_off != 0.0:
+            if coord_sys_off == "HORIZON":
+                coord = _apply_offset(coord, lam_off, bet_off, true_angle_off)
             else:
-                self.log.info(f"move_to accepted: {body}")
-                # Bookkeeping only (not sent): the ACU starts moving on receipt
-                # and holds the position, so the commanded position is constant.
-                self.last_payload = {
-                    "type": "move_to",
-                    "start_time": time.time(),
-                    "coordsys": "Horizon",
-                    "points": [[0.0, cmd_az, cmd_el, 0.0, 0.0],
-                               [float(track_duration), cmd_az, cmd_el, 0.0, 0.0]],
-                }
-                self.last_obs2tel = self.obs2tel
-                self._return_cookie(cookie, self.last_payload["start_time"])
+                coord = _apply_offset(
+                    coord.transform_to(COORD_SYS_MAP[coord_sys_off]),
+                    lam_off, bet_off, true_angle_off,
+                ).transform_to(now_frame)
+
+        self.log.info(
+            f"tracking to {coord.az.deg} {coord.alt.deg} in {cmd_coord_sys_on} frame"
+        )
+
+        # Apply focal plane offsets
+        if focal_plane_az != 0.0 or focal_plane_el != 0.0:
+            coord = _apply_offset(coord, focal_plane_az, focal_plane_el, "Y")
+
+        # command move-to
+        if if_extended:
+            cmd_el, cmd_az = get_overtop_altaz_from_nominal(
+                alt_nominal=coord.alt.deg, az_nominal=coord.az.deg)
+        else:
+            cmd_az = coord.az.deg
+            cmd_el = coord.alt.deg
+
+        if self._track_stop_event.is_set():
+            self.log.info("Track superseded, move-to not sent")
             return
+        # ocs.move_to does not abort the previous command: do it here
+        if not self._abort_previous(cookie):
+            return
+        response = self._move_to_with_retry(cmd_az, cmd_el)
+        if response is None:
+            self.log.info("Track superseded while TCS was busy, move-to not sent")
+            return
+        body = _response_body(response)
+        if response.status_code != 200 or body.get("status") != "ok":
+            self.log.error(
+                f"move_to rejected: HTTP {response.status_code}, "
+                f"status={body.get('status')}, message={body.get('message')}"
+            )
+            self._fail_path(cookie, _error_code(response))
+        else:
+            self.log.info(f"move_to accepted: {body}")
+            self.last_aborted = False
+            # Bookkeeping only (not sent): the ACU starts moving on receipt
+            # and holds the position, so the commanded position is constant.
+            self.last_payload = {
+                "type": "move_to",
+                "start_time": time.time(),
+                "coordsys": "Horizon",
+                "points": [[0.0, cmd_az, cmd_el, 0.0, 0.0],
+                           [float(track_duration), cmd_az, cmd_el, 0.0, 0.0]],
+            }
+            self.last_obs2tel = self.obs2tel
+            self._return_cookie(cookie, self.last_payload["start_time"])
+
+    def _send_path(self, cookie):
+        """
+        Non-HORIZON source: compute a path (scan_pattern) of track_duration
+        seconds, slew to its start first if the telescope is far from it, and
+        send it. See _send_track for the obs2tel variables.
+        """
+        o = self.obs2tel
+        cmd_lam, cmd_bet, cmd_coord_sys_on = o["obs_lam_on"], o["obs_bet_on"], o["obs_coord_sys_on"]
+        frame = COORD_SYS_MAP[cmd_coord_sys_on]
+        lam_del, bet_del = o["obs_lam_del"], o["obs_bet_del"]
+        coord_sys_del, true_angle_del = o["obs_coord_sys_del"], o["obs_true_angle_del"]
+        lam_off, bet_off = o["obs_lam_off"], o["obs_bet_off"]
+        coord_sys_off, true_angle_off = o["obs_coord_sys_off"], o["obs_true_angle_off"]
+        focal_plane_az, focal_plane_el = o["obs_x_focal_plane"], o["obs_y_focal_plane"]
+        pm_lam, pm_bet, paralx = o["obs_pm_lam"], o["obs_pm_bet"], o["obs_paralx"]
+        if_extended = o["obs_extended_elevation_range"] == "Y"
+        track_duration = self.track_duration  # seconds
 
         # non-HORIZON source: make into an astropy coordinate object,
         # applying proper motion and parallax propagation when non-zero.
@@ -1128,11 +1130,11 @@ class KOSMA_translator:
             # Convert raw coordinate rate to true angular rate for astropy 
             # (multiply by cos(beta))
             cos_bet = np.cos(np.deg2rad(cmd_bet))
-            pm_lon_key, pm_lat_key = _frame_pm_keys[frame]
+            pm_lon_key, pm_lat_key = _FRAME_PM_KEYS[frame]
             pm_kwargs = {
                 pm_lon_key: pm_lam * cos_bet * u.arcsec/u.yr,
                 pm_lat_key: pm_bet * u.arcsec/u.yr,
-                "obstime": _frame_epochs[frame],
+                "obstime": _FRAME_EPOCHS[frame],
             }
             if paralx != 0.0:
                 pm_kwargs["distance"] = Distance(parallax=paralx * u.arcsec)
@@ -1152,7 +1154,7 @@ class KOSMA_translator:
                 coord = _apply_offset(coord, lam_del, bet_del, true_angle_del)
             else:
                 coord = _apply_offset(
-                    coord.transform_to(coord_sys_map[coord_sys_del]),
+                    coord.transform_to(COORD_SYS_MAP[coord_sys_del]),
                     lam_del, bet_del, true_angle_del,
                 ).transform_to(frame)
 
@@ -1163,13 +1165,25 @@ class KOSMA_translator:
                 coord = _apply_offset(coord, lam_off, bet_off, true_angle_off)
             else:
                 coord = _apply_offset(
-                    coord.transform_to(coord_sys_map[coord_sys_off]),
+                    coord.transform_to(COORD_SYS_MAP[coord_sys_off]),
                     lam_off, bet_off, true_angle_off,
                 ).transform_to(frame)
 
         self.log.info(
             f"tracking to {coord.data.lon.deg} {coord.data.lat.deg} in {cmd_coord_sys_on} frame"
         )
+
+        # Offsets applied in AltAz after the transform: HORIZON sky/map offset,
+        # HORIZON off-position offset, focal plane offset (always true angle)
+        horizon_offsets = []
+        if coord_sys_del == "HORIZON" and (lam_del != 0.0 or bet_del != 0.0):
+            horizon_offsets.append((lam_del, bet_del, true_angle_del))
+        if coord_sys_off == "HORIZON" and (lam_off != 0.0 or bet_off != 0.0):
+            horizon_offsets.append((lam_off, bet_off, true_angle_off))
+        if focal_plane_az != 0.0 or focal_plane_el != 0.0:
+            horizon_offsets.append((focal_plane_az, focal_plane_el, "Y"))
+        target = PathTarget(
+            coord=coord, horizon_offsets=tuple(horizon_offsets), extended=if_extended)
 
         # Abort the previous path first, if it has not ended yet.
         # This must come before time_array is built: TCS rejects a path starting
@@ -1179,104 +1193,10 @@ class KOSMA_translator:
         if self._track_stop_event.is_set():
             self.log.info("Track superseded, previous path not aborted")
             return
-        if self.slew_in_progress:
-            # the slew of a superseded track may still be running on TCS
-            need_abort = True
-            self.log.info("Previous slew may still be running")
-        elif self.last_payload is None:
-            # no record of the previous command (e.g. after a restart): a path
-            # sent before may still be running on TCS
-            need_abort = self.abort_if_unknown
-            if not need_abort:
-                self.log.info("No record of previous command, no abort sent")
-        elif self.last_payload["type"] == "move_to":
-            need_abort = False
-            self.log.info("Previous command was move-to, no abort sent")
-        else:
-            last_end_time = self.last_payload["start_time"] + self.last_payload["points"][-1][0]
-            need_abort = last_end_time > time.time()
-            if not need_abort:
-                self.log.info("Previous path already ended, no abort sent")
-        if need_abort:
-            try:
-                self.ocs.abort()
-                self.slew_in_progress = False
-                self.log.info(f"Previous path aborted")
-            except Exception as e:
-                self.log.error(f"Abort error: {e}")
-                self._fail_path(cookie, 1)
-                return
+        if not self._abort_previous(cookie):
+            return
 
-        def build_payload(track_overhead=TRACK_OVERHEAD):
-            """Path of track_duration seconds, starting track_overhead seconds from now."""
-            # Points every TRACK_TIME_STEP from now + overhead to now + overhead + track_duration.
-            # If track_duration is not a multiple of the step, the path ends at the
-            # last full step before track_duration. The small tolerance avoids
-            # dropping a step due to floating-point error (e.g. 600 / 0.1).
-            n_steps = int(track_duration / TRACK_TIME_STEP + 1e-9) + 1
-            t_fine = np.arange(n_steps) * TRACK_TIME_STEP
-            # The full transform runs only on a coarse grid covering the path
-            # (at least 3 nodes for the second-order slopes)
-            n_coarse = max(int(np.ceil(t_fine[-1] / TRACK_COARSE_STEP - 1e-9)) + 1, 3)
-            t_coarse = np.arange(n_coarse) * TRACK_COARSE_STEP
-            t_build = time.perf_counter()
-            t_start = Time.now() + track_overhead * u.second
-            time_array = t_start + t_coarse * u.second
-
-            # calculate the altaz coordinates for each time step
-            altaz_frames = self._altaz_frame(time_array)
-            altaz = coord.transform_to(altaz_frames)
-
-            # Apply HORIZON-frame sky/map offsets after AltAz transform
-            if coord_sys_del == "HORIZON" and (lam_del != 0.0 or bet_del != 0.0):
-                altaz = _apply_offset(altaz, lam_del, bet_del, true_angle_del)
-
-            # Apply HORIZON-frame off-position offsets after AltAz transform
-            if coord_sys_off == "HORIZON" and (lam_off != 0.0 or bet_off != 0.0):
-                altaz = _apply_offset(altaz, lam_off, bet_off, true_angle_off)
-
-            # Apply focal plane offsets
-            if focal_plane_az != 0.0 or focal_plane_el != 0.0:
-                altaz = _apply_offset(altaz, focal_plane_az, focal_plane_el, "Y")
-
-            if if_extended:
-                el_coarse, az_coarse = get_overtop_altaz_from_nominal(
-                    alt_nominal=altaz.alt.deg, az_nominal=altaz.az.deg)
-            else:
-                az_coarse = altaz.az.deg
-                el_coarse = altaz.alt.deg
-
-            # Interpolate to the path points; positions and velocities from the
-            # same cubic. Azimuth is unwrapped so a 0/360 crossing is interpolated
-            # (and its velocity computed) correctly, then wrapped back to [0, 360).
-            # NaN (unreachable overtop) would spread through the unwrap: skip it.
-            if np.all(np.isfinite(az_coarse)):
-                az_coarse = np.unwrap(az_coarse, period=360.0)
-            az_array, az_velocities = _hermite_resample(t_coarse, az_coarse, t_fine)
-            az_array = np.mod(az_array, 360.0)
-            el_array, el_velocities = _hermite_resample(t_coarse, el_coarse, t_fine)
-
-            # program track mode, see definition here ICD-1000000-32000-02-00 VA Webserver
-            # - Remote Protocol
-            # Assuming all arrays are 1D and of the same length
-            points = np.column_stack(
-                [
-                    t_fine,  # time offset in seconds since start of track
-                    az_array,
-                    el_array,
-                    az_velocities,
-                    el_velocities,
-                ]
-            )
-            payload = {
-                "start_time": t_start.unix,
-                "coordsys": "Horizon",
-                "points": points.tolist(),
-            }
-            self.log.info(f"payload computed in {time.perf_counter() - t_build:.3f} s")
-            return payload
-
-        payload = build_payload()
+        payload = self._build_path_payload(target, track_duration)
 
         # If the telescope is far from the start of the path, slew there first,
         # then recompute the path so that it starts track_overhead after arrival.
@@ -1291,7 +1211,7 @@ class KOSMA_translator:
             )
             if not self._slew_to(first_az, first_el, cookie):
                 return
-            payload = build_payload()
+            payload = self._build_path_payload(target, track_duration)
             # TCS may still be finishing the move-to: resend busy-rejected paths
             resend_deadline = time.monotonic() + SLEW_BUSY_RESEND_TIMEOUT
         else:
@@ -1308,7 +1228,7 @@ class KOSMA_translator:
                         f"start_time lead {lead:.3f} s < {TRACK_MIN_SEND_LEAD} s: "
                         f"recomputing path with track_overhead {overhead:.3f} s"
                     )
-                    payload = build_payload(overhead)
+                    payload = self._build_path_payload(target, track_duration, overhead)
 
                 # TODO: find out a way to pass obs_wavelength together with payload
                 # A newer track has superseded this one while the payload was computed
@@ -1331,24 +1251,25 @@ class KOSMA_translator:
                     f"start_time lead: {lead_send:.3f} s before send, "
                     f"{lead_done:.3f} s after response (TCS needs >= 9.8 s)"
                 )
-                if self._is_busy(response) and time.monotonic() < resend_deadline:
+                if _is_busy(response) and time.monotonic() < resend_deadline:
                     # after a slew: TCS still finishing the move-to
                     self.log.warning(
                         "TCS still busy after the slew: recomputing path and resending"
                     )
-                    payload = build_payload()
+                    payload = self._build_path_payload(target, track_duration)
                     continue
                 break
 
-            body = self._response_body(response)
+            body = _response_body(response)
             if response.status_code != 200 or body.get("status") != "ok":
                 self.log.error(
                     f"scan_pattern rejected: HTTP {response.status_code}, "
                     f"status={body.get('status')}, message={body.get('message')}"
                 )
-                self._fail_path(cookie, self._error_code(response))
+                self._fail_path(cookie, _error_code(response))
             else:
                 self.log.info(f"scan_pattern accepted: {body}")
+                self.last_aborted = False
                 # "type" only for bookkeeping, not part of the payload sent to TCS
                 self.last_payload = {**payload, "type": "path"}
                 self.last_obs2tel = self.obs2tel
@@ -1358,6 +1279,91 @@ class KOSMA_translator:
         except Exception as e:
             self.log.error(f"Track error: {e}")
             self._fail_path(cookie, 1)
+
+    def _build_path_payload(self, target, track_duration, track_overhead=None):
+        """
+        Path for scan_pattern of track_duration seconds, starting track_overhead
+        seconds from now.
+
+        Parameters
+        ----------
+        target : PathTarget
+            Source position and the offsets applied after the AltAz transform
+        track_duration : float
+            Length of the path [sec]
+        track_overhead : float, optional
+            start_time of the path is this far after now [sec].
+            Default TRACK_OVERHEAD (read at call time).
+
+        Returns
+        -------
+        payload : dict
+            start_time (unix), coordsys and points [[t, az, el, v_az, v_el], ...]
+        """
+        if track_overhead is None:
+            track_overhead = TRACK_OVERHEAD
+        # Points every TRACK_TIME_STEP from now + overhead to now + overhead + track_duration.
+        # If track_duration is not a multiple of the step, the path ends at the
+        # last full step before track_duration. The small tolerance avoids
+        # dropping a step due to floating-point error (e.g. 600 / 0.1).
+        n_steps = int(track_duration / TRACK_TIME_STEP + 1e-9) + 1
+        t_fine = np.arange(n_steps) * TRACK_TIME_STEP
+        # The full transform runs only on a coarse grid covering the path
+        # (at least 3 nodes for the second-order slopes)
+        n_coarse = max(int(np.ceil(t_fine[-1] / TRACK_COARSE_STEP - 1e-9)) + 1, 3)
+        t_coarse = np.arange(n_coarse) * TRACK_COARSE_STEP
+        t_build = time.perf_counter()
+        t_start = Time.now() + track_overhead * u.second
+        time_array = t_start + t_coarse * u.second
+
+        # calculate the altaz coordinates for each time step
+        altaz_frames = self._altaz_frame(time_array)
+        altaz = target.coord.transform_to(altaz_frames)
+
+        # Apply HORIZON-frame sky/map, off-position and focal plane offsets
+        for d_lam, d_bet, true_angle in target.horizon_offsets:
+            altaz = _apply_offset(altaz, d_lam, d_bet, true_angle)
+
+        if target.extended:
+            el_coarse, az_coarse = get_overtop_altaz_from_nominal(
+                alt_nominal=altaz.alt.deg, az_nominal=altaz.az.deg)
+        else:
+            az_coarse = altaz.az.deg
+            el_coarse = altaz.alt.deg
+
+        # Interpolate to the path points; positions and velocities from the
+        # same cubic. Azimuth is unwrapped so a 0/360 crossing is interpolated
+        # (and its velocity computed) correctly, then wrapped back to [0, 360).
+        # NaN (unreachable overtop) would spread through the unwrap: skip it.
+        if np.all(np.isfinite(az_coarse)):
+            az_coarse = np.unwrap(az_coarse, period=360.0)
+        az_array, az_velocities = _hermite_resample(t_coarse, az_coarse, t_fine)
+        az_array = np.mod(az_array, 360.0)
+        el_array, el_velocities = _hermite_resample(t_coarse, el_coarse, t_fine)
+
+        # program track mode, see definition here ICD-1000000-32000-02-00 VA Webserver
+        # - Remote Protocol
+        # Assuming all arrays are 1D and of the same length
+        points = np.column_stack(
+            [
+                t_fine,  # time offset in seconds since start of track
+                az_array,
+                el_array,
+                az_velocities,
+                el_velocities,
+            ]
+        )
+        payload = {
+            "start_time": t_start.unix,
+            "coordsys": "Horizon",
+            "points": points.tolist(),
+        }
+        self.log.info(f"payload computed in {time.perf_counter() - t_build:.3f} s")
+        return payload
+
+    # =======================================================================
+    # TCS communication (track thread): slew, abort, send with busy retry
+    # =======================================================================
 
     def _acu_position(self):
         """
@@ -1397,19 +1403,24 @@ class KOSMA_translator:
         if self._track_stop_event.is_set():
             self.log.info("Track superseded, slew not sent")
             return False
-        # ocs.move_to aborts the previous command itself
-        response = self.ocs.move_to(az, el)
-        body = self._response_body(response)
+        # ocs.move_to does not abort the previous command: do it here. Usually
+        # _send_track has aborted it already (then nothing is sent again).
+        if not self._abort_previous(cookie):
+            return False
+        response = self._move_to_with_retry(az, el)
+        if response is None:
+            self.log.info("Track superseded while TCS was busy, slew not sent")
+            return False
+        body = _response_body(response)
         if response.status_code != 200 or body.get("status") != "ok":
-            # nothing running on TCS: ocs.move_to aborted the previous command
-            self.slew_in_progress = False
             self.log.error(
                 f"slew move_to rejected: HTTP {response.status_code}, "
                 f"status={body.get('status')}, message={body.get('message')}"
             )
-            self._fail_path(cookie, self._error_code(response))
+            self._fail_path(cookie, _error_code(response))
             return False
         self.slew_in_progress = True
+        self.last_aborted = False
         self.log.info(f"slew move_to accepted: {body}")
         # The command is accepted: return the cookie now, so that the observer is
         # not blocked for the slew. tel_on_track stays "N" until the path, sent
@@ -1444,48 +1455,63 @@ class KOSMA_translator:
                 self._fail_path(cookie, 1)
                 return False
 
-    @staticmethod
-    def _response_body(response):
+    def _abort_previous(self, cookie):
         """
-        JSON body of an OCS response as a dict. Errors raised in front of the
-        API (e.g. an nginx 413 for a too large path payload) come back as HTML,
-        not JSON: then return status None and the start of the raw text as
-        message, so that the caller logs the real HTTP error instead of a
-        JSONDecodeError.
-        """
-        try:
-            body = response.json()
-        except ValueError:
-            return {"status": None, "message": response.text[:200].strip()}
-        if not isinstance(body, dict):
-            return {"status": None, "message": str(body)[:200]}
-        return body
+        Abort the previous command if it may still be running on TCS. The OCS
+        client does not abort by itself before scan_pattern or move_to.
 
-    @classmethod
-    def _is_busy(cls, response):
+        A finished path needs no abort. A previous move-to is always aborted:
+        it may still be moving (TCS would answer busy), and its end is not
+        known without polling the ACU.
+
+        Returns True if the new command can be sent. Returns False if the abort
+        failed (then the path for cookie is failed with _fail_path).
         """
-        True if TCS rejected the command because the previous one is still
-        running. TCS answers HTTP 503 with message "busy", but the OCS API passes
-        the TCS JSON body on with HTTP 200 (status "error", message "busy"),
-        so both forms are accepted.
-        """
-        if response.status_code == 503:
+        if self.last_aborted:
+            self.log.info("Previous command already aborted, no abort sent")
             return True
-        body = cls._response_body(response)
-        return body.get("status") != "ok" and body.get("message") == "busy"
+        if self.slew_in_progress:
+            # the slew of a superseded track may still be running on TCS
+            need_abort = True
+            self.log.info("Previous slew may still be running")
+        elif self.last_payload is None:
+            # no record of the previous command (e.g. after a restart): a command
+            # sent before may still be running on TCS
+            need_abort = self.abort_if_unknown
+            if not need_abort:
+                self.log.info("No record of previous command, no abort sent")
+        elif self.last_payload["type"] == "move_to":
+            need_abort = True
+            self.log.info("Previous move-to may still be moving")
+        else:
+            last_end_time = self.last_payload["start_time"] + self.last_payload["points"][-1][0]
+            need_abort = last_end_time > time.time()
+            if not need_abort:
+                self.log.info("Previous path already ended, no abort sent")
+        if not need_abort:
+            return True
+        try:
+            self.ocs.abort()
+        except Exception as e:
+            self.log.error(f"Abort error: {e}")
+            self._fail_path(cookie, 1)
+            return False
+        self.slew_in_progress = False
+        self.last_aborted = True
+        self.log.info("Previous command aborted")
+        return True
 
-    @classmethod
-    def _error_code(cls, response):
+    def _move_to_with_retry(self, az, el):
         """
-        tel_error for a rejected command. The OCS reports TCS errors with HTTP
-        200 and status "error" in the body: busy is reported as 503, any other
-        rejection with HTTP 200 as 1, never as 0 or 200.
+        Send ocs.move_to, resending it while TCS answers busy (e.g. not yet idle
+        after the abort sent just before). Returns the last response, or None if
+        the track was superseded while waiting for a retry.
         """
-        if cls._is_busy(response):
-            return 503
-        if response.status_code == 200:
-            return 1
-        return response.status_code
+        return self._send_with_retry(
+            lambda: self.ocs.move_to(az, el),
+            busy_timeout=MOVE_TO_BUSY_TIMEOUT,
+            retry_interval=MOVE_TO_BUSY_RETRY_INTERVAL,
+        )
 
     def _scan_pattern_with_retry(self, payload, busy_timeout, retry_interval):
         """
@@ -1494,11 +1520,21 @@ class KOSMA_translator:
         Returns the last response, or None if the track was superseded
         (_track_stop_event set) while waiting for a retry.
         """
+        return self._send_with_retry(
+            lambda: self.ocs.scan_pattern(data=payload), busy_timeout, retry_interval)
+
+    def _send_with_retry(self, send, busy_timeout, retry_interval):
+        """
+        Call send() (an OCS command), calling it again while the TCS answers
+        busy for at most busy_timeout seconds, retry_interval apart.
+        Returns the last response, or None if the track was superseded
+        (_track_stop_event set) while waiting for a retry.
+        """
         deadline = time.monotonic() + busy_timeout
         attempt = 1
         while True:
-            response = self.ocs.scan_pattern(data=payload)
-            if not self._is_busy(response):
+            response = send()
+            if not _is_busy(response):
                 return response
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -1515,6 +1551,11 @@ class KOSMA_translator:
             if self._track_stop_event.wait(min(retry_interval, remaining)):
                 return None
             attempt += 1
+
+    # =======================================================================
+    # Cookie handshake (set by the track thread, reported by the background
+    # thread in KOSMA_tel2obs.set)
+    # =======================================================================
 
     def _fail_path(self, cookie, error):
         """
@@ -1553,72 +1594,9 @@ class KOSMA_translator:
         self.tel_error = 0
         self.tel_path_failed = False
 
-    # obs2tel variables that define the commanded path; obs2tel files that differ
-    # only in other variables (e.g. the cookie) command the same path
-    SAME_TARGET_KEYS = [
-        "obs_lam_on", "obs_bet_on", "obs_coord_sys_on",
-        "obs_lam_del", "obs_bet_del", "obs_coord_sys_del",
-        "obs_lam_off", "obs_bet_off", "obs_coord_sys_off",
-        "obs_extended_elevation_range",
-        "obs_x_focal_plane", "obs_y_focal_plane",
-        "obs_otf_mode", "obs_lam_vel", "obs_bet_vel",
-        "obs_wavelength",   # the refraction depends on it
-    ]
-
-    def reuse_last_track(self):
-        """
-        If the new obs2tel commands the same target as the last accepted path
-        and that path has at least reuse_min_remaining left, keep it instead of
-        aborting and resending it (e.g. control_tel presets the next position,
-        then commands the same position again with a new cookie).
-        Returns True if the last path is reused.
-        """
-        if self.last_payload is None or self.last_obs2tel is None or self.tel_path_failed:
-            return False
-        if self.slew_in_progress:
-            # the telescope has left the last path for a (superseded) slew
-            return False
-        if self._track_thread and self._track_thread.is_alive():
-            return False
-        if any(self.obs2tel[k] != self.last_obs2tel[k] for k in self.SAME_TARGET_KEYS):
-            return False
-        if self.last_payload["type"] != "move_to":
-            last_end_time = self.last_payload["start_time"] + self.last_payload["points"][-1][0]
-            if last_end_time - time.time() < self.reuse_min_remaining:
-                return False
-
-        cookie = self.next_tel_return_cookie
-        self.last_obs2tel = self.obs2tel
-        # on_track_not_before is kept: if the path has not started yet,
-        # tel_on_track stays "N" until it has
-        self.log.info(f"same target, last path kept, returning cookie {cookie}")
-        self.old_tel_return_cookie = self.tel_return_cookie
-        self.tel_return_cookie = cookie
-        self.tel_lost_track = "N"    # initialize for the new cookie
-        self.tel_was_on_track = False
-        return True
-
-    def dump_spem_to_kosma(self):
-        """
-        Mirror the SPEM parameters currently used by the ACU into KOSMA_file_io,
-        so that the pointing fit in KOSMA starts from the actual ACU model.
-        Failures are logged but do not stop the translator.
-
-        Returns
-        -------
-        spem : dict or None
-            SPEM parameters read back from KOSMA_file_io, None if the dump failed
-        """
-        self.log.info(f"dumping ACU SPEM parameters to {KOSMA_SPEM_FILE}")
-        try:
-            spem_acu = strip_parameter_prefix(self.ocs.get_dataset("CmdSPEMParameter"))
-            self.log.info(f"ACU SPEM parameters: {spem_acu}")
-            spem_kosma = put_kosma_spem(spem_acu, logger=self.log)
-        except Exception as e:
-            self.log.error(f"Failed to dump ACU SPEM parameters to {KOSMA_SPEM_FILE}: {e}")
-            return None
-        self.log.info(f"SPEM parameters in {KOSMA_SPEM_FILE}: {spem_kosma}")
-        return spem_kosma
+    # =======================================================================
+    # Coordinates and refraction (track thread and background thread)
+    # =======================================================================
 
     def get_weather(self):
         """
@@ -1721,50 +1699,9 @@ class KOSMA_translator:
         """
         return AltAz(obstime=obstime, location=self.location, **self._refraction_params)
 
-    def stop_track(self):
-        if self._track_thread and self._track_thread.is_alive():
-            self.log.info("Signaling track thread to stop")
-
-            self._track_stop_event.set()   # signal thread
-
-            self._track_thread.join()      # WAIT until thread exits
-
-            self.log.info("Track thread stopped")
-
-            self._track_thread = None
-
-
-def setup_logging(log_level):
-    # setup logging to file and to screen
-    logger = logging.getLogger("kosma-ocs-translator")
-    logger.setLevel(log_level)
-
-    # Remove existing handlers to avoid conflicts
-    # if logger.hasHandlers():
-    #    logger.handlers.clear()
-
-    # Prevent propagation to the root logger
-    logger.propagate = False
-
-    # create console handler and set level to debug
-    ch = logging.StreamHandler()
-    ch.setLevel(log_level)
-    # create simpler formatter for console output
-    console_formatter = logging.Formatter("%(levelname)s: %(message)s")
-    ch.setFormatter(console_formatter)
-    logger.addHandler(ch)
-
-    # file handler
-    fh = logging.FileHandler("kosma-ocs-translator.log")
-    fh.setLevel(log_level)
-    # detailed formatter for file output
-    file_formatter = logging.Formatter(
-        "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
-    )
-    fh.setFormatter(file_formatter)
-    logger.addHandler(fh)
-
-    return logger
+    # =======================================================================
+    # OTF (obs_otf_mode C or P): not implemented yet, see process_obs2tel
+    # =======================================================================
 
 
 def parse_arguments():
@@ -1817,69 +1754,15 @@ def run_write_tel2obs_file_in_background(translator):
         time.sleep(translator.obs_tel_info_update_time)
 
 
-def setup_ocs(use_roof_mount=False, use_local_dev=False, certificates_path=None,
-              logger=None):
-    """
-    Set up the connection to the telescope control (OCS or roof mount).
-    Can be imported by other scripts to share the same connection treatment.
-
-    Parameters
-    ----------
-    use_roof_mount : bool
-        If True, connect to the roof mount instead of OCS.
-    use_local_dev : bool
-        If True, connect to the OCS of the local development setup.
-        If neither use_roof_mount nor use_local_dev is True, connect to the
-        OCS at the observatory.
-    certificates_path : str
-        Path to the directory with the OCS TLS certificates.
-        Required when use_roof_mount is False.
-    logger : logging.Logger, optional
-        Logger to use. Defaults to the "kosma-ocs-translator" logger.
-
-    Returns
-    -------
-    ocs : observatory_control_system or RoofMount
-    """
-    if logger is None:
-        logger = logging.getLogger("kosma-ocs-translator")
-    if use_roof_mount and use_local_dev:
-        raise ValueError("use_roof_mount and use_local_dev cannot both be set")
-    if use_roof_mount:
-        logger.info("Using roof mount connection")
-        roof_mount_host = "134.95.46.51"
-        roof_mount_port = 2000
-        ocs = RoofMount(host=roof_mount_host, port=roof_mount_port)
-        ocs.connect()
-        # set master_obs_tolerance to 1 arcminute
-        obs_tolerance = 8*u.arcminute.to(u.arcsecond)
-        logger.info(f"Setting master_obs_tolerance to {obs_tolerance} arcseconds")
-        os.system(f"Kset_master master_obs_tolerance {obs_tolerance}")
-        os.system(f"KOSMA_track")
-    else:
-        if use_local_dev:
-            logger.info("Using OCS connection (local development)")
-            ocs_host = "127.0.0.1"
-            ocs_port = 5600
-        else:
-            logger.info("Using OCS connection at the observatory")
-            # TODO: placeholder, replace with the actual OCS host and port
-            ocs_host = "ocs.example.invalid"
-            ocs_port = 5600
-        print(f"Using certificates path: {certificates_path}")
-        ocs = observatory_control_system(
-            url=f"https://{ocs_host}:{ocs_port}",
-            server_cert=f"{certificates_path}/server.cert.pem",
-            client_cert=f"{certificates_path}/client.cert.pem",
-            client_key=f"{certificates_path}/client.key.pem",
-        )
-    return ocs
+def _raise_keyboard_interrupt(signum, frame):
+    """Signal handler: end the main loop in main() as on Ctrl+C."""
+    raise KeyboardInterrupt
 
 
 def main():
     args = parse_arguments()
     log_level = getattr(logging, args.log_level)
-    logger = setup_logging(log_level)
+    logger = setup_logging(DEFAULT_LOGGER_NAME, LOG_FILE, log_level)
     ocs = setup_ocs(
         use_roof_mount=args.use_roof_mount,
         use_local_dev=args.use_local_dev,
@@ -1901,45 +1784,31 @@ def main():
     translator.log.info(
         f"obs_tel_info_update_time set to {translator.obs_tel_info_update_time} seconds"
     )
-    
-    # Define signal handler with closure
-    def signal_handler(signum, frame):
-        translator.log.info("Ctrl+C received, shutting down...")
+
+    # Ctrl+C (SIGINT) and SIGTERM (systemctl stop, docker stop, kill) both end
+    # the main loop as KeyboardInterrupt; the cleanup in finally also runs if
+    # the loop ends with any other exception.
+    for sig in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(sig, _raise_keyboard_interrupt)
+
+    try:
+        while True:
+            obs2tel_updated = translator.check_for_obs2tel_update()
+            if not obs2tel_updated:
+                time.sleep(translator.obs_tel_info_update_time)
+                #translator.log.debug(
+                #    f"obs2tel file has not changed, waiting {translator.obs_tel_info_update_time} seconds"
+                #)
+                continue
+            if not translator.process_obs2tel():
+                time.sleep(translator.obs_tel_info_update_time)
+    except KeyboardInterrupt:
+        translator.log.info("Shutdown requested (Ctrl+C or SIGTERM), shutting down...")
+    finally:
         translator.stop_track()
-        if hasattr(ocs, 'close'):
+        if hasattr(ocs, "close"):
             ocs.close()
         translator.log.info("All threads closed, exiting.")
-        sys.exit(0)
-    
-    # Register signal handler for Ctrl+C
-    signal.signal(signal.SIGINT, signal_handler)
-    
-    # get telescope position
-
-    while True:
-        obs2tel_updated = translator.check_for_obs2tel_update()
-        if not obs2tel_updated:
-            time.sleep(translator.obs_tel_info_update_time)
-            #translator.log.debug(
-            #    f"obs2tel file has not changed, waiting {translator.obs_tel_info_update_time} seconds"
-            #)
-            continue
-        translator.read_obs2tel_file()
-        if translator.next_tel_return_cookie == translator.tel_return_cookie:
-            translator.log.info(
-                f"obs2tel cookie has not changed ({translator.next_tel_return_cookie}), no action taken"
-            )
-            time.sleep(translator.obs_tel_info_update_time)
-            continue
-        if translator.reuse_last_track():
-            continue
-        if translator.obs2tel["obs_otf_mode"] in ["C", "P"]:
-            translator.log.info("OTF mode command received, not yet implemented")
-            time.sleep(translator.obs_tel_info_update_time)
-            continue
-        if translator.obs2tel["obs_otf_mode"] == "N":
-            translator.log.info("track mode command received")
-            translator.track()
 
 
 if __name__ == "__main__":
