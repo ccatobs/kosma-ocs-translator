@@ -23,6 +23,7 @@ _Avoid_: setpoint, commanded position
 **Standby point**:
 The target 10 s before the start of an OTF line. A pre-OTF command parks the telescope there.
 _Avoid_: pre-position
+_Note (2026-11-22)_: OTF is under development on branch `9-implement-otf`, which uses no standby point: the pre-OTF command holds the line start, or moves to the run-up point of the scan ramp. See the note at the top of PRD 0001 before using this term.
 
 ### Uploads
 

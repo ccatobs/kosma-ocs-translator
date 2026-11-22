@@ -12,6 +12,8 @@ repos:
 
 > **Needs restructuring and review (2026-11-18).** This PRD was written in parallel to a different path of development, and it deviates from the current code. It must be restructured and reviewed again before implementation resumes under this epic. Until then, do not use it as the source of truth or as a guide for implementation.
 
+> **OTF under development on branch `9-implement-otf` (2026-11-22).** OTF mode C (PRETP/OTFTP, HORIZON sources and maps included) is implemented and tested on that branch, following kosma_software's otf_server and backend rather than astra. Its design differs from the OTF parts of this PRD (no astra clamp or standby point, `tel_error` 2 instead of 200, the path ends at T0+D). Before working on OTF under this epic, read that branch and coordinate with its developer; do not start a parallel implementation.
+
 > Source of truth for this epic. Tracker: [epic issue](https://github.com/ccatobs/kosma-ocs-translator/issues/5).
 > The epic links here; this file is not embedded in the issue body.
 > The KOSMA changes go to `kosma_software/kosma_software` on GitLab (git.ph1.uni-koeln.de) as a reviewed merge request.
