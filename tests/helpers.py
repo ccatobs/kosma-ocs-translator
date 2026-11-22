@@ -46,6 +46,7 @@ BASE_OBS2TEL = {
     "obs_y_focal_plane": 0.0,
     "obs_wavelength": 850.0,
     "obs_track_duration": 600,
+    "obs_start_time": 0.0,
 }
 
 # Default mock telescope status
