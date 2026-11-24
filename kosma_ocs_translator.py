@@ -496,6 +496,15 @@ class KOSMA_translator:
         # is set by any status outside the tolerance within it (no settling), and
         # tel_time_del is the time since T0.
         self.otf_scan_window = None
+        # (az, el, start) [deg, deg, unix sec] while the returned cookie is
+        # slewing to the start of its path (path not accepted yet), else None.
+        # Then tel_*_cmd is the slew target and tel_time_del the time since the
+        # slew started.
+        self.slew_target = None
+        # True once a cookie was returned or failed: from then on
+        # KOSMA_tel2obs.set is written, also before any command was recorded in
+        # last_payload (slew before the first path, first path failed)
+        self.cookie_reported = False
 
         # --- commands (main thread / track thread) ---------------------------
         self._track_thread = None
@@ -807,6 +816,8 @@ class KOSMA_translator:
         # tel_on_track stays "N" until it has
         self.log.info(f"{reason}, returning cookie {cookie}")
         self.otf_scan_window = None
+        self.slew_target = None
+        self.cookie_reported = True
         self.old_tel_return_cookie = self.tel_return_cookie
         self.tel_return_cookie = cookie
         self.tel_lost_track = "N"    # initialize for the new cookie
@@ -877,7 +888,7 @@ class KOSMA_translator:
         for submm observations (obs_wavelength >= SUBMM_MIN_WAVELENGTH), for
         which KOSMA_ccdpos.sim is not written.
         """
-        if (self.last_payload is None or self.last_obs2tel is None) and not self.tel_path_failed:
+        if (self.last_payload is None or self.last_obs2tel is None) and not self.cookie_reported:
             self.log.info('No record of successfully sent command to telescope. Wait...')
             return None, None
 
@@ -913,16 +924,22 @@ class KOSMA_translator:
 
         # time stamp of the status and its relative time to the start of the last sent path
         status_time = _get_time_from_acu_format(response["Time"], response["Year"])
-        if self.last_payload is None:
+
+        # Only the track thread sets on_track_not_before, otf_scan_window and
+        # slew_target; read them once here
+        otf_scan_window = self.otf_scan_window
+        on_track_not_before = self.on_track_not_before
+        slew_target = self.slew_target
+
+        if slew_target is not None:
+            # slewing to the start of the path of the returned cookie: last_payload
+            # is the previous command (or None), not related to this cookie
+            t_rel = status_time.unix - slew_target[2]
+        elif self.last_payload is None:
             # no path accepted yet; only reached when the first path failed
             t_rel = 0.0
         else:
             t_rel = status_time.unix - self.last_payload["start_time"]
-
-        # Only the track thread sets on_track_not_before and otf_scan_window;
-        # read them once here
-        otf_scan_window = self.otf_scan_window
-        on_track_not_before = self.on_track_not_before
         path_started = status_time.unix >= on_track_not_before
         if (path_started and np.isfinite(on_track_not_before)
                 and on_track_not_before != self._logged_on_track_not_before):
@@ -956,7 +973,14 @@ class KOSMA_translator:
         del_tot_azm, del_tot_elv = _total_pointing_correction(response_pointing)
         input_dict["tel_azm_act"] = current_azi - del_tot_azm
         input_dict["tel_elv_act"] = current_ele - del_tot_elv
-        if self.last_payload is None:
+        # not in KOSMA_tel2obs.set; for KOSMA_ccdpos.sim
+        input_dict["slewing"] = slew_target is not None
+        if slew_target is not None:
+            # the slew target (start of the path), constant during the slew
+            input_dict["tel_azm_cmd"] = slew_target[0]
+            input_dict["tel_elv_cmd"] = slew_target[1]
+            input_dict["tel_vel_elv_cmd"] = 0.0
+        elif self.last_payload is None:
             # no path to interpolate (only when the first path failed):
             # report the current position; tel_on_track is "N" anyway
             input_dict["tel_azm_cmd"] = input_dict["tel_azm_act"]
@@ -1025,8 +1049,10 @@ class KOSMA_translator:
         else:
             input_dict["tel_time_del"] = t_rel
 
-        # Calculate angle between coordinate systems
-        if self.last_obs2tel is None or self.last_obs2tel["obs_coord_sys_del"] == "HORIZON":
+        # Calculate angle between coordinate systems. While slewing,
+        # last_obs2tel is the previous command: no angle reported.
+        if (slew_target is not None or self.last_obs2tel is None
+                or self.last_obs2tel["obs_coord_sys_del"] == "HORIZON"):
             input_dict["tel_angle_focal_plane"] = 0.0
         else:
             cmd_coord_sys_del = self.last_obs2tel["obs_coord_sys_del"]
@@ -1087,8 +1113,10 @@ class KOSMA_translator:
         # commanded (path) elevation velocity, deg/s -> arcsec/s, as in astra_track
         ccd_input_dict["op_vel_elv"] = input_dict["tel_vel_elv_cmd"] * 3600.0
 
-        # last_obs2tel is None if the very first path failed
-        if self.last_obs2tel is not None and self.last_obs2tel["obs_coord_sys_del"] == "HORIZON":
+        # last_obs2tel is None if the very first path failed, and the previous
+        # command while slewing
+        if (not input_dict["slewing"] and self.last_obs2tel is not None
+                and self.last_obs2tel["obs_coord_sys_del"] == "HORIZON"):
             # obs_lam_del, obs_bet_del are in arcsec
             ccd_input_dict["op_oazm"] = np.deg2rad(self.last_obs2tel["obs_lam_del"] / 3600.0)
             ccd_input_dict["op_oelv"] = np.deg2rad(self.last_obs2tel["obs_bet_del"] / 3600.0)
@@ -1713,7 +1741,8 @@ class KOSMA_translator:
         # The command is accepted: return the cookie now, so that the observer is
         # not blocked for the slew. tel_on_track stays "N" until the path, sent
         # after the slew, has started (a failure later still sets tel_error).
-        self._return_cookie(cookie, np.inf)
+        # Until the path is accepted, the slew target is reported as commanded.
+        self._return_cookie(cookie, np.inf, slew_target=(az, el, time.time()))
 
         # Arrived = stopped close to the target. TCS uses a tighter position
         # tolerance (against the ACU commanded position), so it may still be
@@ -1860,8 +1889,10 @@ class KOSMA_translator:
             self.log.info(f"Track for cookie {cookie} superseded, failure not reported")
             return
         self.otf_scan_window = None
+        self.slew_target = None
         self.tel_error = error
         self.tel_path_failed = True
+        self.cookie_reported = True
         # the cookie may already be returned (failure after an accepted slew)
         if cookie != self.tel_return_cookie:
             self.old_tel_return_cookie = self.tel_return_cookie
@@ -1869,20 +1900,26 @@ class KOSMA_translator:
         self.tel_lost_track = lost_track
         self.tel_was_on_track = False
 
-    def _return_cookie(self, cookie, on_track_not_before, otf_scan_window=None):
+    def _return_cookie(self, cookie, on_track_not_before, otf_scan_window=None,
+                       slew_target=None):
         """
         The command for cookie is accepted by TCS: return the cookie, with
         tel_on_track "N" for ACU status times before on_track_not_before [unix sec].
         otf_scan_window: (T0, T0 + D) [unix sec] for an OTF scan, see
         self.otf_scan_window.
+        slew_target: (az, el, start) for a slew before the path, see
+        self.slew_target. Any other accepted command clears it.
         """
         if self._track_stop_event.is_set():
             # superseded by a newer obs2tel; its own thread returns the new cookie
             self.log.info(f"Track for cookie {cookie} superseded, cookie not returned")
             return
         self.log.info(f"returning cookie {cookie}")
-        # set before the cookie: the status of the new cookie uses the new window
+        # set before the cookie: the status of the new cookie uses the new
+        # window and slew target
         self.otf_scan_window = otf_scan_window
+        self.slew_target = slew_target
+        self.cookie_reported = True
         if cookie != self.tel_return_cookie:
             self.old_tel_return_cookie = self.tel_return_cookie
             self.tel_return_cookie = cookie

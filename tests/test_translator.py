@@ -503,6 +503,95 @@ def test_first_path_failed_writes_status(translator_factory, mock_ocs):
     assert result["tel_angle_focal_plane"] == 0.0
 
 
+# ---------------------------------------------------------------------------
+# Status while slewing to the start of a path (slew_target)
+# ---------------------------------------------------------------------------
+
+def _status_unix(mock_ocs):
+    status = mock_ocs.get_status.return_value
+    return _get_time_from_acu_format(status["Time"], status["Year"]).unix
+
+
+def test_no_status_before_any_cookie(translator_factory):
+    # start-up: no command recorded, no cookie returned yet
+    t = translator_factory()
+    t.last_payload = None
+    t.last_obs2tel = None
+
+    assert t.set_tel2obs_dict() == (None, None)
+
+
+def test_first_slew_writes_status(translator_factory, mock_ocs):
+    # slew before the first path: no command recorded in last_payload yet
+    t = translator_factory()
+    t.last_payload = None
+    t.last_obs2tel = None
+    t.tel_return_cookie = 1
+    t._return_cookie(2, np.inf, slew_target=(200.0, 30.0, _status_unix(mock_ocs) - 5.0))
+
+    result, _ = t.set_tel2obs_dict()
+
+    assert result["tel_return_cookie"] == 2
+    assert result["tel_error"] == 0
+    assert result["tel_on_track"] == "N"
+    assert result["tel_lost_track"] == "N"
+    assert (result["tel_azm_cmd"], result["tel_elv_cmd"]) == (200.0, 30.0)
+    assert result["tel_time_del"] == pytest.approx(5.0, abs=1e-3)
+    assert result["tel_angle_focal_plane"] == 0.0
+
+
+def test_slew_target_replaces_previous_path(translator_factory, mock_ocs):
+    # the previous path (static at az=180, el=45) and its HORIZON map offset
+    # must not be reported for the new cookie while slewing
+    t = translator_factory(obs2tel_overrides={
+        "obs_wavelength": 0.6, "obs_coord_sys_del": "HORIZON",
+        "obs_lam_del": 60.0, "obs_bet_del": 30.0})
+    t._return_cookie(2, np.inf, slew_target=(200.0, 30.0, _status_unix(mock_ocs) - 5.0))
+
+    result, ccd = t.set_tel2obs_dict()
+
+    assert (result["tel_azm_cmd"], result["tel_elv_cmd"]) == (200.0, 30.0)
+    assert result["tel_time_del"] == pytest.approx(5.0, abs=1e-3)
+    assert result["tel_angle_focal_plane"] == 0.0
+    assert ccd["op_azm"] == pytest.approx(np.deg2rad(200.0))
+    assert ccd["op_elv"] == pytest.approx(np.deg2rad(30.0))
+    assert ccd["op_vel_elv"] == 0.0
+    assert (ccd["op_oazm"], ccd["op_oelv"]) == (0, 0)
+
+
+def test_accepted_path_clears_slew_target(translator_factory):
+    t = translator_factory()   # status time is 30 s after the payload start
+    t._return_cookie(2, np.inf, slew_target=(200.0, 30.0, 0.0))
+    t._return_cookie(2, t.last_payload["start_time"])   # path after the slew
+
+    result, _ = t.set_tel2obs_dict()
+
+    assert t.slew_target is None
+    assert (result["tel_azm_cmd"], result["tel_elv_cmd"]) == (180.0, 45.0)
+    assert result["tel_time_del"] == pytest.approx(30.0, abs=1e-3)
+    assert result["tel_on_track"] == "Y"
+
+
+def test_failure_clears_slew_target(translator_factory):
+    t = translator_factory()
+    t._return_cookie(2, np.inf, slew_target=(200.0, 30.0, 0.0))
+    t._fail_path(2, 1)   # e.g. slew timed out
+
+    assert t.slew_target is None
+    assert t.cookie_reported is True
+
+
+def test_superseded_slew_keeps_previous_slew_target(translator_factory):
+    t = translator_factory()
+    t._return_cookie(2, np.inf, slew_target=(200.0, 30.0, 0.0))
+    t._track_stop_event.set()
+    t._return_cookie(3, np.inf, slew_target=(210.0, 35.0, 1.0))
+
+    # cookie 3 not returned: the status of cookie 2 is unchanged
+    assert t.tel_return_cookie == 2
+    assert t.slew_target == (200.0, 30.0, 0.0)
+
+
 @pytest.mark.parametrize("current,correction,on_track,act_minus_cmd", [
     # payload is static at az=180, el=45; correction is SPEM + tiltmeters [deg]
     pytest.param((180.0, 45.0), (0.0, 0.0),  "Y", (0.0, 0.0),   id="no_correction"),
@@ -936,6 +1025,23 @@ def test_slew_before_path_if_far(slew_translator, mock_ocs):
     # held "N" until the path sent after the slew starts
     assert t.on_track_not_before == pytest.approx(sent["start_time"])
     assert t.tel_path_failed is False
+    assert t.slew_target is None
+
+
+def test_status_written_during_first_slew(slew_translator, mock_ocs):
+    # first command after start-up (no last_payload): the returned cookie and
+    # the slew target are reported while slewing
+    during_slew = []
+    t, target = slew_translator(on_poll=lambda t: during_slew.append(t.set_tel2obs_dict()[0]))
+    t.last_obs2tel = None
+
+    t._track_loop()
+
+    result = during_slew[0]
+    assert result is not None
+    assert result["tel_return_cookie"] == 2
+    assert result["tel_on_track"] == "N"
+    assert (result["tel_azm_cmd"], result["tel_elv_cmd"]) == target["azel"]
 
 
 def _send_once(t, mock_ocs):
