@@ -976,6 +976,10 @@ class KOSMA_translator:
         acu_azm_del = input_dict["tel_azm_act"] - input_dict["tel_azm_cmd"]
         acu_elv_del = input_dict["tel_elv_act"] - input_dict["tel_elv_cmd"]
 
+        self.log.debug(
+            f'expected az/el = {input_dict["tel_azm_cmd"]}, {input_dict["tel_elv_cmd"]} current az/el = {input_dict["tel_azm_act"]}, {input_dict["tel_elv_act"]}'
+        )
+
         actdiff = 3600 * (
             (acu_azm_del*np.cos(np.deg2rad(input_dict["tel_elv_cmd"])))**2 + acu_elv_del**2
         ) ** 0.5
