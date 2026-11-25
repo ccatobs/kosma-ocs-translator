@@ -13,7 +13,8 @@ still shown once (they share the expected position: pixel offsets are not
 applied by compare_data_timing.py).
 
 Panels (time in seconds since the start of the cycle):
-  1. data windows per kind (LOAD / OFF / ON / OTF dumps) with the gaps [s]
+  1. data per kind (LOAD / OFF / ON / OTF), one bar per integration or OTF
+     line (all its dumps), with the gaps [s] between them
   2. azimuth: expected at the window centres, housekeeping (--hk) as a line
   3. elevation: likewise
   (--hk-vel) az velocity and el velocity from a second housekeeping file
@@ -264,10 +265,12 @@ def unwrap_az(az, reference):
 def plot_timeline(ax, rows, blocks, t_ref):
     kinds = [k for k in KIND_ORDER if any(row_kind(r) == k for r in rows)]
     y_of = {kind: len(kinds) - 1 - i for i, kind in enumerate(kinds)}
-    for row in rows:
-        kind = row_kind(row)
-        ax.barh(y_of[kind], row["t_end"] - row["t_begin"], left=row["t_begin"] - t_ref,
-                height=0.6, color=KIND_COLORS[kind], edgecolor=SURFACE, linewidth=0.5)
+    # one bar per block (OTF line, OFF / load integration): the dumps of a
+    # line are contiguous and too narrow to draw one by one at cycle scale;
+    # they are shown as the markers at their centres in the az/el panels
+    for block in blocks:
+        ax.barh(y_of[block.kind], block.t_end - block.t_begin, left=block.t_begin - t_ref,
+                height=0.6, color=KIND_COLORS[block.kind], linewidth=0)
     for previous, block in zip(blocks, blocks[1:]):
         gap = block.t_begin - previous.t_end
         if gap >= MIN_LABELLED_GAP:
