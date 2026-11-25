@@ -38,7 +38,13 @@ import matplotlib.pyplot as plt
 import numpy as np
 from astropy.time import Time
 
-from compare_data_timing import load_housekeeping, load_time_series
+from compare_data_timing import (
+    HK_POSITION_COLUMNS,
+    HK_VELOCITY_COLUMNS,
+    load_housekeeping,
+    load_time_series,
+    parse_hk_columns,
+)
 
 # ---------------------------------------------------------------------------
 # Colours (reference data-viz palette, light mode): categorical slots in
@@ -99,16 +105,20 @@ def parse_arguments():
     parser.add_argument("windows", help="--out CSV of compare_data_timing.py")
     parser.add_argument("--samples", help="--samples-out CSV of compare_data_timing.py")
     parser.add_argument("--hk", help="housekeeping text file: time [unix sec], az, el [deg]")
-    parser.add_argument("--hk-cols", default="0,1,2",
-                        help="0-based columns of time, az, el (default 0,1,2)")
+    parser.add_argument("--hk-cols", default=None,
+                        help="columns of time, az, el: 0-based indices or header names "
+                             f"(default: {','.join(HK_POSITION_COLUMNS)} if the "
+                             "'# time ...' header has them, else 0,1,2)")
     parser.add_argument("--hk-delimiter", default=None,
                         help="column delimiter (default: ',' for *.csv, else whitespace)")
     parser.add_argument("--hk-time-offset", type=float, default=0.0,
                         help="[sec] added to the housekeeping times (--hk and --hk-vel)")
     parser.add_argument("--hk-vel", help="housekeeping text file with time, az and el "
                                          "velocity [deg/s]: adds two velocity panels")
-    parser.add_argument("--hk-vel-cols", default="0,1,2",
-                        help="0-based columns of time, az velocity, el velocity (default 0,1,2)")
+    parser.add_argument("--hk-vel-cols", default=None,
+                        help="columns of time, az velocity, el velocity: 0-based indices or "
+                             f"header names (default: {','.join(HK_VELOCITY_COLUMNS)} if "
+                             "the '# time ...' header has them, else 0,1,2)")
     parser.add_argument("--hk-vel-delimiter", default=None,
                         help="column delimiter (default: ',' for *.csv, else whitespace)")
     parser.add_argument("--cycle", type=int, default=0,
@@ -383,13 +393,13 @@ def main():
         samples.sort(key=lambda s: s["t"])
     hk = None
     if args.hk:
-        cols = tuple(int(c) for c in args.hk_cols.split(","))
-        hk = load_housekeeping(args.hk, cols, args.hk_delimiter, args.hk_time_offset)
+        hk = load_housekeeping(args.hk, parse_hk_columns(args.hk_cols), args.hk_delimiter,
+                               args.hk_time_offset)
     hk_vel = None
     if args.hk_vel:
-        cols = tuple(int(c) for c in args.hk_vel_cols.split(","))
-        vel_t, (vel_az, vel_el) = load_time_series(args.hk_vel, cols, args.hk_vel_delimiter,
-                                                   args.hk_time_offset)
+        vel_t, (vel_az, vel_el) = load_time_series(
+            args.hk_vel, parse_hk_columns(args.hk_vel_cols), args.hk_vel_delimiter,
+            args.hk_time_offset, HK_VELOCITY_COLUMNS)
         hk_vel = (vel_t, vel_az, vel_el)
 
     plot_cycle(cycle, index, samples, hk, hk_vel, args.out or f"cycle_{index}.png")

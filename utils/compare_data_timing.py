@@ -39,8 +39,10 @@ all current use cases); obs_x/y_focal_plane (--focal-plane) and the site
 (--site; SITELONG in the header is only printed) are options. Proper motion
 and parallax are ignored.
 
-Housekeeping (--hk): text file with time [unix s, ms or us, detected from the
-magnitude], az, el [deg]. Over-
+Housekeeping (--hk): text file with time, az, el [deg]. Time is unix s, ms or
+us (detected from the magnitude) or ISO 8601 UTC. Columns are selected by
+index or, for files of extractDataFromInfluxDB.py ("# time name1 name2 ..."
+header), by name; such files default to HK_POSITION_COLUMNS. Over-
 the-top positions (el > 90) are converted to nominal. The ACU current position
 includes the pointing correction (SPEM, tiltmeters); it is NOT removed here.
 
@@ -141,6 +143,12 @@ HK_TIME_UNITS = (
     (1e14, 1e-3, "ms"),
     (1e17, 1e-6, "us"),
 )
+# housekeeping columns (time, az, el) used if the file has a "# time ..."
+# header with these names (extractDataFromInfluxDB.py, measurement
+# Telescope.ACU-MON.DataSets.StatusGeneral8100), else HK_FALLBACK_COLUMNS
+HK_POSITION_COLUMNS = ("time", "Azimuth_current_position", "Elevation_current_position")
+HK_VELOCITY_COLUMNS = ("time", "Azimuth_current_velocity", "Elevation_current_velocity")
+HK_FALLBACK_COLUMNS = (0, 1, 2)
 
 # ---------------------------------------------------------------------------
 # FITS file names: <scan>_<subscan>_<array>_<pixel>_<...>.fits,
@@ -224,8 +232,11 @@ def parse_arguments():
                         help="UTC offset [h] of old translator log time stamps without 'Z' "
                              "(default: local time zone of this machine)")
     parser.add_argument("--hk", help="housekeeping text file: time [unix sec], az, el [deg]")
-    parser.add_argument("--hk-cols", default="0,1,2",
-                        help="0-based columns of time, az, el (default 0,1,2)")
+    parser.add_argument("--hk-cols", default=None,
+                        help="columns of time, az, el: 0-based indices or names from a "
+                             "'# time ...' header (default: "
+                             f"{','.join(HK_POSITION_COLUMNS)} if the header has them, "
+                             "else 0,1,2)")
     parser.add_argument("--hk-delimiter", default=None,
                         help="column delimiter (default: ',' for *.csv, else whitespace)")
     parser.add_argument("--hk-time-offset", type=float, default=0.0,
@@ -387,45 +398,144 @@ def housekeeping_time_scale(t):
     raise ValueError(f"housekeeping time stamps {median} too large for any known unit")
 
 
-def load_time_series(path, cols, delimiter, time_offset):
+def parse_hk_columns(text):
     """
-    Housekeeping text file: time and value columns, rows with non-numeric or
-    missing values (header, "undefined") dropped, sorted by time.
+    --hk-cols / --hk-vel-cols: comma-separated 0-based indices or column
+    names (from a "# time ..." header line), or None for the default.
+    """
+    if text is None:
+        return None
+    return tuple(int(item) if item.strip().isdigit() else item.strip()
+                 for item in text.split(","))
+
+
+def _parse_hk_time(text):
+    """
+    Time stamp as a number (unit detected later) or ISO 8601 UTC
+    ("2026-11-25T14:30:00.158000Z") in unix sec.
+
+    Returns
+    -------
+    value, is_iso : float, bool
+        value None if not a time stamp (e.g. a header line)
+    """
+    try:
+        return float(text), False
+    except ValueError:
+        pass
+    try:
+        stamp = np.datetime64(text.rstrip("Z"), "ns")
+    except ValueError:
+        return None, False
+    return stamp.astype(np.int64) / 1e9, True
+
+
+def _read_hk_rows(path, delimiter):
+    """Header names (from the first "#" line, or None) and the split data rows."""
+    names, rows = None, []
+    with open(path, errors="replace") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            if line.startswith("#"):
+                if names is None:
+                    names = [name.strip().strip('"') for name in line[1:].split(delimiter)]
+                continue
+            rows.append([field.strip().strip('"') for field in line.split(delimiter)])
+    return names, rows
+
+
+def _resolve_hk_columns(path, cols, default_names, names):
+    """0-based indices of the requested columns (see load_time_series)."""
+    if cols is None:
+        if names is not None and default_names and all(n in names for n in default_names):
+            cols = default_names
+        else:
+            cols = HK_FALLBACK_COLUMNS
+    indices = []
+    for col in cols:
+        if isinstance(col, int):
+            indices.append(col)
+        elif names is None:
+            raise ValueError(f"{path}: column name {col!r} given, but no '# time ...' header")
+        elif col not in names:
+            raise ValueError(f"{path}: no column {col!r}; columns are {names}")
+        else:
+            indices.append(names.index(col))
+    print(f"{os.path.basename(path)}: columns "
+          + ", ".join(names[i] if names and i < len(names) else str(i) for i in indices))
+    return indices
+
+
+def load_time_series(path, cols, delimiter, time_offset, default_names=None):
+    """
+    Housekeeping text file: time and value columns, sorted by time. Rows
+    whose selected fields are not numbers (header, "undefined") are dropped.
 
     Parameters
     ----------
-    cols : tuple of int
-        0-based columns: time first, then the values
+    cols : tuple of int or str, or None
+        Time column first, then the value columns: 0-based indices or names
+        from a "# time name1 name2 ..." header line (extractDataFromInfluxDB.py).
+        None: default_names if the header has them all, else HK_FALLBACK_COLUMNS.
     delimiter : str or None
         None: ',' for *.csv, else whitespace
     time_offset : float
         [sec] added to the times
+    default_names : tuple of str or None
 
     Returns
     -------
     t : np.ndarray
-        [unix sec] (unit of the file detected, see housekeeping_time_scale)
+        [unix sec] (numbers: unit detected, see housekeeping_time_scale;
+        or ISO 8601 UTC)
     values : list of np.ndarray
         one array per value column
     """
     if delimiter is None and path.lower().endswith(".csv"):
         delimiter = ","
-    data = np.genfromtxt(path, delimiter=delimiter, comments="#", usecols=cols,
-                         invalid_raise=False)
-    data = np.atleast_2d(data)
-    data = data[np.all(np.isfinite(data), axis=1)]
-    data = data[np.argsort(data[:, 0])]
-    scale, unit = housekeeping_time_scale(data[:, 0])
-    print(f"{os.path.basename(path)}: time stamps in {unit}")
-    return data[:, 0] * scale + time_offset, [data[:, i] for i in range(1, data.shape[1])]
+    names, rows = _read_hk_rows(path, delimiter)
+    indices = _resolve_hk_columns(path, cols, default_names, names)
+    times, values, iso = [], [], False
+    for row in rows:
+        if len(row) <= max(indices):
+            continue
+        t, is_iso = _parse_hk_time(row[indices[0]])
+        if t is None:
+            continue
+        try:
+            row_values = [float(row[i]) for i in indices[1:]]
+        except ValueError:
+            continue
+        if not all(map(math.isfinite, row_values)):
+            continue
+        times.append(t)
+        values.append(row_values)
+        iso = iso or is_iso
+    if not times:
+        raise ValueError(f"{path}: no valid rows")
+    times = np.array(times)
+    values = np.array(values)
+    order = np.argsort(times)
+    times, values = times[order], values[order]
+    if iso:
+        unit = "ISO 8601"
+    else:
+        scale, unit = housekeeping_time_scale(times)
+        times = times * scale
+    print(f"{os.path.basename(path)}: {len(times)} rows, time stamps in {unit}")
+    return times + time_offset, [values[:, i] for i in range(values.shape[1])]
 
 
 def load_housekeeping(path, cols, delimiter, time_offset):
     """
     Housekeeping time [unix sec], az, el [deg], sorted by time, over-the-top
-    positions (el > 90) converted to nominal.
+    positions (el > 90) converted to nominal. cols: see load_time_series
+    (default HK_POSITION_COLUMNS).
     """
-    t, (az, el) = load_time_series(path, cols, delimiter, time_offset)
+    t, (az, el) = load_time_series(path, cols, delimiter, time_offset,
+                                   HK_POSITION_COLUMNS)
     overtop = el > 90.0
     az = np.where(overtop, az + 180.0, az) % 360.0
     el = np.where(overtop, 180.0 - el, el)
@@ -799,8 +909,8 @@ def main():
 
     hk = None
     if args.hk:
-        cols = tuple(int(c) for c in args.hk_cols.split(","))
-        hk = load_housekeeping(args.hk, cols, args.hk_delimiter, args.hk_time_offset)
+        hk = load_housekeeping(args.hk, parse_hk_columns(args.hk_cols), args.hk_delimiter,
+                               args.hk_time_offset)
         print(f"housekeeping: {len(hk[0])} samples, {hk[0][0]:.3f} .. {hk[0][-1]:.3f}")
         if len(hk[0]) > 1:
             steps = np.diff(hk[0])
