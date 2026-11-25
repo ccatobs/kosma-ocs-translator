@@ -15,6 +15,8 @@ Panels (time in seconds since the start of the cycle):
   1. data windows per kind (LOAD / OFF / ON / OTF dumps) with the gaps [s]
   2. azimuth: expected at the window centres, housekeeping (--hk) as a line
   3. elevation: likewise
+  (--hk-vel) az velocity and el velocity from a second housekeeping file
+     [deg/s], as recorded (no over-the-top conversion)
   4. (--samples) housekeeping - expected, d_az cos(el) and d_el [arcsec]
   5. (--samples) OTF along-track lag [s], + = telescope ahead of the data model
 
@@ -36,7 +38,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 from astropy.time import Time
 
-from compare_data_timing import load_housekeeping
+from compare_data_timing import load_housekeeping, load_time_series
 
 # ---------------------------------------------------------------------------
 # Colours (reference data-viz palette, light mode): categorical slots in
@@ -102,7 +104,13 @@ def parse_arguments():
     parser.add_argument("--hk-delimiter", default=None,
                         help="column delimiter (default: ',' for *.csv, else whitespace)")
     parser.add_argument("--hk-time-offset", type=float, default=0.0,
-                        help="[sec] added to the housekeeping times")
+                        help="[sec] added to the housekeeping times (--hk and --hk-vel)")
+    parser.add_argument("--hk-vel", help="housekeeping text file with time, az and el "
+                                         "velocity [deg/s]: adds two velocity panels")
+    parser.add_argument("--hk-vel-cols", default="0,1,2",
+                        help="0-based columns of time, az velocity, el velocity (default 0,1,2)")
+    parser.add_argument("--hk-vel-delimiter", default=None,
+                        help="column delimiter (default: ',' for *.csv, else whitespace)")
     parser.add_argument("--cycle", type=int, default=0,
                         help="cycle to plot, 0-based; negative counts from the end (default 0)")
     parser.add_argument("--list", action="store_true", help="list the cycles and exit")
@@ -273,6 +281,14 @@ def plot_position(ax, rows, column, hk_t, hk_values, t_ref, label, az_reference=
     ax.legend(loc="best", fontsize=7, frameon=False, labelcolor=INK_SECONDARY)
 
 
+def plot_velocity(ax, t, velocity, t_ref, label):
+    if len(t):
+        ax.plot(t - t_ref, velocity, "-", color=INK_SECONDARY, linewidth=1.0)
+    ax.axhline(0.0, color=BASELINE, linewidth=0.8)
+    ax.set_ylabel(label)
+    style_axis(ax)
+
+
 def plot_differences(ax, samples, t_ref):
     t = np.array([s["t"] for s in samples]) - t_ref
     ax.plot(t, [s["d_az"] for s in samples], ".", markersize=3, color=INK_SECONDARY,
@@ -295,19 +311,24 @@ def plot_lag(ax, samples, t_ref):
     style_axis(ax)
 
 
-def plot_cycle(cycle, index, samples, hk, out):
+def cycle_part(series, t_ref, t_last):
+    """(t, values...) of a housekeeping series within the cycle +- HK_MARGIN."""
+    mask = (series[0] >= t_ref - HK_MARGIN) & (series[0] <= t_last + HK_MARGIN)
+    return tuple(column[mask] for column in series)
+
+
+def plot_cycle(cycle, index, samples, hk, hk_vel, out):
     blocks = make_blocks(cycle)
     t_ref = cycle[0]["t_begin"]
     t_last = cycle[-1]["t_end"]
     hk_t = hk_az = hk_el = None
     if hk is not None:
-        mask = (hk[0] >= t_ref - HK_MARGIN) & (hk[0] <= t_last + HK_MARGIN)
-        hk_t, hk_az, hk_el = hk[0][mask], hk[1][mask], hk[2][mask]
+        hk_t, hk_az, hk_el = cycle_part(hk, t_ref, t_last)
     cycle_samples = []
     if samples is not None:
         cycle_samples = [s for s in samples if t_ref <= s["t"] <= t_last]
 
-    n_panels = 3 + (2 if cycle_samples else 0)
+    n_panels = 3 + (2 if hk_vel is not None else 0) + (2 if cycle_samples else 0)
     heights = [TIMELINE_HEIGHT] + [PANEL_HEIGHT] * (n_panels - 1)
     fig, axes = plt.subplots(n_panels, 1, sharex=True, figsize=(FIG_WIDTH, sum(heights)),
                              gridspec_kw={"height_ratios": heights})
@@ -318,9 +339,15 @@ def plot_cycle(cycle, index, samples, hk, out):
     az_reference = float(np.median(az_values)) if az_values else 180.0
     plot_position(axes[1], cycle, "exp_az", hk_t, hk_az, t_ref, "azimuth [deg]", az_reference)
     plot_position(axes[2], cycle, "exp_el", hk_t, hk_el, t_ref, "elevation [deg]")
+    next_panel = 3
+    if hk_vel is not None:
+        vel_t, vel_az, vel_el = cycle_part(hk_vel, t_ref, t_last)
+        plot_velocity(axes[next_panel], vel_t, vel_az, t_ref, "az velocity [deg/s]")
+        plot_velocity(axes[next_panel + 1], vel_t, vel_el, t_ref, "el velocity [deg/s]")
+        next_panel += 2
     if cycle_samples:
-        plot_differences(axes[3], cycle_samples, t_ref)
-        plot_lag(axes[4], cycle_samples, t_ref)
+        plot_differences(axes[next_panel], cycle_samples, t_ref)
+        plot_lag(axes[next_panel + 1], cycle_samples, t_ref)
     axes[-1].set_xlabel(f"time since {utc_text(t_ref)} [s]")
 
     scans = sorted({b.scan for b in blocks})
@@ -358,8 +385,14 @@ def main():
     if args.hk:
         cols = tuple(int(c) for c in args.hk_cols.split(","))
         hk = load_housekeeping(args.hk, cols, args.hk_delimiter, args.hk_time_offset)
+    hk_vel = None
+    if args.hk_vel:
+        cols = tuple(int(c) for c in args.hk_vel_cols.split(","))
+        vel_t, (vel_az, vel_el) = load_time_series(args.hk_vel, cols, args.hk_vel_delimiter,
+                                                   args.hk_time_offset)
+        hk_vel = (vel_t, vel_az, vel_el)
 
-    plot_cycle(cycle, index, samples, hk, args.out or f"cycle_{index}.png")
+    plot_cycle(cycle, index, samples, hk, hk_vel, args.out or f"cycle_{index}.png")
 
 
 if __name__ == "__main__":

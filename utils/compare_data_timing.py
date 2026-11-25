@@ -387,10 +387,26 @@ def housekeeping_time_scale(t):
     raise ValueError(f"housekeeping time stamps {median} too large for any known unit")
 
 
-def load_housekeeping(path, cols, delimiter, time_offset):
+def load_time_series(path, cols, delimiter, time_offset):
     """
-    Housekeeping time [unix sec], az, el [deg], sorted by time, over-the-top
-    positions (el > 90) converted to nominal.
+    Housekeeping text file: time and value columns, rows with non-numeric or
+    missing values (header, "undefined") dropped, sorted by time.
+
+    Parameters
+    ----------
+    cols : tuple of int
+        0-based columns: time first, then the values
+    delimiter : str or None
+        None: ',' for *.csv, else whitespace
+    time_offset : float
+        [sec] added to the times
+
+    Returns
+    -------
+    t : np.ndarray
+        [unix sec] (unit of the file detected, see housekeeping_time_scale)
+    values : list of np.ndarray
+        one array per value column
     """
     if delimiter is None and path.lower().endswith(".csv"):
         delimiter = ","
@@ -400,8 +416,16 @@ def load_housekeeping(path, cols, delimiter, time_offset):
     data = data[np.all(np.isfinite(data), axis=1)]
     data = data[np.argsort(data[:, 0])]
     scale, unit = housekeeping_time_scale(data[:, 0])
-    print(f"housekeeping time stamps in {unit}")
-    t, az, el = data[:, 0] * scale + time_offset, data[:, 1], data[:, 2]
+    print(f"{os.path.basename(path)}: time stamps in {unit}")
+    return data[:, 0] * scale + time_offset, [data[:, i] for i in range(1, data.shape[1])]
+
+
+def load_housekeeping(path, cols, delimiter, time_offset):
+    """
+    Housekeeping time [unix sec], az, el [deg], sorted by time, over-the-top
+    positions (el > 90) converted to nominal.
+    """
+    t, (az, el) = load_time_series(path, cols, delimiter, time_offset)
     overtop = el > 90.0
     az = np.where(overtop, az + 180.0, az) % 360.0
     el = np.where(overtop, 180.0 - el, el)
@@ -778,6 +802,10 @@ def main():
         cols = tuple(int(c) for c in args.hk_cols.split(","))
         hk = load_housekeeping(args.hk, cols, args.hk_delimiter, args.hk_time_offset)
         print(f"housekeeping: {len(hk[0])} samples, {hk[0][0]:.3f} .. {hk[0][-1]:.3f}")
+        if len(hk[0]) > 1:
+            steps = np.diff(hk[0])
+            print(f"housekeeping sample interval: median {np.median(steps):.3f} s, "
+                  f"min {steps.min():.3f} s, max {steps.max():.3f} s")
     elif args.samples_out:
         sys.exit("--samples-out needs --hk")
 
