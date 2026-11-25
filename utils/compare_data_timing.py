@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Expected sky position and time of KOSMA FFTS data (OTF dumps and OFF/ON total
-power integrations), reconstructed after the fact from the FITS headers and the
+power integrations; for load (CAL) integrations the time only), reconstructed after the fact from the FITS headers and the
 log files only, and optionally compared with ACU housekeeping az/el.
 
 KOSMA_obs2tel.set / KOSMA_tel2obs.set are NOT used: they only hold the latest
@@ -131,6 +131,13 @@ MOTION_TIME_STEP = 0.1
 MIN_SPEED_FOR_LAG = 1.0
 DEFAULT_OUT = "expected_positions.csv"
 
+# ---------------------------------------------------------------------------
+# FITS file names: <scan>_<subscan>_<array>_<pixel>_<...>.fits,
+# e.g. 003458_001_H_PX00_S.fits (backend_server.c: scan number, then
+# bck_proc_filename and bck_name)
+# ---------------------------------------------------------------------------
+FITS_NAME_RE = re.compile(r"^(\d+)_(\d+)_(.+)\.fits$", re.IGNORECASE)
+
 
 @dataclass
 class LogStartTime:
@@ -154,6 +161,7 @@ class DataFile:
     subobsmode: str
     utc_start_sec: int      # DATE-UT, truncated [unix sec]
     is_otf: bool
+    is_load: bool           # CAL (HOT/COL/SKY/ZER): time window only
     int_time: float         # OBSTIME [sec], per dump for OTF
     n_dumps: int            # 1 for TP
     coord_sys_on: str
@@ -193,6 +201,12 @@ def parse_arguments():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("fits", nargs="+", help="FITS files or directories (*.fits inside)")
+    parser.add_argument("--pixel", default=None,
+                        help="only files of this pixel, e.g. PX00, or array and pixel, "
+                             "e.g. H_PX00 (file name <scan>_<subscan>_<array>_<pixel>_...)")
+    parser.add_argument("--scans", nargs=2, type=int, default=None, metavar=("FIRST", "LAST"),
+                        help="only files with scan number FIRST..LAST (inclusive, from the "
+                             "file name), e.g. --scans 3454 3458")
     parser.add_argument("--log", action="append", default=[],
                         help="translator or backend_server log file (repeatable)")
     parser.add_argument("--log-utc-offset", type=float, default=None,
@@ -222,7 +236,26 @@ def parse_arguments():
     return parser.parse_args()
 
 
-def find_fits_files(paths):
+def select_by_name(path, pixel, scans):
+    """
+    True if the file name <scan>_<subscan>_<array>_<pixel>_<...>.fits matches
+    the pixel (a "_"-separated part or sequence of parts of the name after the
+    subscan, e.g. "PX00" or "H_PX00") and the scan range (FIRST, LAST).
+    No filter given: always True.
+    """
+    if pixel is None and scans is None:
+        return True
+    match = FITS_NAME_RE.match(os.path.basename(path))
+    if not match:
+        print(f"skip {path}: file name not <scan>_<subscan>_..., cannot filter")
+        return False
+    scan, rest = int(match.group(1)), match.group(3)
+    if scans is not None and not scans[0] <= scan <= scans[1]:
+        return False
+    return pixel is None or f"_{pixel}_" in f"_{rest}_"
+
+
+def find_fits_files(paths, pixel=None, scans=None):
     files = []
     for path in paths:
         if os.path.isdir(path):
@@ -230,7 +263,7 @@ def find_fits_files(paths):
                       if name.lower().endswith(".fits")]
         else:
             files.append(path)
-    return files
+    return [path for path in files if select_by_name(path, pixel, scans)]
 
 
 def _header_str(header, key, default=""):
@@ -251,8 +284,9 @@ def read_data_file(path):
         print(f"skip {path}: no DATE-UT / LAMBDA")
         return None
     is_otf = "OTFNDMP" in header
-    if not is_otf and "TP" not in obsmode:
-        print(f"skip {path}: OBSMODE {obsmode} is neither OTF nor TP")
+    is_load = obsmode.startswith("CAL")
+    if not (is_otf or is_load or "TP" in obsmode):
+        print(f"skip {path}: OBSMODE {obsmode} is neither OTF, TP nor CAL")
         return None
     utc = Time(_header_str(header, "DATE-UT"), format="isot", scale="utc").unix
     return DataFile(
@@ -262,6 +296,7 @@ def read_data_file(path):
         subobsmode=_header_str(header, "SOBSMODE"),
         utc_start_sec=int(round(utc)),
         is_otf=is_otf,
+        is_load=is_load,
         int_time=float(header.get("OBSTIME", 0.0)),
         n_dumps=int(header["OTFNDMP"]) if is_otf else 1,
         coord_sys_on=_header_str(header, "COORDSYS"),
@@ -619,19 +654,28 @@ def refraction_text(refraction):
 
 def process_file(data_file, log_starts, refractions, refraction_override, hk,
                  location, focal_plane):
-    """Window rows and sample rows of one data file."""
+    """
+    Window rows and sample rows of one data file. A load (CAL) file gets its
+    time window only: the telescope position does not matter for it.
+    """
     windows = data_windows(data_file, log_starts)
     refraction = refraction_at(windows.t0, refractions, refraction_override)
     t_mid = (windows.t_begin + windows.t_end) / 2
     lam_del, bet_del = offsets_at(data_file, windows, t_mid)
-    expected = expected_altaz(data_file, t_mid, lam_del, bet_del, location, refraction,
-                              focal_plane)
-    expected_icrs = expected.icrs
     samples = None
-    if hk is not None:
-        samples = compare_samples(data_file, windows, hk, location, refraction, focal_plane)
+    if data_file.is_load:
+        exp_ra = exp_dec = exp_az = exp_el = np.full(len(t_mid), np.nan)
+    else:
+        expected = expected_altaz(data_file, t_mid, lam_del, bet_del, location, refraction,
+                                  focal_plane)
+        expected_icrs = expected.icrs
+        exp_ra, exp_dec = expected_icrs.ra.deg, expected_icrs.dec.deg
+        exp_az, exp_el = expected.az.deg, expected.alt.deg
+        if hk is not None:
+            samples = compare_samples(data_file, windows, hk, location, refraction,
+                                      focal_plane)
 
-    kind = "OTF" if data_file.is_otf else "TP"
+    kind = data_kind(data_file)
     name = os.path.basename(data_file.path)
     window_rows = []
     for i in range(len(t_mid)):
@@ -643,8 +687,8 @@ def process_file(data_file, log_starts, refractions, refraction_override, hk,
             "timediff": windows.timediff,
             "lam_del": lam_del[i], "bet_del": bet_del[i],
             "lam_off": data_file.lam_off, "bet_off": data_file.bet_off,
-            "exp_ra": expected_icrs.ra.deg[i], "exp_dec": expected_icrs.dec.deg[i],
-            "exp_az": expected.az.deg[i], "exp_el": expected.alt.deg[i],
+            "exp_ra": exp_ra[i], "exp_dec": exp_dec[i],
+            "exp_az": exp_az[i], "exp_el": exp_el[i],
             "refraction": refraction_text(refraction),
             **window_statistics(samples, i),
         })
@@ -660,9 +704,16 @@ def process_file(data_file, log_starts, refractions, refraction_override, hk,
     return windows, window_rows, sample_rows
 
 
+def data_kind(data_file):
+    """"OTF", "TP" (OFF or ON, see SOBSMODE) or "LOAD" (CAL)."""
+    if data_file.is_otf:
+        return "OTF"
+    return "LOAD" if data_file.is_load else "TP"
+
+
 def print_summary(data_file, windows, window_rows):
-    kind = "OTF" if data_file.is_otf else "TP"
-    line = (f"scan {data_file.scan:6d} {kind:3s} {data_file.subobsmode:3s} "
+    kind = data_kind(data_file)
+    line = (f"scan {data_file.scan:6d} {kind:4s} {data_file.subobsmode:3s} "
             f"start {windows.t0:.3f} ({windows.start_source}")
     if np.isfinite(windows.start_spread) and windows.start_spread > 0:
         line += f", logs differ by {windows.start_spread:.3f} s"
@@ -705,7 +756,8 @@ def main():
     elif args.samples_out:
         sys.exit("--samples-out needs --hk")
 
-    data_files = [f for f in map(read_data_file, find_fits_files(args.fits)) if f is not None]
+    fits_files = find_fits_files(args.fits, args.pixel, args.scans)
+    data_files = [f for f in map(read_data_file, fits_files) if f is not None]
     data_files.sort(key=lambda f: (f.utc_start_sec, f.scan))
     if not data_files:
         sys.exit("no TP/OTF FITS files")
