@@ -6,8 +6,9 @@ in between, and the expected az/el, optionally with the ACU housekeeping and
 its differences from the expected position.
 
 A cycle starts with a load (one or more consecutive CAL rows) and ends before
-the next load. Files of several pixels / backends with the same time window
-are shown once (they share the expected position: pixel offsets are not
+the next load. Select the pixel and scans in compare_data_timing.py (--pixel,
+--scans). Files of several pixels / backends with the same time window are
+still shown once (they share the expected position: pixel offsets are not
 applied by compare_data_timing.py).
 
 Panels (time in seconds since the start of the cycle):
@@ -102,8 +103,6 @@ def parse_arguments():
                         help="column delimiter (default: ',' for *.csv, else whitespace)")
     parser.add_argument("--hk-time-offset", type=float, default=0.0,
                         help="[sec] added to the housekeeping times")
-    parser.add_argument("--file-filter", default=None,
-                        help="use only rows whose file name contains this, e.g. PX00")
     parser.add_argument("--cycle", type=int, default=0,
                         help="cycle to plot, 0-based; negative counts from the end (default 0)")
     parser.add_argument("--list", action="store_true", help="list the cycles and exit")
@@ -122,13 +121,10 @@ def _convert(key, value):
         return value
 
 
-def read_rows(path, file_filter=None):
+def read_rows(path):
     with open(path, newline="") as handle:
-        rows = [{key: _convert(key, value) for key, value in row.items()}
+        return [{key: _convert(key, value) for key, value in row.items()}
                 for row in csv.DictReader(handle)]
-    if file_filter:
-        rows = [row for row in rows if file_filter in row["file"]]
-    return rows
 
 
 def row_kind(row):
@@ -340,7 +336,7 @@ def plot_cycle(cycle, index, samples, hk, out):
 
 def main():
     args = parse_arguments()
-    rows = deduplicate(read_rows(args.windows, args.file_filter))
+    rows = deduplicate(read_rows(args.windows))
     cycles = split_cycles(rows)
     if not cycles:
         sys.exit("no rows")
@@ -355,7 +351,7 @@ def main():
 
     samples = None
     if args.samples:
-        samples = read_rows(args.samples, args.file_filter)
+        samples = read_rows(args.samples)
         samples = list({(s["kind"], round(s["t"], DEDUP_DECIMALS)): s for s in samples}.values())
         samples.sort(key=lambda s: s["t"])
     hk = None

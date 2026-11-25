@@ -39,7 +39,8 @@ all current use cases); obs_x/y_focal_plane (--focal-plane) and the site
 (--site; SITELONG in the header is only printed) are options. Proper motion
 and parallax are ignored.
 
-Housekeeping (--hk): text file with time [unix sec, float], az, el [deg]. Over-
+Housekeeping (--hk): text file with time [unix s, ms or us, detected from the
+magnitude], az, el [deg]. Over-
 the-top positions (el > 90) are converted to nominal. The ACU current position
 includes the pointing correction (SPEM, tiltmeters); it is NOT removed here.
 
@@ -130,6 +131,16 @@ MOTION_TIME_STEP = 0.1
 # [arcsec/s] below this expected speed no lag is computed
 MIN_SPEED_FOR_LAG = 1.0
 DEFAULT_OUT = "expected_positions.csv"
+
+# ---------------------------------------------------------------------------
+# Housekeeping time stamps: unit detected from the magnitude (unix time now is
+# ~1.8e9 s = 1.8e12 ms = 1.8e15 us). (upper limit, factor to sec, unit name)
+# ---------------------------------------------------------------------------
+HK_TIME_UNITS = (
+    (1e11, 1.0, "s"),
+    (1e14, 1e-3, "ms"),
+    (1e17, 1e-6, "us"),
+)
 
 # ---------------------------------------------------------------------------
 # FITS file names: <scan>_<subscan>_<array>_<pixel>_<...>.fits,
@@ -364,6 +375,18 @@ def parse_logs(paths, utc_offset_hours):
     return starts, refractions
 
 
+def housekeeping_time_scale(t):
+    """
+    Factor converting the housekeeping time stamps to unix seconds, and the
+    unit name, chosen from their magnitude (HK_TIME_UNITS).
+    """
+    median = float(np.median(t)) if len(t) else 0.0
+    for limit, scale, unit in HK_TIME_UNITS:
+        if median < limit:
+            return scale, unit
+    raise ValueError(f"housekeeping time stamps {median} too large for any known unit")
+
+
 def load_housekeeping(path, cols, delimiter, time_offset):
     """
     Housekeeping time [unix sec], az, el [deg], sorted by time, over-the-top
@@ -376,7 +399,9 @@ def load_housekeeping(path, cols, delimiter, time_offset):
     data = np.atleast_2d(data)
     data = data[np.all(np.isfinite(data), axis=1)]
     data = data[np.argsort(data[:, 0])]
-    t, az, el = data[:, 0] + time_offset, data[:, 1], data[:, 2]
+    scale, unit = housekeeping_time_scale(data[:, 0])
+    print(f"housekeeping time stamps in {unit}")
+    t, az, el = data[:, 0] * scale + time_offset, data[:, 1], data[:, 2]
     overtop = el > 90.0
     az = np.where(overtop, az + 180.0, az) % 360.0
     el = np.where(overtop, 180.0 - el, el)
