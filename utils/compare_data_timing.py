@@ -42,7 +42,7 @@ and parallax are ignored.
 Housekeeping (--hk): text file with time, az, el [deg]. Time is unix s, ms or
 us (detected from the magnitude) or ISO 8601 UTC. Columns are selected by
 index or, for files of extractDataFromInfluxDB.py ("# time name1 name2 ..."
-header), by name; such files default to HK_POSITION_COLUMNS. Over-
+header), by name; such files default to HK_POSITION_COLUMN_SETS. Over-
 the-top positions (el > 90) are converted to nominal. The ACU current position
 includes the pointing correction (SPEM, tiltmeters); it is NOT removed here.
 
@@ -143,11 +143,17 @@ HK_TIME_UNITS = (
     (1e14, 1e-3, "ms"),
     (1e17, 1e-6, "us"),
 )
-# housekeeping columns (time, az, el) used if the file has a "# time ..."
-# header with these names (extractDataFromInfluxDB.py, measurement
-# Telescope.ACU-MON.DataSets.StatusGeneral8100), else HK_FALLBACK_COLUMNS
-HK_POSITION_COLUMNS = ("time", "Azimuth_current_position", "Elevation_current_position")
-HK_VELOCITY_COLUMNS = ("time", "Azimuth_current_velocity", "Elevation_current_velocity")
+# default housekeeping columns (time, az, el) for files with a "# time ..."
+# header (extractDataFromInfluxDB.py): the first set whose names are all in the
+# header, else HK_FALLBACK_COLUMNS. Measurements:
+# Telescope.ACU-MON.DataSets.StatusGeneral8100 (1 Hz) and Telescope.ACU-POS-UDP
+HK_POSITION_COLUMN_SETS = (
+    ("time", "Azimuth_current_position", "Elevation_current_position"),
+    ("time", "Azimuth", "Elevation"),
+)
+HK_VELOCITY_COLUMN_SETS = (
+    ("time", "Azimuth_current_velocity", "Elevation_current_velocity"),
+)
 HK_FALLBACK_COLUMNS = (0, 1, 2)
 
 # ---------------------------------------------------------------------------
@@ -235,7 +241,8 @@ def parse_arguments():
     parser.add_argument("--hk-cols", default=None,
                         help="columns of time, az, el: 0-based indices or names from a "
                              "'# time ...' header (default: "
-                             f"{','.join(HK_POSITION_COLUMNS)} if the header has them, "
+                             f"{column_sets_text(HK_POSITION_COLUMN_SETS)} if the header "
+                             "has them, "
                              "else 0,1,2)")
     parser.add_argument("--hk-delimiter", default=None,
                         help="column delimiter (default: ',' if the first data line has one, "
@@ -402,6 +409,11 @@ def housekeeping_time_scale(t):
     raise ValueError(f"housekeeping time stamps {median} too large for any known unit")
 
 
+def column_sets_text(column_sets):
+    """Default column sets for help texts: "a,b,c or d,e,f"."""
+    return " or ".join(",".join(column_set) for column_set in column_sets)
+
+
 def parse_hk_columns(text):
     """
     --hk-cols / --hk-vel-cols: comma-separated 0-based indices or column
@@ -457,13 +469,12 @@ def _read_hk_rows(path, delimiter):
     return names, rows
 
 
-def _resolve_hk_columns(path, cols, default_names, names):
+def _resolve_hk_columns(path, cols, default_sets, names):
     """0-based indices of the requested columns (see load_time_series)."""
     if cols is None:
-        if names is not None and default_names and all(n in names for n in default_names):
-            cols = default_names
-        else:
-            cols = HK_FALLBACK_COLUMNS
+        matching = [default for default in default_sets or ()
+                    if names is not None and all(n in names for n in default)]
+        cols = matching[0] if matching else HK_FALLBACK_COLUMNS
     indices = []
     for col in cols:
         if isinstance(col, int):
@@ -479,7 +490,7 @@ def _resolve_hk_columns(path, cols, default_names, names):
     return indices
 
 
-def load_time_series(path, cols, delimiter, time_offset, default_names=None):
+def load_time_series(path, cols, delimiter, time_offset, default_sets=None):
     """
     Housekeeping text file: time and value columns, sorted by time. Rows
     whose selected fields are not numbers (header, "undefined") are dropped.
@@ -489,12 +500,13 @@ def load_time_series(path, cols, delimiter, time_offset, default_names=None):
     cols : tuple of int or str, or None
         Time column first, then the value columns: 0-based indices or names
         from a "# time name1 name2 ..." header line (extractDataFromInfluxDB.py).
-        None: default_names if the header has them all, else HK_FALLBACK_COLUMNS.
+        None: the first of default_sets whose names are all in the header,
+        else HK_FALLBACK_COLUMNS.
     delimiter : str or None
         None: detected from the first data line ("," or a single space)
     time_offset : float
         [sec] added to the times
-    default_names : tuple of str or None
+    default_sets : tuple of tuple of str, or None
 
     Returns
     -------
@@ -505,7 +517,7 @@ def load_time_series(path, cols, delimiter, time_offset, default_names=None):
         one array per value column
     """
     names, rows = _read_hk_rows(path, delimiter)
-    indices = _resolve_hk_columns(path, cols, default_names, names)
+    indices = _resolve_hk_columns(path, cols, default_sets, names)
     times, values, iso = [], [], False
     for row in rows:
         if len(row) <= max(indices):
@@ -544,10 +556,10 @@ def load_housekeeping(path, cols, delimiter, time_offset):
     """
     Housekeeping time [unix sec], az, el [deg], sorted by time, over-the-top
     positions (el > 90) converted to nominal. cols: see load_time_series
-    (default HK_POSITION_COLUMNS).
+    (default HK_POSITION_COLUMN_SETS).
     """
     t, (az, el) = load_time_series(path, cols, delimiter, time_offset,
-                                   HK_POSITION_COLUMNS)
+                                   HK_POSITION_COLUMN_SETS)
     overtop = el > 90.0
     az = np.where(overtop, az + 180.0, az) % 360.0
     el = np.where(overtop, 180.0 - el, el)

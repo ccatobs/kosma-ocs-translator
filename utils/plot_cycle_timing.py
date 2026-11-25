@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """
-Plot one observing cycle (load, OFF, OTF, OFF, OTF, ...) from the output of
-compare_data_timing.py: when each integration / OTF dump took data, the gaps
-in between, and the expected az/el, optionally with the ACU housekeeping and
-its differences from the expected position.
+Plot observing cycles (load, OFF, OTF, OFF, OTF, ...) from the output of
+compare_data_timing.py into one PDF, one cycle per page: when each
+integration / OTF dump took data, the gaps in between, and the expected
+az/el, optionally with the ACU housekeeping and its differences from the
+expected position.
 
 A cycle starts with a load (one or more consecutive CAL rows) and ends before
 the next load. Select the pixel and scans in compare_data_timing.py (--pixel,
@@ -25,7 +26,8 @@ Example
 python compare_data_timing.py fits/ --log translator.log --log backend.log \\
     --hk acu_hk.csv --out expected.csv --samples-out samples.csv
 python plot_cycle_timing.py expected.csv --list
-python plot_cycle_timing.py expected.csv --cycle 2 --samples samples.csv --hk acu_hk.csv
+python plot_cycle_timing.py expected.csv --samples samples.csv --hk acu_hk.csv  # all cycles
+python plot_cycle_timing.py expected.csv --cycle 0 2 -1 --out some_cycles.pdf
 """
 import argparse
 import csv
@@ -36,11 +38,13 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.backends.backend_pdf import PdfPages
 from astropy.time import Time
 
 from compare_data_timing import (
-    HK_POSITION_COLUMNS,
-    HK_VELOCITY_COLUMNS,
+    HK_POSITION_COLUMN_SETS,
+    HK_VELOCITY_COLUMN_SETS,
+    column_sets_text,
     load_housekeeping,
     load_time_series,
     parse_hk_columns,
@@ -73,7 +77,10 @@ FIG_WIDTH = 12.0          # [inch]
 TIMELINE_HEIGHT = 1.8     # [inch]
 PANEL_HEIGHT = 2.4        # [inch]
 MARKER_SIZE = 4.0         # [pt] expected position at the window centres
-DPI = 150
+# [dpi] resolution of the rasterized dense data (housekeeping lines and
+# samples, up to 200 Hz) inside the PDF; axes and text stay vector graphics
+DPI = 200
+DEFAULT_OUT = "cycles.pdf"
 # [sec] gaps between data windows shorter than this are not labelled
 MIN_LABELLED_GAP = 0.5
 # [sec] housekeeping shown this far before / after the cycle
@@ -107,7 +114,7 @@ def parse_arguments():
     parser.add_argument("--hk", help="housekeeping text file: time [unix sec], az, el [deg]")
     parser.add_argument("--hk-cols", default=None,
                         help="columns of time, az, el: 0-based indices or header names "
-                             f"(default: {','.join(HK_POSITION_COLUMNS)} if the "
+                             f"(default: {column_sets_text(HK_POSITION_COLUMN_SETS)} if the "
                              "'# time ...' header has them, else 0,1,2)")
     parser.add_argument("--hk-delimiter", default=None,
                         help="column delimiter (default: ',' if the first data line has one, "
@@ -118,16 +125,21 @@ def parse_arguments():
                                          "velocity [deg/s]: adds two velocity panels")
     parser.add_argument("--hk-vel-cols", default=None,
                         help="columns of time, az velocity, el velocity: 0-based indices or "
-                             f"header names (default: {','.join(HK_VELOCITY_COLUMNS)} if "
+                             f"header names (default: {column_sets_text(HK_VELOCITY_COLUMN_SETS)} if "
                              "the '# time ...' header has them, else 0,1,2)")
     parser.add_argument("--hk-vel-delimiter", default=None,
                         help="column delimiter (default: ',' if the first data line has one, "
                              "else a single space)")
-    parser.add_argument("--cycle", type=int, default=0,
-                        help="cycle to plot, 0-based; negative counts from the end (default 0)")
+    parser.add_argument("--cycle", type=int, nargs="+", default=None,
+                        help="cycles to plot, 0-based; negative counts from the end "
+                             "(default: all)")
     parser.add_argument("--list", action="store_true", help="list the cycles and exit")
-    parser.add_argument("--out", default=None, help="PNG file (default cycle_<N>.png)")
-    return parser.parse_args()
+    parser.add_argument("--out", default=DEFAULT_OUT,
+                        help=f"PDF file, one page per cycle (default {DEFAULT_OUT})")
+    args = parser.parse_args()
+    if not args.out.lower().endswith(".pdf"):
+        parser.error(f"--out must be a .pdf file: {args.out}")
+    return args
 
 
 def _convert(key, value):
@@ -287,7 +299,7 @@ def plot_position(ax, rows, column, hk_t, hk_values, t_ref, label, az_reference=
     if hk_t is not None and len(hk_t):
         values = hk_values if az_reference is None else unwrap_az(hk_values, az_reference)
         ax.plot(hk_t - t_ref, values, "-", color=INK_SECONDARY, linewidth=1.0,
-                label="housekeeping", zorder=2)
+                label="housekeeping", zorder=2, rasterized=True)
     ax.set_ylabel(label)
     style_axis(ax)
     ax.legend(loc="best", fontsize=7, frameon=False, labelcolor=INK_SECONDARY)
@@ -295,7 +307,8 @@ def plot_position(ax, rows, column, hk_t, hk_values, t_ref, label, az_reference=
 
 def plot_velocity(ax, t, velocity, t_ref, label):
     if len(t):
-        ax.plot(t - t_ref, velocity, "-", color=INK_SECONDARY, linewidth=1.0)
+        ax.plot(t - t_ref, velocity, "-", color=INK_SECONDARY, linewidth=1.0,
+                rasterized=True)
     ax.axhline(0.0, color=BASELINE, linewidth=0.8)
     ax.set_ylabel(label)
     style_axis(ax)
@@ -304,9 +317,9 @@ def plot_velocity(ax, t, velocity, t_ref, label):
 def plot_differences(ax, samples, t_ref):
     t = np.array([s["t"] for s in samples]) - t_ref
     ax.plot(t, [s["d_az"] for s in samples], ".", markersize=3, color=INK_SECONDARY,
-            label="d_az cos(el)")
+            label="d_az cos(el)", rasterized=True)
     ax.plot(t, [s["d_el"] for s in samples], ".", markersize=3, color=D_EL_COLOR,
-            label="d_el")
+            label="d_el", rasterized=True)
     ax.axhline(0.0, color=BASELINE, linewidth=0.8)
     ax.set_ylabel("hk - expected [arcsec]")
     style_axis(ax)
@@ -317,7 +330,7 @@ def plot_lag(ax, samples, t_ref):
     otf = [s for s in samples if s["kind"] == "OTF" and np.isfinite(s["lag"])]
     if otf:
         ax.plot(np.array([s["t"] for s in otf]) - t_ref, [s["lag"] for s in otf], ".",
-                markersize=3, color=KIND_COLORS["OTF"])
+                markersize=3, color=KIND_COLORS["OTF"], rasterized=True)
     ax.axhline(0.0, color=BASELINE, linewidth=0.8)
     ax.set_ylabel("OTF lag [s]")
     style_axis(ax)
@@ -329,7 +342,8 @@ def cycle_part(series, t_ref, t_last):
     return tuple(column[mask] for column in series)
 
 
-def plot_cycle(cycle, index, samples, hk, hk_vel, out):
+def plot_cycle(cycle, index, samples, hk, hk_vel, pdf):
+    """Plot one cycle as a new page of pdf (PdfPages)."""
     blocks = make_blocks(cycle)
     t_ref = cycle[0]["t_begin"]
     t_last = cycle[-1]["t_end"]
@@ -367,10 +381,22 @@ def plot_cycle(cycle, index, samples, hk, hk_vel, out):
                  f"{t_last - t_ref:.1f} s", color=INK_PRIMARY, fontsize=11, x=0.01,
                  ha="left")
     fig.tight_layout()
-    fig.savefig(out, dpi=DPI, facecolor=SURFACE)
+    pdf.savefig(fig, dpi=DPI, facecolor=SURFACE)
     plt.close(fig)
+    print(f"cycle {index}:")
     print_blocks(blocks, t_ref)
-    print(f"written {out}")
+
+
+def selected_cycles(cycles, requested):
+    """Indices (0-based, in the order requested) of the cycles to plot."""
+    if requested is None:
+        return list(range(len(cycles)))
+    indices = []
+    for i in requested:
+        if not -len(cycles) <= i < len(cycles):
+            sys.exit(f"cycle {i} out of range: {len(cycles)} cycles (see --list)")
+        indices.append(i % len(cycles))
+    return indices
 
 
 def main():
@@ -382,11 +408,7 @@ def main():
     if args.list:
         print_cycles(cycles)
         return
-    try:
-        cycle = cycles[args.cycle]
-    except IndexError:
-        sys.exit(f"cycle {args.cycle} out of range: {len(cycles)} cycles (see --list)")
-    index = args.cycle % len(cycles)
+    indices = selected_cycles(cycles, args.cycle)
 
     samples = None
     if args.samples:
@@ -401,10 +423,16 @@ def main():
     if args.hk_vel:
         vel_t, (vel_az, vel_el) = load_time_series(
             args.hk_vel, parse_hk_columns(args.hk_vel_cols), args.hk_vel_delimiter,
-            args.hk_time_offset, HK_VELOCITY_COLUMNS)
+            args.hk_time_offset, HK_VELOCITY_COLUMN_SETS)
         hk_vel = (vel_t, vel_az, vel_el)
 
-    plot_cycle(cycle, index, samples, hk, hk_vel, args.out or f"cycle_{index}.png")
+    with PdfPages(args.out) as pdf:
+        for index in indices:
+            plot_cycle(cycles[index], index, samples, hk, hk_vel, pdf)
+        info = pdf.infodict()
+        info["Title"] = f"Cycle timing: {args.windows}"
+        info["Creator"] = "plot_cycle_timing.py"
+    print(f"written {args.out} ({len(indices)} page(s))")
 
 
 if __name__ == "__main__":
