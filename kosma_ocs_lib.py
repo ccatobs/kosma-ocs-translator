@@ -41,6 +41,11 @@ DEFAULT_LOGGER_NAME = "kosma-ocs-translator"
 # pass as extra= to a log call to write the message to the log file only
 FILE_ONLY = {"file_only": True}
 
+# log file time stamp: UTC, ISO 8601 with milliseconds, e.g. 2026-11-25T10:00:00.123Z
+# (logging's default is local time with "," before the milliseconds)
+LOG_TIME_FORMAT = "%Y-%m-%dT%H:%M:%S"
+LOG_MSEC_FORMAT = "%s.%03dZ"
+
 # ---------------------------------------------------------------------------
 # KOSMA_file_io: SPEM parameters
 # ---------------------------------------------------------------------------
@@ -76,6 +81,16 @@ KOSMA_POINT_STATUS_FILE = "KOSMA_point.status"
 # Logging
 # ===========================================================================
 
+class UTCFormatter(logging.Formatter):
+    """
+    Formatter whose %(asctime)s is UTC in LOG_TIME_FORMAT + LOG_MSEC_FORMAT,
+    independent of the time zone and locale of the computer.
+    """
+    converter = time.gmtime
+    default_time_format = LOG_TIME_FORMAT
+    default_msec_format = LOG_MSEC_FORMAT
+
+
 def setup_logging(logger_name, log_file, log_level):
     """
     Set up a logger writing to the console and to a log file.
@@ -93,7 +108,7 @@ def setup_logging(logger_name, log_file, log_level):
     -------
     logger : logging.Logger
         The console shows level and message only. The log file also has the
-        time stamp and the logger name. log.info(..., extra=FILE_ONLY) goes to
+        time stamp (UTC, see UTCFormatter) and the logger name. log.info(..., extra=FILE_ONLY) goes to
         the log file only, e.g. when the same information is already printed
         to the terminal as a table.
     """
@@ -112,7 +127,7 @@ def setup_logging(logger_name, log_file, log_level):
     # file handler
     fh = logging.FileHandler(log_file)
     fh.setLevel(log_level)
-    fh.setFormatter(logging.Formatter(
+    fh.setFormatter(UTCFormatter(
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     ))
     logger.addHandler(fh)

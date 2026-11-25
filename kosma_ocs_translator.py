@@ -913,7 +913,8 @@ class KOSMA_translator:
 
         # Fixed values
         input_dict["tel_latitude"] = self.location.lat.deg
-        input_dict["tel_longitude"] = self.location.lon.deg
+        # KOSMA tel_longitude is +west (astronomical notation), astropy is +east
+        input_dict["tel_longitude"] = -self.location.lon.deg
         input_dict["tel_altitude"] = self.location.height.to(u.m).value
         input_dict["tel_telescope"] = "CCAT"
         input_dict["tel_supports_ephemeris"] = "N"

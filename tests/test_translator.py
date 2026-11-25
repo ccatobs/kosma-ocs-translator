@@ -364,6 +364,21 @@ def test_tel_vel_converted_to_arcsec_per_sec(translator_factory, vel_azi, vel_el
 
 
 # ---------------------------------------------------------------------------
+# Dedicated test: site coordinates in KOSMA convention (longitude +west)
+# ---------------------------------------------------------------------------
+
+def test_tel_site_kosma_convention(translator_factory):
+    t = translator_factory()
+    result, _ = t.set_tel2obs_dict()
+
+    # CCAT is west of Greenwich: KOSMA (+west) longitude is positive
+    assert result["tel_longitude"] == pytest.approx(-CCAT_LOCATION.lon.deg)
+    assert result["tel_longitude"] > 0
+    assert result["tel_latitude"] == pytest.approx(CCAT_LOCATION.lat.deg)
+    assert result["tel_altitude"] == pytest.approx(CCAT_LOCATION.height.to(u.m).value)
+
+
+# ---------------------------------------------------------------------------
 # Dedicated test: cookie of an accepted path is returned at once, but
 # tel_on_track stays "N" until the path has started
 # ---------------------------------------------------------------------------
