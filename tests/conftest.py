@@ -17,6 +17,25 @@ from helpers import (
 )
 
 
+@pytest.fixture(autouse=True)
+def restore_ocs_log_handlers():
+    """
+    setup_logging adds its log file handler to the OCS client loggers, which
+    outlive the test: remove (and close) the handlers a test added.
+    """
+    import logging
+    from kosma_ocs_lib import OCS_LOGGER_NAMES
+
+    before = {name: list(logging.getLogger(name).handlers) for name in OCS_LOGGER_NAMES}
+    yield
+    for name, handlers in before.items():
+        logger = logging.getLogger(name)
+        for handler in list(logger.handlers):
+            if handler not in handlers:
+                logger.removeHandler(handler)
+                handler.close()
+
+
 @pytest.fixture
 def mock_ocs():
     """Minimal mock of the OCS object used by KOSMA_translator."""

@@ -4,7 +4,7 @@ import os
 import re
 import time
 
-from kosma_ocs_lib import UTCFormatter, setup_logging
+from kosma_ocs_lib import OCS_LOGGER_NAMES, UTCFormatter, setup_logging
 
 UTC_STAMP_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$")
 
@@ -48,6 +48,30 @@ def test_setup_logging_file_uses_utc_stamp(tmp_path):
         assert UTC_STAMP_RE.match(stamp)
         assert rest == "test-utc-stamp - INFO - hello"
     finally:
+        for handler in list(logger.handlers):
+            handler.close()
+            logger.removeHandler(handler)
+
+
+def test_setup_logging_file_gets_ocs_messages(tmp_path):
+    log_file = tmp_path / "test.log"
+    logger = setup_logging("test-ocs-messages", str(log_file), logging.INFO)
+    try:
+        for name in OCS_LOGGER_NAMES:
+            ocs_logger = logging.getLogger(name)
+            ocs_logger.setLevel(logging.INFO)
+            ocs_logger.info(f"message from {name}")
+        for handler in logger.handlers:
+            handler.flush()
+        lines = log_file.read_text().splitlines()
+        for name in OCS_LOGGER_NAMES:
+            line = next(line for line in lines if line.endswith(f"message from {name}"))
+            stamp, rest = line.split(" - ", 1)
+            assert UTC_STAMP_RE.match(stamp)
+            assert rest == f"{name} - INFO - message from {name}"
+    finally:
+        for name in OCS_LOGGER_NAMES:
+            logging.getLogger(name).setLevel(logging.NOTSET)
         for handler in list(logger.handlers):
             handler.close()
             logger.removeHandler(handler)

@@ -46,6 +46,11 @@ FILE_ONLY = {"file_only": True}
 LOG_TIME_FORMAT = "%Y-%m-%dT%H:%M:%S"
 LOG_MSEC_FORMAT = "%s.%03dZ"
 
+# loggers of the OCS python client (observatory-control-system/clients/python/ocs.py),
+# also written to the log file. They keep propagating to the root logger, which the
+# OCS client sets up (basicConfig) to print to the terminal.
+OCS_LOGGER_NAMES = ("python-ocs", "python-tcs")
+
 # ---------------------------------------------------------------------------
 # KOSMA_file_io: SPEM parameters
 # ---------------------------------------------------------------------------
@@ -110,7 +115,8 @@ def setup_logging(logger_name, log_file, log_level):
         The console shows level and message only. The log file also has the
         time stamp (UTC, see UTCFormatter) and the logger name. log.info(..., extra=FILE_ONLY) goes to
         the log file only, e.g. when the same information is already printed
-        to the terminal as a table.
+        to the terminal as a table. The messages of the OCS client loggers
+        (OCS_LOGGER_NAMES) also go to the log file.
     """
     logger = logging.getLogger(logger_name)
     logger.setLevel(log_level)
@@ -131,6 +137,11 @@ def setup_logging(logger_name, log_file, log_level):
         "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
     ))
     logger.addHandler(fh)
+
+    # OCS client messages into the same log file (their level is set by the
+    # OCS client, LOGGING_LEVEL environment variable, default INFO)
+    for name in OCS_LOGGER_NAMES:
+        logging.getLogger(name).addHandler(fh)
 
     return logger
 
