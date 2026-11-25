@@ -21,6 +21,8 @@ command. Everything comes from
 - the logs, for the sub-second start time:
     translator log   "OTF scan: T0=<unix>"                    (INFO)
                      "refraction: pressure=... wavelength=..." (INFO, AltAz parameters)
+                     "[OTF ]path start_time: <iso> (unix <unix>)" (INFO, the path
+                     in effect for each window -> path_kind/path_start/_frac)
     backend log      "OTF_start_time:<unix>"                  (Info)
                      "BCK_TOTPOWER: obs_start_time updated: <unix>"   (Vdebug)
                      "Started total power measurement with X seconds at <unix>." (Info)
@@ -123,6 +125,8 @@ REFRACTION_RE = re.compile(
     r"refraction: pressure=([-\d.]+) hPa, temperature=([-\d.]+) deg_C, "
     r"relative_humidity=([-\d.]+), wavelength=([-\d.eE+]+) micron")
 NO_REFRACTION_RE = re.compile(r"no refraction applied")
+# translator: start_time of every path sent to the TCS (tracking and OTF)
+PATH_START_RE = re.compile(r"\b(OTF )?path start_time: \S+ \(unix (\d+\.\d+)\)")
 HEADER_START_SOURCE = "DATE-UT + 0.5 s (+-0.5 s)"
 
 # ---------------------------------------------------------------------------
@@ -169,6 +173,12 @@ class LogStartTime:
     t: float        # [unix sec]
     source: str     # see START_TIME_PATTERNS
     kind: str       # "OTF" or "TP"
+
+
+@dataclass
+class PathStart:
+    t: float        # [unix sec] path start_time sent to the TCS
+    kind: str       # "OTF" or "track"
 
 
 @dataclass
@@ -365,11 +375,12 @@ def _translator_log_time(line, tz):
 
 def parse_logs(paths, utc_offset_hours):
     """
-    Start times (any log) and refraction parameters (translator log, with its
-    time stamps) found in the log files.
+    Start times (any log), path start times and refraction parameters
+    (translator log, the latter with its time stamps) found in the log files.
+    Path starts are sorted by start_time.
     """
     tz = None if utc_offset_hours is None else timezone(timedelta(hours=utc_offset_hours))
-    starts, refractions = [], []
+    starts, path_starts, refractions = [], [], []
     for path in paths:
         with open(path, errors="replace") as handle:
             for line in handle:
@@ -377,6 +388,11 @@ def parse_logs(paths, utc_offset_hours):
                     match = regex.search(line)
                     if match:
                         starts.append(LogStartTime(float(match.group(1)), source, kind))
+                match = PATH_START_RE.search(line)
+                if match:
+                    path_starts.append(PathStart(float(match.group(2)),
+                                                 "OTF" if match.group(1) else "track"))
+                    continue
                 match = REFRACTION_RE.search(line)
                 no_refraction = NO_REFRACTION_RE.search(line)
                 if not (match or no_refraction):
@@ -394,7 +410,17 @@ def parse_logs(paths, utc_offset_hours):
                 else:
                     refractions.append(RefractionEvent(t, {}, "no refraction"))
     refractions.sort(key=lambda event: event.t)
-    return starts, refractions
+    path_starts.sort(key=lambda start: start.t)
+    return starts, path_starts, refractions
+
+
+def path_start_at(path_starts, t):
+    """
+    The path in effect at time t: the latest path start_time <= t (a reused
+    path keeps its start). None if no path started before t.
+    """
+    i = np.searchsorted([start.t for start in path_starts], t, side="right") - 1
+    return path_starts[i] if i >= 0 else None
 
 
 def housekeeping_time_scale(t):
@@ -799,6 +825,7 @@ WINDOW_COLUMNS = (
     ("file", None), ("scan", None), ("kind", None), ("sobsmode", None), ("dump", None),
     ("t_begin", 4), ("t_mid", 4), ("t_end", 4), ("start_source", None),
     ("start_spread", 4), ("timediff", 4),
+    ("path_kind", None), ("path_start", 3), ("path_start_frac", 3),
     ("lam_del", 3), ("bet_del", 3), ("lam_off", 3), ("bet_off", 3),
     ("exp_ra", 7), ("exp_dec", 7), ("exp_az", 6), ("exp_el", 6), ("refraction", None),
     ("n_hk", None), ("d_az_mean", 2), ("d_el_mean", 2), ("d_rms", 2), ("d_max", 2),
@@ -835,7 +862,7 @@ def refraction_text(refraction):
 # Main
 # ===========================================================================
 
-def process_file(data_file, log_starts, refractions, refraction_override, hk,
+def process_file(data_file, log_starts, path_starts, refractions, refraction_override, hk,
                  location, focal_plane):
     """
     Window rows and sample rows of one data file. A load (CAL) file gets its
@@ -862,12 +889,16 @@ def process_file(data_file, log_starts, refractions, refraction_override, hk,
     name = os.path.basename(data_file.path)
     window_rows = []
     for i in range(len(t_mid)):
+        path = path_start_at(path_starts, windows.t_begin[i])
         window_rows.append({
             "file": name, "scan": data_file.scan, "kind": kind,
             "sobsmode": data_file.subobsmode, "dump": i,
             "t_begin": windows.t_begin[i], "t_mid": t_mid[i], "t_end": windows.t_end[i],
             "start_source": windows.start_source, "start_spread": windows.start_spread,
             "timediff": windows.timediff,
+            "path_kind": path.kind if path else "",
+            "path_start": path.t if path else float("nan"),
+            "path_start_frac": path.t % 1.0 if path else float("nan"),
             "lam_del": lam_del[i], "bet_del": bet_del[i],
             "lam_off": data_file.lam_off, "bet_off": data_file.bet_off,
             "exp_ra": exp_ra[i], "exp_dec": exp_dec[i],
@@ -916,8 +947,9 @@ def main():
     args = parse_arguments()
     location = EarthLocation(lat=args.site[0] * u.deg, lon=args.site[1] * u.deg,
                              height=args.site[2] * u.m)
-    log_starts, refractions = parse_logs(args.log, args.log_utc_offset)
-    print(f"logs: {len(log_starts)} start times, {len(refractions)} refraction settings")
+    log_starts, path_starts, refractions = parse_logs(args.log, args.log_utc_offset)
+    print(f"logs: {len(log_starts)} start times, {len(path_starts)} path starts, "
+          f"{len(refractions)} refraction settings")
 
     refraction_override = None
     if args.no_refraction:
@@ -954,8 +986,8 @@ def main():
     all_window_rows, all_sample_rows = [], []
     for data_file in data_files:
         windows, window_rows, sample_rows = process_file(
-            data_file, log_starts, refractions, refraction_override, hk, location,
-            args.focal_plane)
+            data_file, log_starts, path_starts, refractions, refraction_override, hk,
+            location, args.focal_plane)
         print_summary(data_file, windows, window_rows)
         all_window_rows += window_rows
         all_sample_rows += sample_rows

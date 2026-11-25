@@ -6,10 +6,16 @@ from astropy import units as u
 from astropy.time import Time
 
 from kosma_ocs_translator import (
-    _apply_offset, _get_time_from_acu_format, _hermite_resample,
+    _apply_offset, _get_time_from_acu_format, _hermite_resample, _start_time_text,
     TRACK_COARSE_STEP, TRACK_TIME_STEP,
 )
 from helpers import CCAT_LOCATION
+
+
+def test_start_time_text():
+    # 2026-11-25 10:00:00.123 UTC
+    assert _start_time_text(1795600800.123) == (
+        "2026-11-25T10:00:00.123Z (unix 1795600800.123)")
 
 
 class TestHermiteResample:

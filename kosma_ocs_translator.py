@@ -140,7 +140,7 @@ TRACK_COARSE_STEP = 1.0
 # [sec] before T0 the speed along the scan rises from 0 (relative to the sky) to
 # the scan speed with a smoothstep profile (zero acceleration at both ends).
 # Run-up length = scan speed * OTF_RAMP_TIME / 2.
-OTF_RAMP_TIME = 3.0
+OTF_RAMP_TIME = 2.0
 # [sec] tracking of the run-up point before the ramp
 OTF_SETTLE_TIME = 0.0
 # [sec] smoothstep deceleration after T0 + D; 0: the path ends at T0 + D
@@ -152,7 +152,7 @@ OTF_MIN_SEND_LEAD = TRACK_MIN_SEND_LEAD
 # KOSMA master_parameters plus the KOSMA overhead in between (cookie handshake,
 # backend IDLE). Only used to aim the PRETP move-to; an error of 1 s moves the
 # aim by ~15 arcsec at sidereal rate, which the ACU absorbs within the path lead.
-OTF_EXPECTED_PRE_OTF_TIME = 15.5
+OTF_EXPECTED_PRE_OTF_TIME = 14.5
 # [sec] a running tracking path at the PRETP position is kept only if it runs
 # at least this much longer
 OTF_PRE_KEEP_MIN_REMAINING = 60.0
@@ -207,6 +207,11 @@ def _apply_offset(coord, d_lam_arcsec, d_bet_arcsec, true_angle):
         coord.data.lat + d_bet_arcsec * u.arcsec,
         frame=coord.frame,
     )
+
+
+def _start_time_text(start_time):
+    """Path start_time [unix sec] as UTC ISO with ms and as unix sec, for the log."""
+    return f"{Time(start_time, format='unix', precision=3).isot}Z (unix {start_time:.3f})"
 
 
 def _hermite_resample(t_coarse, y_coarse, t_fine):
@@ -1568,6 +1573,7 @@ class KOSMA_translator:
                     self.log.info("Track superseded while TCS was busy, payload not sent")
                     return
                 lead_done = payload["start_time"] - time.time()
+                self.log.info(f"path start_time: {_start_time_text(payload['start_time'])}")
                 self.log.info(
                     f"start_time lead: {lead_send:.3f} s before send, "
                     f"{lead_done:.3f} s after response (TCS needs >= 9.8 s)"
@@ -2132,6 +2138,7 @@ class KOSMA_translator:
         if response is None:
             self.log.info("Track superseded while TCS was busy, OTF path not sent")
             return
+        self.log.info(f"OTF path start_time: {_start_time_text(payload['start_time'])}")
         self.log.info(
             f"OTF path start lead: {lead_send:.3f} s before send, "
             f"{payload['start_time'] - time.time():.3f} s after response"
