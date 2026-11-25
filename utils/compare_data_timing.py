@@ -22,7 +22,7 @@ command. Everything comes from
     translator log   "OTF scan: T0=<unix>"                    (INFO)
                      "refraction: pressure=... wavelength=..." (INFO, AltAz parameters)
                      "[OTF ]path start_time: <iso> (unix <unix>)" (INFO, the path
-                     in effect for each window -> path_kind/path_start/_frac)
+                     in effect for each window -> path_kind/path_start/_frac/_age)
     backend log      "OTF_start_time:<unix>"                  (Info)
                      "BCK_TOTPOWER: obs_start_time updated: <unix>"   (Vdebug)
                      "Started total power measurement with X seconds at <unix>." (Info)
@@ -57,6 +57,14 @@ the expected motion (as a time lag, + = telescope ahead of the data model) and
 across it.
 --samples-out (with --hk): one row per housekeeping sample inside a window.
 
+Commanded path (--payloads DIR, with --hk): the JSON payloads the translator
+wrote with --save-payloads, i.e. the points actually sent to the TCS. For
+every housekeeping sample the payload with the latest start_time <= t is
+interpolated (cubic Hermite with the sent velocities) at t: cmd_az/cmd_el, and
+d_cmd_az/d_cmd_el/lag_cmd as d_az/d_el/lag but relative to the sent path.
+hk - cmd ~ 0 with hk - exp != 0: the sent path differs from the data model;
+hk - cmd ~ hk - exp: the telescope does not follow the sent path.
+
 Example
 -------
 python compare_data_timing.py /data/fits/2026-11-25/ \\
@@ -65,6 +73,7 @@ python compare_data_timing.py /data/fits/2026-11-25/ \\
 """
 import argparse
 import csv
+import json
 import math
 import os
 import re
@@ -182,6 +191,18 @@ class PathStart:
 
 
 @dataclass
+class Payload:
+    """A path as sent to the TCS (translator --save-payloads)."""
+    start: float        # [unix sec] start_time
+    kind: str           # "track" or "OTF"
+    t: np.ndarray       # [unix sec] point times
+    az: np.ndarray      # [deg] unwrapped, as sent (over the top in the extended range)
+    el: np.ndarray      # [deg] as sent
+    v_az: np.ndarray    # [deg/s]
+    v_el: np.ndarray    # [deg/s]
+
+
+@dataclass
 class RefractionEvent:
     t: float        # [unix sec] log time stamp
     params: dict    # AltAz keyword arguments, {} = no refraction
@@ -273,6 +294,9 @@ def parse_arguments():
     parser.add_argument("--out", default=DEFAULT_OUT, help=f"default {DEFAULT_OUT}")
     parser.add_argument("--samples-out", default=None,
                         help="per housekeeping sample output (needs --hk)")
+    parser.add_argument("--payloads", metavar="DIR", default=None,
+                        help="directory of the path payloads saved by the translator "
+                             "(--save-payloads): adds hk - sent path (needs --hk)")
     return parser.parse_args()
 
 
@@ -586,10 +610,73 @@ def load_housekeeping(path, cols, delimiter, time_offset):
     """
     t, (az, el) = load_time_series(path, cols, delimiter, time_offset,
                                    HK_POSITION_COLUMN_SETS)
-    overtop = el > 90.0
-    az = np.where(overtop, az + 180.0, az) % 360.0
-    el = np.where(overtop, 180.0 - el, el)
+    az, el = overtop_to_nominal(az, el)
     return t, az, el
+
+
+def overtop_to_nominal(az, el):
+    """Over-the-top positions (el > 90) as nominal az [0, 360) / el [deg]."""
+    overtop = el > 90.0
+    return (np.where(overtop, az + 180.0, az) % 360.0,
+            np.where(overtop, 180.0 - el, el))
+
+
+# ===========================================================================
+# Commanded path (translator --save-payloads)
+# ===========================================================================
+
+def load_payloads(directory):
+    """Payloads (*.json) in directory, sorted by start_time."""
+    payloads = []
+    for name in sorted(os.listdir(directory)):
+        if not name.endswith(".json"):
+            continue
+        path = os.path.join(directory, name)
+        with open(path) as handle:
+            data = json.load(handle)
+        points = np.asarray(data["points"], dtype=float)
+        if points.ndim != 2 or points.shape[0] < 2 or points.shape[1] < 5:
+            print(f"skip {path}: fewer than 2 points of [t, az, el, v_az, v_el]")
+            continue
+        start = float(data["start_time"])
+        payloads.append(Payload(start, data.get("kind", "?"), start + points[:, 0],
+                                np.unwrap(points[:, 1], period=360.0), points[:, 2],
+                                points[:, 3], points[:, 4]))
+    payloads.sort(key=lambda payload: payload.start)
+    return payloads
+
+
+def _hermite_at(t_nodes, y, dydt, t):
+    """Cubic Hermite interpolation of y with slopes dydt at t_nodes, at t."""
+    i = np.clip(np.searchsorted(t_nodes, t, side="right") - 1, 0, len(t_nodes) - 2)
+    h = t_nodes[i + 1] - t_nodes[i]
+    s = (t - t_nodes[i]) / h
+    s2 = s * s
+    s3 = s2 * s
+    return ((2 * s3 - 3 * s2 + 1) * y[i] + (s3 - 2 * s2 + s) * h * dydt[i]
+            + (-2 * s3 + 3 * s2) * y[i + 1] + (s3 - s2) * h * dydt[i + 1])
+
+
+def commanded_altaz(payloads, times):
+    """
+    Az/el [deg, nominal] of the sent path at times: the payload with the
+    latest start_time <= t, NaN outside it (or without payloads).
+    """
+    times = np.asarray(times, dtype=float)
+    az = np.full(times.shape, np.nan)
+    el = np.full(times.shape, np.nan)
+    starts = np.array([payload.start for payload in payloads])
+    index = np.searchsorted(starts, times, side="right") - 1
+    for i in np.unique(index[index >= 0]):
+        payload = payloads[i]
+        mask = (index == i) & (times <= payload.t[-1])
+        if not np.any(mask):
+            continue
+        az[mask] = _hermite_at(payload.t, payload.az, payload.v_az, times[mask])
+        el[mask] = _hermite_at(payload.t, payload.el, payload.v_el, times[mask])
+    valid = np.isfinite(az) & np.isfinite(el)
+    az[valid], el[valid] = overtop_to_nominal(az[valid], el[valid])
+    return az, el
 
 
 # ===========================================================================
@@ -734,10 +821,11 @@ def wrap180(angle_deg):
 # Comparison with housekeeping
 # ===========================================================================
 
-def compare_samples(data_file, windows, hk, location, refraction, focal_plane):
+def compare_samples(data_file, windows, hk, location, refraction, focal_plane, payloads):
     """
     Differences of the housekeeping samples inside the windows from the
-    expected position at the same time.
+    expected position at the same time, and from the sent path (payloads,
+    NaN without them).
 
     Returns
     -------
@@ -770,12 +858,20 @@ def compare_samples(data_file, windows, hk, location, refraction, focal_plane):
     lag = np.where(moving, (d_az * v_az + d_el * v_el) / safe_speed**2, np.nan)
     cross = np.where(moving, (d_el * v_az - d_az * v_el) / safe_speed, np.nan)
 
+    # the same relative to the sent path
+    cmd_az, cmd_el = commanded_altaz(payloads, t)
+    d_cmd_az = wrap180(az - cmd_az) * cos_el * 3600.0
+    d_cmd_el = (el - cmd_el) * 3600.0
+    lag_cmd = np.where(moving, (d_cmd_az * v_az + d_cmd_el * v_el) / safe_speed**2, np.nan)
+
     hk_ra, hk_dec = altaz_to_icrs(az, el, t, location, refraction)
     exp_icrs = expected.icrs
     return {
         "window": window, "t": t, "hk_az": az, "hk_el": el,
         "exp_az": exp_az, "exp_el": exp_el, "d_az": d_az, "d_el": d_el,
         "speed": speed, "lag": lag, "cross": cross,
+        "cmd_az": cmd_az, "cmd_el": cmd_el, "d_cmd_az": d_cmd_az, "d_cmd_el": d_cmd_el,
+        "lag_cmd": lag_cmd,
         "hk_ra": hk_ra, "hk_dec": hk_dec,
         "exp_ra": exp_icrs.ra.deg, "exp_dec": exp_icrs.dec.deg,
         "lam_del": lam_del, "bet_del": bet_del,
@@ -790,7 +886,7 @@ def _nan_stat(function, values):
 def window_statistics(samples, i_window):
     """Statistics of the samples of one window."""
     names = ("n_hk", "d_az_mean", "d_el_mean", "d_rms", "d_max",
-             "lag_mean", "cross_mean")
+             "lag_mean", "cross_mean", "d_cmd_az_mean", "d_cmd_el_mean", "lag_cmd_mean")
     if samples is None:
         return dict.fromkeys(names, float("nan")) | {"n_hk": 0}
     mask = samples["window"] == i_window
@@ -806,6 +902,9 @@ def window_statistics(samples, i_window):
         "d_max": float(np.max(distance)),
         "lag_mean": _nan_stat(np.mean, samples["lag"][mask]),
         "cross_mean": _nan_stat(np.mean, samples["cross"][mask]),
+        "d_cmd_az_mean": _nan_stat(np.mean, samples["d_cmd_az"][mask]),
+        "d_cmd_el_mean": _nan_stat(np.mean, samples["d_cmd_el"][mask]),
+        "lag_cmd_mean": _nan_stat(np.mean, samples["lag_cmd"][mask]),
     }
 
 
@@ -825,17 +924,19 @@ WINDOW_COLUMNS = (
     ("file", None), ("scan", None), ("kind", None), ("sobsmode", None), ("dump", None),
     ("t_begin", 4), ("t_mid", 4), ("t_end", 4), ("start_source", None),
     ("start_spread", 4), ("timediff", 4),
-    ("path_kind", None), ("path_start", 3), ("path_start_frac", 3),
+    ("path_kind", None), ("path_start", 3), ("path_start_frac", 3), ("path_age", 3),
     ("lam_del", 3), ("bet_del", 3), ("lam_off", 3), ("bet_off", 3),
     ("exp_ra", 7), ("exp_dec", 7), ("exp_az", 6), ("exp_el", 6), ("refraction", None),
     ("n_hk", None), ("d_az_mean", 2), ("d_el_mean", 2), ("d_rms", 2), ("d_max", 2),
     ("lag_mean", 3), ("cross_mean", 2),
+    ("d_cmd_az_mean", 2), ("d_cmd_el_mean", 2), ("lag_cmd_mean", 3),
 )
 SAMPLE_COLUMNS = (
     ("file", None), ("scan", None), ("kind", None), ("dump", None), ("t", 4),
     ("lam_del", 3), ("bet_del", 3),
     ("hk_az", 6), ("hk_el", 6), ("exp_az", 6), ("exp_el", 6),
     ("d_az", 2), ("d_el", 2), ("speed", 2), ("lag", 3), ("cross", 2),
+    ("cmd_az", 6), ("cmd_el", 6), ("d_cmd_az", 2), ("d_cmd_el", 2), ("lag_cmd", 3),
     ("hk_ra", 7), ("hk_dec", 7), ("exp_ra", 7), ("exp_dec", 7),
 )
 
@@ -863,7 +964,7 @@ def refraction_text(refraction):
 # ===========================================================================
 
 def process_file(data_file, log_starts, path_starts, refractions, refraction_override, hk,
-                 location, focal_plane):
+                 location, focal_plane, payloads):
     """
     Window rows and sample rows of one data file. A load (CAL) file gets its
     time window only: the telescope position does not matter for it.
@@ -883,7 +984,7 @@ def process_file(data_file, log_starts, path_starts, refractions, refraction_ove
         exp_az, exp_el = expected.az.deg, expected.alt.deg
         if hk is not None:
             samples = compare_samples(data_file, windows, hk, location, refraction,
-                                      focal_plane)
+                                      focal_plane, payloads)
 
     kind = data_kind(data_file)
     name = os.path.basename(data_file.path)
@@ -899,6 +1000,8 @@ def process_file(data_file, log_starts, path_starts, refractions, refraction_ove
             "path_kind": path.kind if path else "",
             "path_start": path.t if path else float("nan"),
             "path_start_frac": path.t % 1.0 if path else float("nan"),
+            # [sec] window centre since the path start
+            "path_age": t_mid[i] - path.t if path else float("nan"),
             "lam_del": lam_del[i], "bet_del": bet_del[i],
             "lam_off": data_file.lam_off, "bet_off": data_file.bet_off,
             "exp_ra": exp_ra[i], "exp_dec": exp_dec[i],
@@ -974,6 +1077,15 @@ def main():
                   f"min {steps.min():.3f} s, max {steps.max():.3f} s")
     elif args.samples_out:
         sys.exit("--samples-out needs --hk")
+    elif args.payloads:
+        sys.exit("--payloads needs --hk")
+
+    payloads = []
+    if args.payloads:
+        payloads = load_payloads(args.payloads)
+        kinds = [payload.kind for payload in payloads]
+        print(f"payloads: {len(payloads)} paths ({kinds.count('track')} track, "
+              f"{kinds.count('OTF')} OTF) from {args.payloads}")
 
     fits_files = find_fits_files(args.fits, args.pixel, args.scans)
     data_files = [f for f in map(read_data_file, fits_files) if f is not None]
@@ -987,7 +1099,7 @@ def main():
     for data_file in data_files:
         windows, window_rows, sample_rows = process_file(
             data_file, log_starts, path_starts, refractions, refraction_override, hk,
-            location, args.focal_plane)
+            location, args.focal_plane, payloads)
         print_summary(data_file, windows, window_rows)
         all_window_rows += window_rows
         all_sample_rows += sample_rows

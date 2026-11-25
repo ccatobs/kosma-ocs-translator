@@ -1,4 +1,5 @@
 import time
+import json
 import logging
 import os
 import socket
@@ -129,6 +130,9 @@ TRACK_TIME_STEP = 0.1
 # [sec] time step of the full (astropy) coordinate transform; the points in between
 # are cubic Hermite interpolated (errors << 0.01 arcsec for sidereal motion)
 TRACK_COARSE_STEP = 1.0
+# --save-payloads: one JSON file per accepted path (kind "track" or "OTF"), with
+# kind, start_time, coordsys and points as sent (see utils/compare_data_timing.py)
+PAYLOAD_FILE_FORMAT = "path_{start_time:.3f}_{kind}.json"
 
 # ---------------------------------------------------------------------------
 # OTF, obs_otf_mode C (see the section "OTF" of KOSMA_translator)
@@ -449,7 +453,8 @@ class KOSMA_translator:
     # Set-up (main thread, at start-up)
     # =======================================================================
 
-    def __init__(self, ocs, abort_if_unknown=True, refraction_correction=False):
+    def __init__(self, ocs, abort_if_unknown=True, refraction_correction=False,
+                 payload_dir=None):
         # --- configuration --------------------------------------------------
         self.ocs = ocs
         self.log = logging.getLogger(DEFAULT_LOGGER_NAME)
@@ -465,6 +470,11 @@ class KOSMA_translator:
         self.log.info(f"Telescope location: {self.location}")
         # abort before the first path if there is no record of the previous command
         self.abort_if_unknown = abort_if_unknown
+        # directory for a copy of every accepted path payload (None: not saved)
+        self.payload_dir = payload_dir
+        if payload_dir is not None:
+            os.makedirs(payload_dir, exist_ok=True)
+            self.log.info(f"Saving accepted path payloads to {payload_dir}")
         # [sec] length of a path sent to TCS (and of the move-to bookkeeping payload)
         self.track_duration = 600
         # [sec] minimum remaining time of the last path to keep it for a new obs2tel
@@ -1596,6 +1606,7 @@ class KOSMA_translator:
                 self._fail_path(cookie, _error_code(response))
             else:
                 self.log.info(f"scan_pattern accepted: {body}")
+                self._save_payload(payload, "track")
                 self.last_aborted = False
                 # "type" only for bookkeeping, not part of the payload sent to TCS
                 self.last_payload = {**payload, "type": "path"}
@@ -1606,6 +1617,24 @@ class KOSMA_translator:
         except Exception as e:
             self.log.error(f"Track error: {e}")
             self._fail_path(cookie, 1)
+
+    def _save_payload(self, payload, kind):
+        """
+        With --save-payloads, write the accepted payload (as sent to TCS) and
+        its kind ("track" or "OTF") to payload_dir. A failure is only logged:
+        the path is running anyway.
+        """
+        if self.payload_dir is None:
+            return
+        name = PAYLOAD_FILE_FORMAT.format(start_time=payload["start_time"], kind=kind)
+        path = os.path.join(self.payload_dir, name)
+        try:
+            with open(path, "w") as handle:
+                json.dump({"kind": kind, **payload}, handle)
+        except (OSError, TypeError, ValueError) as e:
+            self.log.warning(f"could not save the payload to {path}: {e}")
+            return
+        self.log.info(f"payload saved to {path}")
 
     def _build_path_payload(self, target, track_duration, track_overhead=None):
         """
@@ -2152,6 +2181,7 @@ class KOSMA_translator:
             self._fail_path(cookie, _error_code(response), lost_track="Y")
             return
         self.log.info(f"OTF scan_pattern accepted: {body}")
+        self._save_payload(payload, "OTF")
         self.last_aborted = False
         # "type" only for bookkeeping, not part of the payload sent to TCS
         self.last_payload = {**payload, "type": "otf"}
@@ -2307,6 +2337,13 @@ def parse_arguments():
         help="Apply the atmospheric refraction correction in the AltAz transforms. "
              "Default is False (no refraction).",
     )
+    parser.add_argument(
+        "--save-payloads",
+        metavar="DIR",
+        default=None,
+        help="Write every accepted path payload (tracking and OTF) as JSON to DIR, "
+             "for utils/compare_data_timing.py --payloads. Default: not saved.",
+    )
     return parser.parse_args()
 
 
@@ -2335,6 +2372,7 @@ def main():
         ocs,
         abort_if_unknown=not args.no_abort_if_unknown,
         refraction_correction=args.refraction_correction,
+        payload_dir=args.save_payloads,
     )
     # KOSMA needs the SPEM parameters currently used by the ACU
     translator.dump_spem_to_kosma()

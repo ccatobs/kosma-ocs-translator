@@ -2,6 +2,7 @@
 Tests of the OTF mode C (obs_otf_mode C): dispatch of PRETP / OTFTP, the OTF
 path, the PRETP move-to and the status of an OTF scan cookie.
 """
+import json
 import time
 from unittest.mock import MagicMock
 
@@ -354,6 +355,34 @@ def test_otftp_sends_path_and_returns_cookie(otf_translator, mock_ocs):
     assert t.tel_error == 0
     assert t.on_track_not_before == pytest.approx(t0)
     assert t.otf_scan_window == pytest.approx((t0, t0 + 6.0))
+
+
+def test_otftp_payload_saved(otf_translator, mock_ocs, tmp_path):
+    t, _ = otf_translator(16.0)
+    t.payload_dir = str(tmp_path / "payloads")
+    (tmp_path / "payloads").mkdir()
+
+    t._track_loop(t._send_otf_scan)
+
+    sent = mock_ocs.scan_pattern.call_args.kwargs["data"]
+    files = list((tmp_path / "payloads").glob("*.json"))
+    assert [f.name for f in files] == [
+        kot.PAYLOAD_FILE_FORMAT.format(start_time=sent["start_time"], kind="OTF")]
+    saved = json.loads(files[0].read_text())
+    assert saved["kind"] == "OTF"
+    assert saved["start_time"] == sent["start_time"]
+    assert saved["coordsys"] == sent["coordsys"]
+    assert np.allclose(saved["points"], sent["points"], rtol=0, atol=1e-12)
+
+
+def test_payload_not_saved_by_default(otf_translator, mock_ocs, tmp_path):
+    t, _ = otf_translator(16.0)
+    assert t.payload_dir is None
+
+    t._track_loop(t._send_otf_scan)
+
+    assert mock_ocs.scan_pattern.called
+    assert not list(tmp_path.rglob("path_*.json"))
 
 
 def test_otftp_too_late_not_sent(otf_translator, mock_ocs):
