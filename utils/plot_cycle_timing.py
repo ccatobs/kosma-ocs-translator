@@ -110,7 +110,8 @@ def parse_arguments():
                              f"(default: {','.join(HK_POSITION_COLUMNS)} if the "
                              "'# time ...' header has them, else 0,1,2)")
     parser.add_argument("--hk-delimiter", default=None,
-                        help="column delimiter (default: ',' for *.csv, else whitespace)")
+                        help="column delimiter (default: ',' if the first data line has one, "
+                             "else whitespace)")
     parser.add_argument("--hk-time-offset", type=float, default=0.0,
                         help="[sec] added to the housekeeping times (--hk and --hk-vel)")
     parser.add_argument("--hk-vel", help="housekeeping text file with time, az and el "
@@ -120,7 +121,8 @@ def parse_arguments():
                              f"header names (default: {','.join(HK_VELOCITY_COLUMNS)} if "
                              "the '# time ...' header has them, else 0,1,2)")
     parser.add_argument("--hk-vel-delimiter", default=None,
-                        help="column delimiter (default: ',' for *.csv, else whitespace)")
+                        help="column delimiter (default: ',' if the first data line has one, "
+                             "else whitespace)")
     parser.add_argument("--cycle", type=int, default=0,
                         help="cycle to plot, 0-based; negative counts from the end (default 0)")
     parser.add_argument("--list", action="store_true", help="list the cycles and exit")

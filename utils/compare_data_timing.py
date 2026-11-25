@@ -238,7 +238,8 @@ def parse_arguments():
                              f"{','.join(HK_POSITION_COLUMNS)} if the header has them, "
                              "else 0,1,2)")
     parser.add_argument("--hk-delimiter", default=None,
-                        help="column delimiter (default: ',' for *.csv, else whitespace)")
+                        help="column delimiter (default: ',' if the first data line has one, "
+                             "else whitespace)")
     parser.add_argument("--hk-time-offset", type=float, default=0.0,
                         help="[sec] added to the housekeeping times")
     parser.add_argument("--site", nargs=3, type=float,
@@ -431,18 +432,24 @@ def _parse_hk_time(text):
 
 
 def _read_hk_rows(path, delimiter):
-    """Header names (from the first "#" line, or None) and the split data rows."""
-    names, rows = None, []
+    """
+    Header names (from the first "#" line, or None) and the split data rows.
+    delimiter None: "," if the first data line contains one, else whitespace
+    (extractDataFromInfluxDB.py writes space-separated *.csv files).
+    """
     with open(path, errors="replace") as handle:
-        for line in handle:
-            line = line.strip()
-            if not line:
-                continue
-            if line.startswith("#"):
-                if names is None:
-                    names = [name.strip().strip('"') for name in line[1:].split(delimiter)]
-                continue
-            rows.append([field.strip().strip('"') for field in line.split(delimiter)])
+        lines = [line.strip() for line in handle if line.strip()]
+    if delimiter is None:
+        first_data = next((line for line in lines if not line.startswith("#")), "")
+        delimiter = "," if "," in first_data else None
+    names, rows = None, []
+    for line in lines:
+        if line.startswith("#"):
+            if names is None:
+                names = [name.strip().strip('"')
+                         for name in line[1:].strip().split(delimiter)]
+            continue
+        rows.append([field.strip().strip('"') for field in line.split(delimiter)])
     return names, rows
 
 
@@ -480,7 +487,7 @@ def load_time_series(path, cols, delimiter, time_offset, default_names=None):
         from a "# time name1 name2 ..." header line (extractDataFromInfluxDB.py).
         None: default_names if the header has them all, else HK_FALLBACK_COLUMNS.
     delimiter : str or None
-        None: ',' for *.csv, else whitespace
+        None: detected from the first data line ("," or whitespace)
     time_offset : float
         [sec] added to the times
     default_names : tuple of str or None
@@ -493,8 +500,6 @@ def load_time_series(path, cols, delimiter, time_offset, default_names=None):
     values : list of np.ndarray
         one array per value column
     """
-    if delimiter is None and path.lower().endswith(".csv"):
-        delimiter = ","
     names, rows = _read_hk_rows(path, delimiter)
     indices = _resolve_hk_columns(path, cols, default_names, names)
     times, values, iso = [], [], False
@@ -515,6 +520,9 @@ def load_time_series(path, cols, delimiter, time_offset, default_names=None):
         iso = iso or is_iso
     if not times:
         raise ValueError(f"{path}: no valid rows")
+    if len(times) > 1 and min(times) == max(times):
+        raise ValueError(f"{path}: all {len(times)} time stamps are {times[0]}: "
+                         f"wrong time column? (columns {indices})")
     times = np.array(times)
     values = np.array(values)
     order = np.argsort(times)
