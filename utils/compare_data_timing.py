@@ -239,7 +239,7 @@ def parse_arguments():
                              "else 0,1,2)")
     parser.add_argument("--hk-delimiter", default=None,
                         help="column delimiter (default: ',' if the first data line has one, "
-                             "else whitespace)")
+                             "else a single space)")
     parser.add_argument("--hk-time-offset", type=float, default=0.0,
                         help="[sec] added to the housekeeping times")
     parser.add_argument("--site", nargs=3, type=float,
@@ -308,8 +308,11 @@ def read_data_file(path):
         return None
     is_otf = "OTFNDMP" in header
     is_load = obsmode.startswith("CAL")
-    if not (is_otf or is_load or "TP" in obsmode):
-        print(f"skip {path}: OBSMODE {obsmode} is neither OTF, TP nor CAL")
+    # total power integration: TP, or the OFF of an OTF map (OBSMODE e.g.
+    # OTFT-OFF, written like TP without the OTF keywords)
+    is_tp = "TP" in obsmode or obsmode.startswith("OTFT")
+    if not (is_otf or is_load or is_tp):
+        print(f"skip {path}: OBSMODE {obsmode} is neither OTF, TP, OTFT-OFF nor CAL")
         return None
     utc = Time(_header_str(header, "DATE-UT"), format="isot", scale="utc").unix
     return DataFile(
@@ -434,14 +437,15 @@ def _parse_hk_time(text):
 def _read_hk_rows(path, delimiter):
     """
     Header names (from the first "#" line, or None) and the split data rows.
-    delimiter None: "," if the first data line contains one, else whitespace
-    (extractDataFromInfluxDB.py writes space-separated *.csv files).
+    delimiter None: "," if the first data line contains one, else a single
+    space (extractDataFromInfluxDB.py writes space-separated *.csv files with
+    missing values as empty fields, which must not be merged).
     """
     with open(path, errors="replace") as handle:
         lines = [line.strip() for line in handle if line.strip()]
     if delimiter is None:
         first_data = next((line for line in lines if not line.startswith("#")), "")
-        delimiter = "," if "," in first_data else None
+        delimiter = "," if "," in first_data else " "
     names, rows = None, []
     for line in lines:
         if line.startswith("#"):
@@ -487,7 +491,7 @@ def load_time_series(path, cols, delimiter, time_offset, default_names=None):
         from a "# time name1 name2 ..." header line (extractDataFromInfluxDB.py).
         None: default_names if the header has them all, else HK_FALLBACK_COLUMNS.
     delimiter : str or None
-        None: detected from the first data line ("," or whitespace)
+        None: detected from the first data line ("," or a single space)
     time_offset : float
         [sec] added to the times
     default_names : tuple of str or None
