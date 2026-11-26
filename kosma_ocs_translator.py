@@ -130,7 +130,8 @@ TRACK_TIME_STEP = 0.1
 # [sec] time step of the full (astropy) coordinate transform; the points in between
 # are cubic Hermite interpolated (errors << 0.01 arcsec for sidereal motion)
 TRACK_COARSE_STEP = 1.0
-# --save-payloads: one JSON file per accepted path (kind "track" or "OTF"), with
+# file name format for the saved payload (if --save-payloads is set)
+# one JSON file per accepted path (kind "track" or "OTF"), with
 # kind, start_time, coordsys and points as sent (see utils/compare_data_timing.py)
 PAYLOAD_FILE_FORMAT = "path_{start_time:.3f}_{kind}.json"
 
@@ -144,7 +145,7 @@ PAYLOAD_FILE_FORMAT = "path_{start_time:.3f}_{kind}.json"
 # [sec] before T0 the speed along the scan rises from 0 (relative to the sky) to
 # the scan speed with a smoothstep profile (zero acceleration at both ends).
 # Run-up length = scan speed * OTF_RAMP_TIME / 2.
-OTF_RAMP_TIME = 2.0
+OTF_RAMP_TIME = 1.5
 # [sec] tracking of the run-up point before the ramp
 OTF_SETTLE_TIME = 0.0
 # [sec] smoothstep deceleration after T0 + D; 0: the path ends at T0 + D
@@ -156,7 +157,7 @@ OTF_MIN_SEND_LEAD = TRACK_MIN_SEND_LEAD
 # KOSMA master_parameters plus the KOSMA overhead in between (cookie handshake,
 # backend IDLE). Only used to aim the PRETP move-to; an error of 1 s moves the
 # aim by ~15 arcsec at sidereal rate, which the ACU absorbs within the path lead.
-OTF_EXPECTED_PRE_OTF_TIME = 14.5
+OTF_EXPECTED_PRE_OTF_TIME = OTF_MIN_SEND_LEAD + OTF_RAMP_TIME + OTF_SETTLE_TIME + 2
 # [sec] a running tracking path at the PRETP position is kept only if it runs
 # at least this much longer
 OTF_PRE_KEEP_MIN_REMAINING = 60.0
@@ -169,7 +170,7 @@ TEL_ERROR_OTF_TOO_LATE = 2
 # [sec] interval of checking KOSMA_obs2tel.set for a new command. The delay (up
 # to this interval) counts against pre_otf_time for OTF: pre_otf_time must be
 # >= OTF_MIN_SEND_LEAD + OTF_RAMP_TIME + OTF_SETTLE_TIME + this interval
-# + computation/abort (~0.5 s), i.e. ~15 s with the defaults.
+# + computation/abort (~0.5 s), i.e. ~13 s with the defaults.
 OBS2TEL_POLL_INTERVAL = 0.5
 
 
