@@ -6,6 +6,7 @@ fields that differ from the defaults in helpers.py.  The parametrised test
 function handles the rest.
 
 """
+import logging
 import time
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -933,6 +934,37 @@ def test_reuse_last_track(translator_factory, changes, start_offset, pending, re
         assert t.tel_lost_track == "N"
     # a not yet started path keeps holding tel_on_track at "N"
     assert t.on_track_not_before == hold
+
+
+def test_reuse_last_track_logs_changed_keys(translator_factory, caplog):
+    import time
+    t = translator_factory()
+    t.last_payload["start_time"] = time.time() - 30
+    old_lam_del = t.last_obs2tel["obs_lam_del"]
+    _new_obs2tel(t, 3, obs_lam_del=old_lam_del + 30.0, obs_wavelength=350.0)
+
+    with caplog.at_level(logging.DEBUG, logger=t.log.name):
+        assert t.reuse_last_track() is False
+
+    messages = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
+    assert len(messages) == 1
+    assert messages[0].startswith("last path not reused: target changed: ")
+    assert f"obs_lam_del {old_lam_del!r} -> {old_lam_del + 30.0!r}" in messages[0]
+    assert "obs_wavelength" in messages[0]
+    assert "obs_bet_del" not in messages[0]
+
+
+def test_reuse_last_track_logs_path_ending(translator_factory, caplog):
+    import time
+    t = translator_factory()
+    t.last_payload["start_time"] = time.time() - 350   # 250 s left < 300 s
+    _new_obs2tel(t, 3)
+
+    with caplog.at_level(logging.DEBUG, logger=t.log.name):
+        assert t.reuse_last_track() is False
+
+    assert any(r.getMessage().startswith("last path not reused: the last path ends in ")
+               for r in caplog.records)
 
 
 def test_reuse_last_track_not_after_failure(translator_factory):

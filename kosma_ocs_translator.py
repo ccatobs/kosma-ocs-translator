@@ -767,30 +767,44 @@ class KOSMA_translator:
         and that path has at least reuse_min_remaining left, keep it instead of
         aborting and resending it (e.g. control_tel presets the next position,
         then commands the same position again with a new cookie).
-        Returns True if the last path is reused.
+        Returns True if the last path is reused. If not, the reason is logged
+        at DEBUG level.
         """
-        if self.last_payload is None or self.last_obs2tel is None or self.tel_path_failed:
-            return False
+        if self.last_payload is None:
+            return self._not_reused("no accepted command recorded")
+        if self.last_obs2tel is None:
+            return self._not_reused("no obs2tel recorded for the last command")
+        if self.tel_path_failed:
+            return self._not_reused("the path of the returned cookie failed")
         if self.slew_in_progress:
             # the telescope has left the last path for a (superseded) slew
-            return False
+            return self._not_reused("a slew is in progress")
         if self.last_aborted:
             # the last path was aborted for a (superseded) newer command
-            return False
+            return self._not_reused("the last command was aborted")
         if self._track_thread and self._track_thread.is_alive():
-            return False
+            return self._not_reused("a track thread is still running")
         if self.last_payload["type"] == "otf":
             # an OTF scan path is only valid for its own start time
-            return False
-        if any(self.obs2tel[k] != self.last_obs2tel[k] for k in self.SAME_TARGET_KEYS):
-            return False
+            return self._not_reused("the last path is an OTF scan")
+        changed = [k for k in self.SAME_TARGET_KEYS if self.obs2tel[k] != self.last_obs2tel[k]]
+        if changed:
+            return self._not_reused("target changed: " + ", ".join(
+                f"{k} {self.last_obs2tel[k]!r} -> {self.obs2tel[k]!r}" for k in changed))
         if self.last_payload["type"] != "move_to":
             last_end_time = self.last_payload["start_time"] + self.last_payload["points"][-1][0]
-            if last_end_time - time.time() < self.reuse_min_remaining:
-                return False
+            remaining = last_end_time - time.time()
+            if remaining < self.reuse_min_remaining:
+                return self._not_reused(
+                    f"the last path ends in {remaining:.1f} s < {self.reuse_min_remaining} s")
 
         self._keep_last_command("same target, last path kept")
         return True
+
+    def _not_reused(self, reason):
+        """Log why the last path is not reused (DEBUG) and return False."""
+        self.log.debug(f"last path not reused: {reason}")
+        return False
 
     def keep_path_for_pre_otf(self):
         """
