@@ -74,10 +74,13 @@ python compare_data_timing.py /data/fits/2026-11-25/ \\
 import argparse
 import csv
 import json
+import logging
 import math
 import os
 import re
+import shlex
 import sys
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
@@ -146,6 +149,15 @@ MOTION_TIME_STEP = 0.1
 # [arcsec/s] below this expected speed no lag is computed
 MIN_SPEED_FOR_LAG = 1.0
 DEFAULT_OUT = "expected_positions.csv"
+
+# ---------------------------------------------------------------------------
+# Script log (the command line only), as obs_implementation scripts
+# (e.g. GEco_planning/create_GEco_sourcecatalog.py)
+# ---------------------------------------------------------------------------
+DEFAULT_LOGFNAME = f"{os.path.splitext(os.path.basename(__file__))[0]}.log"
+LOG_FORMAT_FILE = "%(asctime)s %(levelname)s : %(message)s"
+LOG_FORMAT_STREAM = "%(levelname)s : %(message)s"
+LOG_DATE_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 # ---------------------------------------------------------------------------
 # Housekeeping time stamps: unit detected from the magnitude (unix time now is
@@ -297,7 +309,32 @@ def parse_arguments():
     parser.add_argument("--payloads", metavar="DIR", default=None,
                         help="directory of the path payloads saved by the translator "
                              "(--save-payloads): adds hk - sent path (needs --hk)")
+    parser.add_argument("--logfname", default=DEFAULT_LOGFNAME,
+                        help=f"log file, appended (default {DEFAULT_LOGFNAME})")
     return parser.parse_args()
+
+
+def log_script_start(logfname):
+    """
+    Log the command line ("script starts : ...", UTC time stamp) to logfname
+    (appended) and the terminal.
+    """
+    logger = logging.getLogger(os.path.splitext(os.path.basename(sys.argv[0]))[0])
+    logger.setLevel(logging.INFO)
+    file_formatter = logging.Formatter(LOG_FORMAT_FILE, LOG_DATE_FORMAT)
+    file_formatter.converter = time.gmtime
+    file_handler = logging.FileHandler(os.path.expanduser(logfname))
+    file_handler.setFormatter(file_formatter)
+    stream_handler = logging.StreamHandler()
+    stream_handler.setFormatter(logging.Formatter(LOG_FORMAT_STREAM))
+    logger.addHandler(file_handler)
+    logger.addHandler(stream_handler)
+
+    # start message (arguments quoted as needed, e.g. --hk-delimiter " ")
+    logger.info(
+        f"script starts : {os.path.basename(sys.argv[0])}"
+        + f" {shlex.join(sys.argv[1:])}")
+    return logger
 
 
 def select_by_name(path, pixel, scans):
@@ -1048,6 +1085,7 @@ def print_summary(data_file, windows, window_rows):
 
 def main():
     args = parse_arguments()
+    log_script_start(args.logfname)
     location = EarthLocation(lat=args.site[0] * u.deg, lon=args.site[1] * u.deg,
                              height=args.site[2] * u.m)
     log_starts, path_starts, refractions = parse_logs(args.log, args.log_utc_offset)

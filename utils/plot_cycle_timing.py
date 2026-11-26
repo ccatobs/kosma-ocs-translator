@@ -32,6 +32,7 @@ python plot_cycle_timing.py expected.csv --cycle 0 2 -1 --out some_cycles.pdf
 """
 import argparse
 import csv
+import os
 import sys
 from dataclasses import dataclass
 
@@ -48,6 +49,7 @@ from compare_data_timing import (
     column_sets_text,
     load_housekeeping,
     load_time_series,
+    log_script_start,
     parse_hk_columns,
 )
 
@@ -82,6 +84,8 @@ MARKER_SIZE = 4.0         # [pt] expected position at the window centres
 # samples, up to 200 Hz) inside the PDF; axes and text stay vector graphics
 DPI = 200
 DEFAULT_OUT = "cycles.pdf"
+# command line log (compare_data_timing.log_script_start)
+DEFAULT_LOGFNAME = f"{os.path.splitext(os.path.basename(__file__))[0]}.log"
 # [sec] gaps between data windows shorter than this are not labelled
 MIN_LABELLED_GAP = 0.5
 # [sec] housekeeping shown this far before / after the cycle
@@ -137,6 +141,8 @@ def parse_arguments():
     parser.add_argument("--list", action="store_true", help="list the cycles and exit")
     parser.add_argument("--out", default=DEFAULT_OUT,
                         help=f"PDF file, one page per cycle (default {DEFAULT_OUT})")
+    parser.add_argument("--logfname", default=DEFAULT_LOGFNAME,
+                        help=f"log file, appended (default {DEFAULT_LOGFNAME})")
     args = parser.parse_args()
     if not args.out.lower().endswith(".pdf"):
         parser.error(f"--out must be a .pdf file: {args.out}")
@@ -404,6 +410,7 @@ def selected_cycles(cycles, requested):
 
 def main():
     args = parse_arguments()
+    log_script_start(args.logfname)
     rows = deduplicate(read_rows(args.windows))
     cycles = split_cycles(rows)
     if not cycles:
