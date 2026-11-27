@@ -495,7 +495,7 @@ def test_started_path_clears_previous_failure(translator_factory):
 def test_superseded_failure_not_reported(translator_factory):
     t = translator_factory()
     t.tel_return_cookie = 1
-    t._track_stop_event.set()
+    t._command_stop_event.set()
     t._fail_path(2, 1)
 
     assert t.tel_return_cookie == 1
@@ -600,7 +600,7 @@ def test_failure_clears_slew_target(translator_factory):
 def test_superseded_slew_keeps_previous_slew_target(translator_factory):
     t = translator_factory()
     t._return_cookie(2, np.inf, slew_target=(200.0, 30.0, 0.0))
-    t._track_stop_event.set()
+    t._command_stop_event.set()
     t._return_cookie(3, np.inf, slew_target=(210.0, 35.0, 1.0))
 
     # cookie 3 not returned: the status of cookie 2 is unchanged
@@ -693,7 +693,7 @@ def test_abort_only_if_previous_path_not_ended(
     else:
         t.last_payload["start_time"] = time.time() + last_start
 
-    t._track_loop()
+    t._command_loop()
 
     assert mock_ocs.abort.called is aborted
 
@@ -713,7 +713,7 @@ def test_abort_after_move_to(translator_factory, mock_ocs, monkeypatch):
     order.attach_mock(mock_ocs.abort, "abort")
     order.attach_mock(mock_ocs.scan_pattern, "scan_pattern")
 
-    t._track_loop()
+    t._command_loop()
 
     assert mock_ocs.abort.call_count == 1
     assert not mock_ocs.move_to.called
@@ -740,7 +740,7 @@ def test_move_to_response_check(translator_factory, mock_ocs, monkeypatch,
     t.tel_return_cookie = 1
     t.next_tel_return_cookie = 2
 
-    t._track_loop()
+    t._command_loop()
 
     assert mock_ocs.move_to.called
     if accepted:
@@ -786,7 +786,7 @@ def test_horizon_move_to_aborts_previous(
     order.attach_mock(mock_ocs.abort, "abort")
     order.attach_mock(mock_ocs.move_to, "move_to")
 
-    t._track_loop()
+    t._command_loop()
 
     assert mock_ocs.abort.called is aborted
     assert mock_ocs.move_to.call_count == 1
@@ -802,7 +802,7 @@ def test_move_to_retried_while_busy_after_abort(translator_factory, mock_ocs, mo
     t = translator_factory(obs2tel_overrides=HORIZON_OBS2TEL)
     t.last_payload["start_time"] = time.time() - 10.0   # previous path still running
 
-    t._track_loop()
+    t._command_loop()
 
     assert mock_ocs.abort.call_count == 1
     assert mock_ocs.move_to.call_count == 3
@@ -816,7 +816,7 @@ def test_abort_failure_fails_move_to(translator_factory, mock_ocs):
     t.last_payload["start_time"] = time.time() - 10.0   # previous path still running
     t.next_tel_return_cookie = 2
 
-    t._track_loop()
+    t._command_loop()
 
     assert not mock_ocs.move_to.called
     assert t.tel_path_failed is True
@@ -826,7 +826,7 @@ def test_abort_failure_fails_move_to(translator_factory, mock_ocs):
 def test_no_reuse_of_aborted_path(translator_factory):
     t = translator_factory()
     t.last_aborted = True
-    assert t.reuse_last_track() is False
+    assert t.reuse_last_command() is False
 
 
 def _responses(*codes):
@@ -891,7 +891,7 @@ def test_scan_pattern_retry_on_ocs_busy(translator_factory, mock_ocs):
 def test_scan_pattern_retry_stops_when_superseded(translator_factory, mock_ocs):
     mock_ocs.scan_pattern.side_effect = _responses(503, 200)
     t = translator_factory()
-    t._track_stop_event.set()
+    t._command_stop_event.set()
 
     response = t._scan_pattern_with_retry({"points": []}, busy_timeout=1.0,
                                           retry_interval=0.01)
@@ -914,7 +914,7 @@ def _new_obs2tel(t, cookie, **changes):
     pytest.param({},                         -350.0,  False, False, id="path_ends_too_early"),
     pytest.param({},                         -250.0,  False, True,  id="path_long_enough"),
 ])
-def test_reuse_last_track(translator_factory, changes, start_offset, pending, reused):
+def test_reuse_last_command(translator_factory, changes, start_offset, pending, reused):
     import time
     t = translator_factory()   # payload is 600 s long, reuse needs >= 300 s left
     t.last_payload["start_time"] = time.time() + start_offset
@@ -924,7 +924,7 @@ def test_reuse_last_track(translator_factory, changes, start_offset, pending, re
     t.tel_lost_track = "Y"
     _new_obs2tel(t, 3, **changes)
 
-    assert t.reuse_last_track() is reused
+    assert t.reuse_last_command() is reused
 
     if not reused:
         assert t.tel_return_cookie == 1
@@ -936,7 +936,7 @@ def test_reuse_last_track(translator_factory, changes, start_offset, pending, re
     assert t.on_track_not_before == hold
 
 
-def test_reuse_last_track_logs_changed_keys(translator_factory, caplog):
+def test_reuse_last_command_logs_changed_keys(translator_factory, caplog):
     import time
     t = translator_factory()
     t.last_payload["start_time"] = time.time() - 30
@@ -944,7 +944,7 @@ def test_reuse_last_track_logs_changed_keys(translator_factory, caplog):
     _new_obs2tel(t, 3, obs_lam_del=old_lam_del + 30.0, obs_wavelength=350.0)
 
     with caplog.at_level(logging.DEBUG, logger=t.log.name):
-        assert t.reuse_last_track() is False
+        assert t.reuse_last_command() is False
 
     messages = [r.getMessage() for r in caplog.records if r.levelno == logging.DEBUG]
     assert len(messages) == 1
@@ -954,27 +954,27 @@ def test_reuse_last_track_logs_changed_keys(translator_factory, caplog):
     assert "obs_bet_del" not in messages[0]
 
 
-def test_reuse_last_track_logs_path_ending(translator_factory, caplog):
+def test_reuse_last_command_logs_path_ending(translator_factory, caplog):
     import time
     t = translator_factory()
     t.last_payload["start_time"] = time.time() - 350   # 250 s left < 300 s
     _new_obs2tel(t, 3)
 
     with caplog.at_level(logging.DEBUG, logger=t.log.name):
-        assert t.reuse_last_track() is False
+        assert t.reuse_last_command() is False
 
     assert any(r.getMessage().startswith("last path not reused: the last path ends in ")
                for r in caplog.records)
 
 
-def test_reuse_last_track_not_after_failure(translator_factory):
+def test_reuse_last_command_not_after_failure(translator_factory):
     import time
     t = translator_factory()
     t.last_payload["start_time"] = time.time() - 30
     t._fail_path(2, 1)
     _new_obs2tel(t, 3)
 
-    assert t.reuse_last_track() is False
+    assert t.reuse_last_command() is False
 
 
 def test_reuse_last_move_to_without_end(translator_factory):
@@ -983,7 +983,7 @@ def test_reuse_last_move_to_without_end(translator_factory):
     t.last_payload["start_time"] = 0.0   # long ago; a move-to holds its position
     _new_obs2tel(t, 3)
 
-    assert t.reuse_last_track() is True
+    assert t.reuse_last_command() is True
     assert t.tel_return_cookie == 3
 
 
@@ -992,7 +992,7 @@ def test_unexpected_exception_in_track_fails_path(translator_factory):
     t.tel_return_cookie = 1
     t.next_tel_return_cookie = 2
 
-    t._track_loop()   # ValueError for the unknown frame must not escape
+    t._command_loop()   # ValueError for the unknown frame must not escape
 
     assert t.tel_return_cookie == 2
     assert t.tel_path_failed is True
@@ -1048,7 +1048,7 @@ def test_no_slew_if_close_to_path_start(slew_translator, mock_ocs, monkeypatch):
     monkeypatch.setattr(kot, "SLEW_BEFORE_PATH_MIN_DIST", 1e6)   # everything is close
     t, _ = slew_translator()
 
-    t._track_loop()
+    t._command_loop()
 
     assert not mock_ocs.move_to.called
     assert mock_ocs.scan_pattern.call_count == 1
@@ -1058,7 +1058,7 @@ def test_no_slew_if_close_to_path_start(slew_translator, mock_ocs, monkeypatch):
 def test_slew_before_path_if_far(slew_translator, mock_ocs):
     t, target = slew_translator()
 
-    t._track_loop()
+    t._command_loop()
 
     assert mock_ocs.move_to.call_count == 1
     assert mock_ocs.scan_pattern.call_count == 1
@@ -1082,7 +1082,7 @@ def test_status_written_during_first_slew(slew_translator, mock_ocs):
     t, target = slew_translator(on_poll=lambda t: during_slew.append(t.set_tel2obs_dict()[0]))
     t.last_obs2tel = None
 
-    t._track_loop()
+    t._command_loop()
 
     result = during_slew[0]
     assert result is not None
@@ -1102,7 +1102,7 @@ def test_busy_after_slew_resends_recomputed_path(slew_translator, mock_ocs):
     _send_once(t, mock_ocs)
     mock_ocs.scan_pattern.side_effect = _responses(503, 503, 200)
 
-    t._track_loop()
+    t._command_loop()
 
     assert mock_ocs.scan_pattern.call_count == 3
     starts = [c.kwargs["data"]["start_time"] for c in mock_ocs.scan_pattern.call_args_list]
@@ -1117,7 +1117,7 @@ def test_ocs_busy_after_slew_resends(slew_translator, mock_ocs):
     _send_once(t, mock_ocs)
     mock_ocs.scan_pattern.side_effect = [_ocs_busy(), *_responses(200)]
 
-    t._track_loop()
+    t._command_loop()
 
     assert mock_ocs.scan_pattern.call_count == 2
     assert t.tel_path_failed is False
@@ -1131,7 +1131,7 @@ def test_ocs_busy_after_slew_timeout_reports_503(slew_translator, mock_ocs, monk
     _send_once(t, mock_ocs)
     mock_ocs.scan_pattern.side_effect = [_ocs_busy()]
 
-    t._track_loop()
+    t._command_loop()
 
     assert t.tel_path_failed is True
     assert t.tel_error == 503     # not the HTTP 200 of the OCS
@@ -1144,7 +1144,7 @@ def test_busy_after_slew_fails_after_timeout(slew_translator, mock_ocs, monkeypa
     _send_once(t, mock_ocs)
     mock_ocs.scan_pattern.side_effect = _responses(503, 200)
 
-    t._track_loop()
+    t._command_loop()
 
     assert mock_ocs.scan_pattern.call_count == 1
     assert t.tel_path_failed is True
@@ -1159,7 +1159,7 @@ def test_busy_without_slew_not_resent(slew_translator, mock_ocs, monkeypatch):
     _send_once(t, mock_ocs)
     mock_ocs.scan_pattern.side_effect = _responses(503, 200)
 
-    t._track_loop()
+    t._command_loop()
 
     assert not mock_ocs.move_to.called
     assert mock_ocs.scan_pattern.call_count == 1
@@ -1177,7 +1177,7 @@ def test_slew_arrival_uses_own_tolerance(slew_translator, mock_ocs, monkeypatch)
         (target["azel"][0] + 0.5, target["azel"][1], 0.0, 0.0) if "azel" in target
         else (-100.0, 5.0, 0.0, 0.0))
 
-    t._track_loop()
+    t._command_loop()
 
     assert mock_ocs.move_to.call_count == 1
     assert not mock_ocs.scan_pattern.called
@@ -1189,7 +1189,7 @@ def test_slew_timeout_fails_path(slew_translator, mock_ocs, monkeypatch):
     monkeypatch.setattr(kot, "SLEW_TIMEOUT", 0.05)
     t, _ = slew_translator(arrive=False)
 
-    t._track_loop()
+    t._command_loop()
 
     assert mock_ocs.move_to.call_count == 1
     assert not mock_ocs.scan_pattern.called
@@ -1205,7 +1205,7 @@ def test_slew_rejected_fails_path(slew_translator, mock_ocs, monkeypatch):
     mock_ocs.move_to.side_effect = None
     mock_ocs.move_to.return_value = MagicMock(status_code=503, json=lambda: {"status": "busy"})
 
-    t._track_loop()
+    t._command_loop()
 
     assert not mock_ocs.scan_pattern.called
     assert t.slew_in_progress is False
@@ -1213,11 +1213,11 @@ def test_slew_rejected_fails_path(slew_translator, mock_ocs, monkeypatch):
     assert t.tel_error == 503
 
 
-def test_superseded_slew_is_aborted_by_next_track(slew_translator, mock_ocs, monkeypatch):
+def test_superseded_slew_is_aborted_by_next_command(slew_translator, mock_ocs, monkeypatch):
     import kosma_ocs_translator as kot
     # superseded while slewing
-    t, _ = slew_translator(arrive=False, on_poll=lambda t: t._track_stop_event.set())
-    t._track_loop()
+    t, _ = slew_translator(arrive=False, on_poll=lambda t: t._command_stop_event.set())
+    t._command_loop()
     assert not mock_ocs.scan_pattern.called
     assert t.slew_in_progress is True
     assert t.tel_path_failed is False      # superseded, not failed
@@ -1226,16 +1226,16 @@ def test_superseded_slew_is_aborted_by_next_track(slew_translator, mock_ocs, mon
     t.last_payload = {"type": "move_to", "start_time": 0.0,
                       "points": [[0.0, 0.0, 0.0, 0.0, 0.0]]}
     t.last_obs2tel = dict(t.obs2tel)
-    assert t.reuse_last_track() is False
+    assert t.reuse_last_command() is False
 
     # ... and the next path aborts it, even if the last accepted command was
     # a path that has ended (no abort then without the slew)
     t.last_payload = {"type": "path", "start_time": 0.0,
                       "points": [[0.0, 0.0, 0.0, 0.0, 0.0]]}
-    t._track_stop_event.clear()
+    t._command_stop_event.clear()
     monkeypatch.setattr(kot, "SLEW_BEFORE_PATH_MIN_DIST", 1e6)
     t._acu_position = lambda: (0.0, 0.0, 0.0, 0.0)
-    t._track_loop()
+    t._command_loop()
     assert mock_ocs.abort.called
     assert t.slew_in_progress is False
     assert mock_ocs.scan_pattern.call_count == 1
@@ -1259,7 +1259,7 @@ def test_slew_abort(slew_translator, mock_ocs, last_type, n_aborts):
     order.attach_mock(mock_ocs.abort, "abort")
     order.attach_mock(mock_ocs.move_to, "move_to")
 
-    t._track_loop()
+    t._command_loop()
 
     assert mock_ocs.abort.call_count == n_aborts
     assert [c[0] for c in order.mock_calls][:2] == ["abort", "move_to"]
@@ -1370,7 +1370,7 @@ def test_path_uses_refraction_frame(slew_translator, mock_ocs, monkeypatch):
     _stub_weather(t)
     t.refraction_correction = True
 
-    t._track_loop()
+    t._command_loop()
 
     assert mock_ocs.scan_pattern.call_count == 1
     assert altaz.call_count == 1
@@ -1386,7 +1386,7 @@ def test_path_uses_default_weather_if_missing(slew_translator, mock_ocs, monkeyp
     t.refraction_correction = True
     t.log = MagicMock()
 
-    t._track_loop()
+    t._command_loop()
 
     t.log.warning.assert_called_once()
     _assert_default_weather(t._refraction_params)

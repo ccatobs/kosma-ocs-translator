@@ -7,7 +7,7 @@ from astropy.time import Time
 
 from kosma_ocs_translator import (
     _apply_offset, _get_time_from_acu_format, _hermite_resample, _start_time_text,
-    TRACK_COARSE_STEP, TRACK_TIME_STEP,
+    TRACK_COARSE_STEP, PATH_TIME_STEP,
 )
 from helpers import CCAT_LOCATION
 
@@ -41,7 +41,7 @@ class TestHermiteResample:
         source = SkyCoord(
             az=0.0 * u.deg, alt=87.0 * u.deg,
             frame=AltAz(obstime=t0, location=CCAT_LOCATION)).icrs
-        t_f = np.arange(601) * TRACK_TIME_STEP
+        t_f = np.arange(601) * PATH_TIME_STEP
         t_c = np.arange(int(t_f[-1] / TRACK_COARSE_STEP) + 1) * TRACK_COARSE_STEP
 
         def altaz(t):

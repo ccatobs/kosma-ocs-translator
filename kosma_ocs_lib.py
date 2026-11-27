@@ -212,17 +212,17 @@ def setup_ocs(use_roof_mount=False, use_local_dev=False, certificates_path=None,
 # KOSMA_file_io
 # ===========================================================================
 
-def ImportKOSMAReadWriteIntoDictionary(files=None, variable=None, update_mod_time=True):
+def ImportKOSMAReadWriteIntoDictionary(files=None, variable=None):
+    # Note: original code had an option update_mod_time=True,
+    # which was removed as it was not used in the end
     log = logging.getLogger(DEFAULT_LOGGER_NAME)
     readwrite_dict = {}
     kosma_readwrite_dir = os.environ.get("WRITE_DIR", "/net/KOSMA_file_io/ReadWrite/")
-    not_changed_count = 0
     if files == None:
         readwrite_files = glob.glob("%s/*" % (kosma_readwrite_dir))
     else:
         readwrite_files = []
         for filename in files:
-            # check mod time here, if hasn't changed from last time.. skip it
             full_path_filename = kosma_readwrite_dir + "/" + filename
             if not os.path.exists(full_path_filename):
                 log.warning("WARNING: {0} not found".format(full_path_filename))

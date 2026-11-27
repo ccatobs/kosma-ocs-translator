@@ -87,14 +87,14 @@ def test_otftp_starts_otf_scan_even_for_same_target(translator_factory, tmp_path
     t.last_payload["type"] = "move_to"        # e.g. the PRETP move-to of the line
     t.last_payload["start_time"] = time.time()
     t.tel_return_cookie = 1
-    t.track = MagicMock()
+    t.start_command = MagicMock()
     _set_obs2tel(t, tmp_path, 2, **OTF_LINE, obs_track_duration=6.0,
                  obs_start_time=time.time() + 14)
 
     assert t.process_obs2tel() is True
 
-    t.track.assert_called_once_with(t._send_otf_scan)
-    assert t.tel_return_cookie == 1           # returned by the track thread
+    t.start_command.assert_called_once_with(t._send_otf_scan)
+    assert t.tel_return_cookie == 1           # returned by the command thread
 
 
 @pytest.mark.parametrize("changes,kept", [
@@ -109,19 +109,19 @@ def test_pretp_keeps_running_path_at_same_position(translator_factory, tmp_path,
     t.last_payload["start_time"] = time.time() - 5.0     # running, 595 s left
     t.tel_return_cookie = 1
     t.tel_lost_track = "Y"
-    t.track = MagicMock()
+    t.start_command = MagicMock()
     _set_obs2tel(t, tmp_path, 2, **{**OTF_LINE, **changes}, obs_track_duration=0)
 
     assert t.process_obs2tel() is True
 
     if kept:
-        assert not t.track.called
+        assert not t.start_command.called
         assert t.tel_return_cookie == 2
         assert t.tel_lost_track == "N"
         assert t.last_obs2tel["obs_otf_mode"] == "C"
         assert t.otf_scan_window is None
     else:
-        t.track.assert_called_once_with(t._send_pre_otf)
+        t.start_command.assert_called_once_with(t._send_pre_otf)
         assert t.tel_return_cookie == 1
 
 
@@ -138,22 +138,22 @@ def test_pretp_does_not_keep(translator_factory, tmp_path, setup):
         t.last_aborted = True
     else:
         t.last_payload["type"] = setup
-    t.track = MagicMock()
+    t.start_command = MagicMock()
     _set_obs2tel(t, tmp_path, 2, **OTF_LINE, obs_track_duration=0)
 
     t.process_obs2tel()
 
-    t.track.assert_called_once_with(t._send_pre_otf)
+    t.start_command.assert_called_once_with(t._send_pre_otf)
 
 
 def test_pattern_mode_not_implemented(translator_factory, tmp_path):
     t = translator_factory()
     t.tel_return_cookie = 1
-    t.track = MagicMock()
+    t.start_command = MagicMock()
     _set_obs2tel(t, tmp_path, 2, obs_otf_mode="P", obs_track_duration=6.0)
 
     assert t.process_obs2tel() is False
-    assert not t.track.called
+    assert not t.start_command.called
 
 
 def test_no_reuse_of_otf_path(translator_factory):
@@ -162,7 +162,7 @@ def test_no_reuse_of_otf_path(translator_factory):
     t.last_payload["start_time"] = time.time()
     _use_obs2tel(t, 3, **OTF_LINE)
 
-    assert t.reuse_last_track() is False
+    assert t.reuse_last_command() is False
 
 
 # ---------------------------------------------------------------------------
@@ -284,12 +284,12 @@ def test_pretp_keeps_move_to_of_horizon_source(translator_factory, tmp_path):
     t.last_payload["type"] = "move_to"
     t.last_payload["start_time"] = time.time() - 3600.0     # a move-to does not end
     t.tel_return_cookie = 1
-    t.track = MagicMock()
+    t.start_command = MagicMock()
     _set_obs2tel(t, tmp_path, 2, **OTF_LINE, **HORIZON_SOURCE, obs_track_duration=0)
 
     assert t.process_obs2tel() is True
 
-    assert not t.track.called
+    assert not t.start_command.called
     assert t.tel_return_cookie == 2
 
 
@@ -344,7 +344,7 @@ def test_otftp_sends_path_and_returns_cookie(otf_translator, mock_ocs):
     order.attach_mock(mock_ocs.abort, "abort")
     order.attach_mock(mock_ocs.scan_pattern, "scan_pattern")
 
-    t._track_loop(t._send_otf_scan)
+    t._command_loop(t._send_otf_scan)
 
     assert [c[0] for c in order.mock_calls] == ["abort", "scan_pattern"]
     sent = mock_ocs.scan_pattern.call_args.kwargs["data"]
@@ -362,7 +362,7 @@ def test_otftp_payload_saved(otf_translator, mock_ocs, tmp_path):
     t.payload_dir = str(tmp_path / "payloads")
     (tmp_path / "payloads").mkdir()
 
-    t._track_loop(t._send_otf_scan)
+    t._command_loop(t._send_otf_scan)
 
     sent = mock_ocs.scan_pattern.call_args.kwargs["data"]
     files = list((tmp_path / "payloads").glob("*.json"))
@@ -379,7 +379,7 @@ def test_payload_not_saved_by_default(otf_translator, mock_ocs, tmp_path):
     t, _ = otf_translator(16.0)
     assert t.payload_dir is None
 
-    t._track_loop(t._send_otf_scan)
+    t._command_loop(t._send_otf_scan)
 
     assert mock_ocs.scan_pattern.called
     assert not list(tmp_path.rglob("path_*.json"))
@@ -388,7 +388,7 @@ def test_payload_not_saved_by_default(otf_translator, mock_ocs, tmp_path):
 def test_otftp_too_late_not_sent(otf_translator, mock_ocs):
     t, _ = otf_translator(5.0)     # path start 2 s ahead < OTF_MIN_SEND_LEAD
 
-    t._track_loop(t._send_otf_scan)
+    t._command_loop(t._send_otf_scan)
 
     assert not mock_ocs.scan_pattern.called
     assert not mock_ocs.abort.called            # the running path is left alone
@@ -402,7 +402,7 @@ def test_otftp_rejected_flags_lost_track(otf_translator, mock_ocs):
     t, _ = otf_translator(16.0)
     mock_ocs.scan_pattern.return_value = _rejected()
 
-    t._track_loop(t._send_otf_scan)
+    t._command_loop(t._send_otf_scan)
 
     assert t.tel_return_cookie == 2
     assert t.tel_error == 1
@@ -414,7 +414,7 @@ def test_otftp_exception_flags_lost_track(otf_translator):
     t, t0 = otf_translator(16.0)
     t.obs2tel = {**t.obs2tel, "obs_coord_sys_del": "NOFRAME"}   # ValueError
 
-    t._track_loop(t._send_otf_scan)
+    t._command_loop(t._send_otf_scan)
 
     assert t.tel_return_cookie == 2
     assert t.tel_path_failed is True
@@ -433,7 +433,7 @@ def test_pretp_move_to_run_up_point(translator_factory, mock_ocs, monkeypatch):
     _use_obs2tel(t, 2, **OTF_LINE, obs_track_duration=0)
     now = time.time()
 
-    t._track_loop(t._send_pre_otf)
+    t._command_loop(t._send_pre_otf)
 
     az, el = mock_ocs.move_to.call_args.args
     # run-up point = line start - vel * ramp / 2, at the expected path start

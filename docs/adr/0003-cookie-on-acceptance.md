@@ -14,7 +14,7 @@
   - infinity during a slew before a path, until the path sent after the slew is accepted.
 - **Default:** A failure after the cookie is returned (e.g. the path rejected after an accepted slew, or a slew timeout) keeps the same cookie and sets `tel_error` and `tel_on_track = N`.
 - **Default:** `tel_lost_track` becomes `Y` only after `tel_on_track` was `Y` at least once for the current cookie (`tel_was_on_track`). The time the telescope needs to settle onto a new path is not lost track. Once `Y`, it stays `Y` until the next cookie.
-- **Default:** If `reuse_last_track` keeps a running path for a new cookie with the same target, the cookie is returned at once, `tel_lost_track` and `tel_was_on_track` start afresh, and a hold of a path that has not started yet stays in place.
+- **Default:** If `reuse_last_command` keeps a running path for a new cookie with the same target, the cookie is returned at once, `tel_lost_track` and `tel_was_on_track` start afresh, and a hold of a path that has not started yet stays in place.
 - **Assumption:** The ACU and the translator host are NTP-synchronized, so the ACU status time can be compared with `start_time` from the translator clock without a margin.
 
 ## Revisit if

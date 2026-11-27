@@ -116,7 +116,7 @@ MOVE_TO_BUSY_TIMEOUT = 5.0
 MOVE_TO_BUSY_RETRY_INTERVAL = 0.3
 
 # ---------------------------------------------------------------------------
-# Path timing (see KOSMA_translator._send_track)
+# Path timing (see KOSMA_translator._send_track; PATH_TIME_STEP also for OTF)
 # ---------------------------------------------------------------------------
 # [sec] start_time of a path is this far after the time its computation starts.
 # TCS requires start_time >= 9.8 sec ahead when it processes the path.
@@ -126,7 +126,7 @@ TRACK_OVERHEAD = 11.0
 # above 9.8 sec covers transfer time and a clock offset between here and the TCS.
 TRACK_MIN_SEND_LEAD = 10.3
 # [sec] time step between path points sent to the TCS
-TRACK_TIME_STEP = 0.1
+PATH_TIME_STEP = 0.1
 # [sec] time step of the full (astropy) coordinate transform; the points in between
 # are cubic Hermite interpolated (errors << 0.01 arcsec for sidereal motion)
 TRACK_COARSE_STEP = 1.0
@@ -438,16 +438,32 @@ class KOSMA_translator:
     Translates KOSMA obs2tel commands into OCS/TCS commands and reports the
     telescope status back to KOSMA. Three threads use this object:
 
-    - main thread: watches KOSMA_obs2tel.set and dispatches new commands
-      (sections "obs2tel input" and "Command dispatch")
-    - track thread: one per command, computes and sends it to TCS
-      (sections "Tracking", "TCS communication", "Cookie handshake")
+    - main thread: watches KOSMA_obs2tel.set and dispatches each new cookie
+      by obs_otf_mode (sections "obs2tel input" and "Command dispatch"). If
+      the command already running on TCS serves the new cookie
+      (reuse_last_command, or keep_path_for_pre_otf for a PRETP), the main
+      thread returns the cookie itself (_keep_last_command) and starts no
+      command thread; this is only done when no command thread is alive, i.e.
+      the previous command was sent and its cookie returned. Otherwise it
+      stops the running command thread (stop_command: set _command_stop_event and
+      join) and starts a new one.
+    - command thread: one per command; computes and sends it to TCS, returns
+      the cookie and exits (the path keeps running on TCS). 
+      Its send function is chosen by the main thread:
+      _send_track (obs_otf_mode N), _send_pre_otf (PRETP) or _send_otf_scan
+      (OTFTP, always a new thread) (sections "Commands", "OTF", "TCS
+      communication", "Cookie handshake"). It checks _command_stop_event
+      before each abort / send to TCS, so a superseded thread exits without
+      touching TCS.
     - background thread: polls the ACU and writes KOSMA_tel2obs.set and
-      KOSMA_ccdpos.sim (section "Status output")
+      KOSMA_ccdpos.sim (section "Status output"). It only reads the shared
+      state; on_track_not_before, otf_scan_window and slew_target are read
+      once per status so that one status is evaluated consistently.
 
-    The track thread and the background thread share the cookie handshake
-    state (tel_return_cookie, tel_error, on_track_not_before, ...) and
-    last_payload / last_obs2tel.
+    The command thread (or the main thread in _keep_last_command) writes the
+    cookie handshake state (tel_return_cookie, tel_error, on_track_not_before,
+    otf_scan_window, slew_target, ...) and last_payload / last_obs2tel; the
+    background thread reports them.
     """
 
     # =======================================================================
@@ -458,6 +474,8 @@ class KOSMA_translator:
                  payload_dir=None):
         # --- configuration --------------------------------------------------
         self.ocs = ocs
+        # same logger object as configured by setup_logging in main() (loggers
+        # are registered by name); unconfigured if the class is used without main()
         self.log = logging.getLogger(DEFAULT_LOGGER_NAME)
         self._host_pid = f"({socket.gethostname()}:{os.getpid()})"
         self.read_write_dir = os.environ.get(
@@ -479,14 +497,14 @@ class KOSMA_translator:
         # [sec] length of a path sent to TCS (and of the move-to bookkeeping payload)
         self.track_duration = 600
         # [sec] minimum remaining time of the last path to keep it for a new obs2tel
-        # commanding the same target (see reuse_last_track)
+        # commanding the same target (see reuse_last_command)
         self.reuse_min_remaining = self.track_duration / 2
 
         # --- status output templates ----------------------------------------
         self.load_tel2obs_template()
         self.load_ccdpossim_template()
 
-        # --- cookie handshake (track thread -> background thread) ------------
+        # --- cookie handshake (command thread -> background thread) ------------
         self.tel_return_cookie = 0
         self.old_tel_return_cookie = 0
         self.next_tel_return_cookie = 0
@@ -522,14 +540,14 @@ class KOSMA_translator:
         # last_payload (slew before the first path, first path failed)
         self.cookie_reported = False
 
-        # --- commands (main thread / track thread) ---------------------------
-        self._track_thread = None
-        self._track_stop_event = threading.Event()
+        # --- commands (main thread / command thread) ---------------------------
+        self._command_thread = None
+        self._command_stop_event = threading.Event()
         # record of the last accepted command and the obs2tel it was sent for
         self.last_payload = None
         self.last_obs2tel = None
         # True while a move-to sent by _slew_to may still be running on TCS
-        # (e.g. its track was superseded before arrival): the next command aborts it
+        # (e.g. its command was superseded before arrival): the next command aborts it
         self.slew_in_progress = False
         # True after the last command (path, move-to or slew) was aborted and
         # nothing was accepted by TCS since: nothing is running, so no further
@@ -540,7 +558,7 @@ class KOSMA_translator:
         # apply the atmospheric refraction in the AltAz transforms
         self.refraction_correction = refraction_correction
         self.log.info(f"Refraction correction: {'ON' if refraction_correction else 'OFF'}")
-        # AltAz keyword arguments for refraction, updated for each new track.
+        # AltAz keyword arguments for refraction, updated for each new command.
         # Empty: no refraction (AltAz default pressure is 0)
         self._refraction_params = {}
         # last known state of the ACU RF refraction correction
@@ -661,7 +679,7 @@ class KOSMA_translator:
         #
         self.log.info("reading KOSMA_obs2tel.set file")
         self.kio_files = ImportKOSMAReadWriteIntoDictionary(
-            files=["KOSMA_obs2tel.set"], variable=None, update_mod_time=True
+            files=["KOSMA_obs2tel.set"], variable=None
         )
         self.obs_tolerance = self.kio_files["KOSMA_obs2tel.set"]["obs_tolerance"]
         self.log.info(f"obs_tolerance set to {self.obs_tolerance} arcseconds")
@@ -697,18 +715,25 @@ class KOSMA_translator:
 
     def process_obs2tel(self):
         """
-        Read the changed KOSMA_obs2tel.set and act on it: ignore it if the
-        cookie has not changed, keep the last path for the same target, or
-        start a new command depending on obs_otf_mode.
+        Read the changed KOSMA_obs2tel.set and act on it:
+
+        - If the cookie has not changed, do nothing and return False.
+        - If the command running on TCS serves the new obs2tel (reuse_last_command
+          for the same target, keep_path_for_pre_otf for a PRETP at its
+          position), keep it, return the new cookie without sending anything to
+          TCS, and return True.
+        - Otherwise start a new command thread depending on obs_otf_mode and return
+          True. For obs_otf_mode P (not implemented) or an unknown mode,
+          nothing is done and False is returned.
 
         obs_otf_mode C (see section "OTF"): obs_track_duration > 0 is the OTF scan
-        (OTFTP), never served by a kept path; obs_track_duration = 0 is the
-        pre-OTF position (PRETP).
+        (OTFTP), always sent anew, never served by a kept path;
+        obs_track_duration = 0 is the pre-OTF position (PRETP).
 
         Returns
         -------
         handled : bool
-            True if a new cookie was handled (path reused or track started).
+            True if a new cookie was handled (command kept or new command started).
             False if nothing was done; the caller then waits before polling again.
         """
         self.read_obs2tel_file()
@@ -720,22 +745,22 @@ class KOSMA_translator:
         otf_mode = self.obs2tel["obs_otf_mode"]
         if otf_mode == "C" and self.obs2tel["obs_track_duration"] > 0:
             self.log.info("OTF scan command (OTFTP) received")
-            self.track(self._send_otf_scan)
+            self.start_command(self._send_otf_scan)
             return True
-        if self.reuse_last_track():
+        if self.reuse_last_command():
             return True
         if otf_mode == "C":
             self.log.info("pre-OTF command (PRETP) received")
             if self.keep_path_for_pre_otf():
                 return True
-            self.track(self._send_pre_otf)
+            self.start_command(self._send_pre_otf)
             return True
         if otf_mode == "P":
             self.log.info("OTF pattern mode (P) command received, not yet implemented")
             return False
         if otf_mode == "N":
             self.log.info("track mode command received")
-            self.track()
+            self.start_command()
             return True
         self.log.warning(f"unknown obs_otf_mode {otf_mode!r}, no action taken")
         return False
@@ -762,7 +787,7 @@ class KOSMA_translator:
         if k not in ("obs_otf_mode", "obs_lam_vel", "obs_bet_vel")
     ]
 
-    def reuse_last_track(self):
+    def reuse_last_command(self):
         """
         If the new obs2tel commands the same target as the last accepted path
         and that path has at least reuse_min_remaining left, keep it instead of
@@ -783,8 +808,8 @@ class KOSMA_translator:
         if self.last_aborted:
             # the last path was aborted for a (superseded) newer command
             return self._not_reused("the last command was aborted")
-        if self._track_thread and self._track_thread.is_alive():
-            return self._not_reused("a track thread is still running")
+        if self._command_thread and self._command_thread.is_alive():
+            return self._not_reused("a command thread is still running")
         if self.last_payload["type"] == "otf":
             # an OTF scan path is only valid for its own start time
             return self._not_reused("the last path is an OTF scan")
@@ -818,7 +843,7 @@ class KOSMA_translator:
             return False
         if self.slew_in_progress or self.last_aborted:
             return False
-        if self._track_thread and self._track_thread.is_alive():
+        if self._command_thread and self._command_thread.is_alive():
             return False
         # a HORIZON source is held by a move-to (fixed az/el, no end)
         horizon_source = COORD_SYS_MAP[self.obs2tel["obs_coord_sys_on"]] == "altaz"
@@ -853,9 +878,9 @@ class KOSMA_translator:
         self.tel_lost_track = "N"    # initialize for the new cookie
         self.tel_was_on_track = False
 
-    def track(self, send=None):
+    def start_command(self, send=None):
         """
-        Start the track thread for the current obs2tel.
+        Start the command thread for the current obs2tel.
 
         Parameters
         ----------
@@ -863,33 +888,33 @@ class KOSMA_translator:
             send(cookie) computes and sends the command (default _send_track)
         """
 
-        # 1. If a track is already running → stop it
-        if self._track_thread and self._track_thread.is_alive():
-            self.log.info("Stopping previous track before starting new one")
-            self.stop_track()
+        # 1. If a command thread is already running → stop it
+        if self._command_thread and self._command_thread.is_alive():
+            self.log.info("Stopping previous command thread before starting new one")
+            self.stop_command()
 
         # 2. Reset stop event
-        self._track_stop_event.clear()
+        self._command_stop_event.clear()
 
         # 3. Start new thread
-        self._track_thread = threading.Thread(
-            target=self._track_loop,
+        self._command_thread = threading.Thread(
+            target=self._command_loop,
             args=(send,),
             daemon=True
         )
-        self._track_thread.start()
+        self._command_thread.start()
 
-    def stop_track(self):
-        if self._track_thread and self._track_thread.is_alive():
-            self.log.info("Signaling track thread to stop")
+    def stop_command(self):
+        if self._command_thread and self._command_thread.is_alive():
+            self.log.info("Signaling command thread to stop")
 
-            self._track_stop_event.set()   # signal thread
+            self._command_stop_event.set()   # signal thread
 
-            self._track_thread.join()      # WAIT until thread exits
+            self._command_thread.join()      # WAIT until thread exits
 
-            self.log.info("Track thread stopped")
+            self.log.info("Command thread stopped")
 
-            self._track_thread = None
+            self._command_thread = None
 
     # =======================================================================
     # Status output (background thread): KOSMA_tel2obs.set, KOSMA_ccdpos.sim
@@ -956,8 +981,9 @@ class KOSMA_translator:
         # time stamp of the status and its relative time to the start of the last sent path
         status_time = _get_time_from_acu_format(response["Time"], response["Year"])
 
-        # Only the track thread sets on_track_not_before, otf_scan_window and
-        # slew_target; read them once here
+        # on_track_not_before, otf_scan_window and slew_target are set by the
+        # command thread (otf_scan_window and slew_target are also reset by the
+        # main thread in _keep_last_command); read them once here
         otf_scan_window = self.otf_scan_window
         on_track_not_before = self.on_track_not_before
         slew_target = self.slew_target
@@ -1226,10 +1252,10 @@ class KOSMA_translator:
         return self._model_info
 
     # =======================================================================
-    # Tracking (track thread): compute the command for obs2tel and send it
+    # Commands (command thread): compute the command for obs2tel and send it
     # =======================================================================
 
-    def _track_loop(self, send=None):
+    def _command_loop(self, send=None):
         """
         Thread target: send(cookie), default _send_track. Any unexpected
         exception fails the path, so that the cookie is still returned to the
@@ -1243,7 +1269,7 @@ class KOSMA_translator:
         try:
             send(cookie)
         except Exception as e:
-            self.log.exception(f"Track error: {e}")
+            self.log.exception(f"Command error: {e}")
             # a failed OTF scan must flag the data taken by the backend
             self._fail_path(cookie, 1, lost_track="Y" if send == self._send_otf_scan else "N")
 
@@ -1256,15 +1282,20 @@ class KOSMA_translator:
                 self.log.error(msg)
                 raise ValueError(msg)
 
+    # -----------------------------------------------------------------------
+    # Tracking, obs_otf_mode N (command thread): a fixed source or az/el
+    # -----------------------------------------------------------------------
+
     def _send_track(self, cookie):
         """
         Send the command for the current obs2tel to TCS: a move-to for a HORIZON
         source (_send_move_to), otherwise a path (_send_path).
 
-        This routine is called every time when KOSMA_obs2tel.set is updated. If a
-        track is already running, the previous one is stopped and the new one starts.
-        Therefore practically the duration of the track in this routine is overwritten
-        by a new track triggered by the KOSMA_obs2tel update.
+        This routine is called for every new obs2tel in obs_otf_mode N that does
+        not reuse the last command. If a command is already running, the previous
+        one is stopped and the new one starts. Therefore practically the duration
+        of the track in this routine is overwritten by a new command triggered by
+        the KOSMA_obs2tel update.
         This justifies to use the fixed obs_x/y_focal_plane, which is a function of
         elevation and changes over time: once the value changes more than a tolerance,
         a new track is triggered with updated obs_x/y_focal_plane values.
@@ -1391,15 +1422,15 @@ class KOSMA_translator:
         obs2tel : dict
             obs2tel the move-to is sent for (recorded as last_obs2tel)
         """
-        if self._track_stop_event.is_set():
-            self.log.info("Track superseded, move-to not sent")
+        if self._command_stop_event.is_set():
+            self.log.info("Command superseded, move-to not sent")
             return
         # ocs.move_to does not abort the previous command: do it here
         if not self._abort_previous(cookie):
             return
         response = self._move_to_with_retry(cmd_az, cmd_el)
         if response is None:
-            self.log.info("Track superseded while TCS was busy, move-to not sent")
+            self.log.info("Command superseded while TCS was busy, move-to not sent")
             return
         body = _response_body(response)
         if response.status_code != 200 or body.get("status") != "ok":
@@ -1541,8 +1572,8 @@ class KOSMA_translator:
         # less than 9.8 sec from its arrival, so the abort must not eat into the
         # overhead below. The telescope is not tracking from here until the new
         # path starts.
-        if self._track_stop_event.is_set():
-            self.log.info("Track superseded, previous path not aborted")
+        if self._command_stop_event.is_set():
+            self.log.info("Command superseded, previous path not aborted")
             return
         if not self._abort_previous(cookie):
             return
@@ -1582,9 +1613,9 @@ class KOSMA_translator:
                     payload = self._build_path_payload(target, track_duration, overhead)
 
                 # TODO: find out a way to pass obs_wavelength together with payload
-                # A newer track has superseded this one while the payload was computed
-                if self._track_stop_event.is_set():
-                    self.log.info("Track superseded, payload not sent")
+                # A newer command has superseded this one while the payload was computed
+                if self._command_stop_event.is_set():
+                    self.log.info("Command superseded, payload not sent")
                     return
                 # TCS answers 503 (busy) until it is idle after the abort. Retry only
                 # while the lead stays >= TRACK_MIN_SEND_LEAD; a later retry would be
@@ -1595,7 +1626,7 @@ class KOSMA_translator:
                     retry_interval=0.3
                 )
                 if response is None:
-                    self.log.info("Track superseded while TCS was busy, payload not sent")
+                    self.log.info("Command superseded while TCS was busy, payload not sent")
                     return
                 lead_done = payload["start_time"] - time.time()
                 self.log.info(f"path start_time: {_start_time_text(payload['start_time'])}")
@@ -1673,12 +1704,12 @@ class KOSMA_translator:
         """
         if track_overhead is None:
             track_overhead = TRACK_OVERHEAD
-        # Points every TRACK_TIME_STEP from now + overhead to now + overhead + track_duration.
+        # Points every PATH_TIME_STEP from now + overhead to now + overhead + track_duration.
         # If track_duration is not a multiple of the step, the path ends at the
         # last full step before track_duration. The small tolerance avoids
         # dropping a step due to floating-point error (e.g. 600 / 0.1).
-        n_steps = int(track_duration / TRACK_TIME_STEP + 1e-9) + 1
-        t_fine = np.arange(n_steps) * TRACK_TIME_STEP
+        n_steps = int(track_duration / PATH_TIME_STEP + 1e-9) + 1
+        t_fine = np.arange(n_steps) * PATH_TIME_STEP
         # The full transform runs only on a coarse grid covering the path
         # (at least 3 nodes for the second-order slopes)
         n_coarse = max(int(np.ceil(t_fine[-1] / TRACK_COARSE_STEP - 1e-9)) + 1, 3)
@@ -1733,7 +1764,7 @@ class KOSMA_translator:
         return payload
 
     # =======================================================================
-    # TCS communication (track thread): slew, abort, send with busy retry
+    # TCS communication (command thread): slew, abort, send with busy retry
     # =======================================================================
 
     def _acu_position(self):
@@ -1767,12 +1798,12 @@ class KOSMA_translator:
         later be replaced by a slew path avoiding the sun
         (sun_avoidance/slew.py) without touching _send_track.
 
-        Returns True once the telescope has arrived. Returns False if the track
+        Returns True once the telescope has arrived. Returns False if the command
         was superseded, or if the slew failed (then the path for cookie is
         failed with _fail_path).
         """
-        if self._track_stop_event.is_set():
-            self.log.info("Track superseded, slew not sent")
+        if self._command_stop_event.is_set():
+            self.log.info("Command superseded, slew not sent")
             return False
         # ocs.move_to does not abort the previous command: do it here. Usually
         # _send_track has aborted it already (then nothing is sent again).
@@ -1780,7 +1811,7 @@ class KOSMA_translator:
             return False
         response = self._move_to_with_retry(az, el)
         if response is None:
-            self.log.info("Track superseded while TCS was busy, slew not sent")
+            self.log.info("Command superseded while TCS was busy, slew not sent")
             return False
         body = _response_body(response)
         if response.status_code != 200 or body.get("status") != "ok":
@@ -1804,10 +1835,10 @@ class KOSMA_translator:
         # finishing the move-to: _send_track then resends the path.
         t0 = time.monotonic()
         while True:
-            # interruptible: stop waiting as soon as a newer track arrives
-            if self._track_stop_event.wait(SLEW_POLL_INTERVAL):
-                # slew_in_progress stays True: the next track aborts the move-to
-                self.log.info("Track superseded during slew")
+            # interruptible: stop waiting as soon as a newer command arrives
+            if self._command_stop_event.wait(SLEW_POLL_INTERVAL):
+                # slew_in_progress stays True: the next command aborts the move-to
+                self.log.info("Command superseded during slew")
                 return False
             cur_az, cur_el, vel_az, vel_el = self._acu_position()
             if (max(abs(az - cur_az), abs(el - cur_el)) < SLEW_ARRIVAL_TOLERANCE
@@ -1843,7 +1874,7 @@ class KOSMA_translator:
             self.log.info("Previous command already aborted, no abort sent")
             return True
         if self.slew_in_progress:
-            # the slew of a superseded track may still be running on TCS
+            # the slew of a superseded command may still be running on TCS
             need_abort = True
             self.log.info("Previous slew may still be running")
         elif self.last_payload is None:
@@ -1877,7 +1908,7 @@ class KOSMA_translator:
         """
         Send ocs.move_to, resending it while TCS answers busy (e.g. not yet idle
         after the abort sent just before). Returns the last response, or None if
-        the track was superseded while waiting for a retry.
+        the command was superseded while waiting for a retry.
         """
         return self._send_with_retry(
             lambda: self.ocs.move_to(az, el),
@@ -1889,8 +1920,8 @@ class KOSMA_translator:
         """
         Send payload with ocs.scan_pattern, resending it while the TCS answers
         503 (busy) for at most busy_timeout seconds, retry_interval apart.
-        Returns the last response, or None if the track was superseded
-        (_track_stop_event set) while waiting for a retry.
+        Returns the last response, or None if the command was superseded
+        (_command_stop_event set) while waiting for a retry.
         """
         return self._send_with_retry(
             lambda: self.ocs.scan_pattern(data=payload), busy_timeout, retry_interval)
@@ -1899,8 +1930,8 @@ class KOSMA_translator:
         """
         Call send() (an OCS command), calling it again while the TCS answers
         busy for at most busy_timeout seconds, retry_interval apart.
-        Returns the last response, or None if the track was superseded
-        (_track_stop_event set) while waiting for a retry.
+        Returns the last response, or None if the command was superseded
+        (_command_stop_event set) while waiting for a retry.
         """
         deadline = time.monotonic() + busy_timeout
         attempt = 1
@@ -1919,13 +1950,13 @@ class KOSMA_translator:
                 f"TCS busy (attempt {attempt}), retrying in "
                 f"{min(retry_interval, remaining):.2f} s"
             )
-            # interruptible sleep: stop retrying as soon as a newer track arrives
-            if self._track_stop_event.wait(min(retry_interval, remaining)):
+            # interruptible sleep: stop retrying as soon as a newer command arrives
+            if self._command_stop_event.wait(min(retry_interval, remaining)):
                 return None
             attempt += 1
 
     # =======================================================================
-    # Cookie handshake (set by the track thread, reported by the background
+    # Cookie handshake (set by the command thread, reported by the background
     # thread in KOSMA_tel2obs.set)
     # =======================================================================
 
@@ -1939,9 +1970,9 @@ class KOSMA_translator:
         reads only tel_lost_track (tel_error is just logged), so "Y" is needed
         to flag the data taken by the backend.
         """
-        if self._track_stop_event.is_set():
+        if self._command_stop_event.is_set():
             # superseded by a newer obs2tel; its own thread returns the new cookie
-            self.log.info(f"Track for cookie {cookie} superseded, failure not reported")
+            self.log.info(f"Command for cookie {cookie} superseded, failure not reported")
             return
         self.otf_scan_window = None
         self.slew_target = None
@@ -1965,9 +1996,9 @@ class KOSMA_translator:
         slew_target: (az, el, start) for a slew before the path, see
         self.slew_target. Any other accepted command clears it.
         """
-        if self._track_stop_event.is_set():
+        if self._command_stop_event.is_set():
             # superseded by a newer obs2tel; its own thread returns the new cookie
-            self.log.info(f"Track for cookie {cookie} superseded, cookie not returned")
+            self.log.info(f"Command for cookie {cookie} superseded, cookie not returned")
             return
         self.log.info(f"returning cookie {cookie}")
         # set before the cookie: the status of the new cookie uses the new
@@ -1985,7 +2016,7 @@ class KOSMA_translator:
         self.tel_path_failed = False
 
     # =======================================================================
-    # Coordinates and refraction (track thread and background thread)
+    # Coordinates and refraction (command thread and background thread)
     # =======================================================================
 
     def get_weather(self):
@@ -2001,8 +2032,8 @@ class KOSMA_translator:
         """
 
         # TODO: add proper keys to get weather data, and a request timeout:
-        # get_measurement_data has none, and this runs in the track thread
-        # before each new path is built, so a stalled request would hold up the track
+        # get_measurement_data has none, and this runs in the command thread
+        # before each new path is built, so a stalled request would hold up the command
         # for now this will fail and falls back to DEFAULT_WEATHER
         self.ocs.get_measurement_data()
 
@@ -2025,7 +2056,7 @@ class KOSMA_translator:
 
     def _update_refraction_params(self, obs_wavelength):
         """
-        Set the AltAz refraction parameters for a new track, if the refraction
+        Set the AltAz refraction parameters for a new command, if the refraction
         correction is ON. obs_wavelength <= 0 means no refraction, as in astra.
         DEFAULT_WEATHER is used if the weather parameters are bad or missing.
 
@@ -2090,7 +2121,7 @@ class KOSMA_translator:
         return AltAz(obstime=obstime, location=self.location, **self._refraction_params)
 
     # =======================================================================
-    # OTF, obs_otf_mode C (track thread). Pattern mode P is not implemented.
+    # OTF, obs_otf_mode C (command thread). Pattern mode P is not implemented.
     #
     # KOSMA otf_server per scan line (see process_obs2tel):
     # - PRETP (obs_track_duration = 0, wait=1, obs_start_time is stale): with
@@ -2153,8 +2184,8 @@ class KOSMA_translator:
         # The running command (PRETP path or move-to) is aborted first, so that
         # the abort does not eat into the lead. The telescope stands until the
         # path starts.
-        if self._track_stop_event.is_set():
-            self.log.info("Track superseded, previous command not aborted")
+        if self._command_stop_event.is_set():
+            self.log.info("Command superseded, previous command not aborted")
             return
         if not self._abort_previous(cookie):
             return
@@ -2173,14 +2204,14 @@ class KOSMA_translator:
                 f"from the OTF path start az={first_az:.4f} el={first_el:.4f}"
             )
 
-        if self._track_stop_event.is_set():
-            self.log.info("Track superseded, OTF path not sent")
+        if self._command_stop_event.is_set():
+            self.log.info("Command superseded, OTF path not sent")
             return
         lead_send = payload["start_time"] - time.time()
         response = self._scan_pattern_with_retry(
             payload, busy_timeout=max(lead_send - OTF_MIN_SEND_LEAD, 0.0), retry_interval=0.3)
         if response is None:
-            self.log.info("Track superseded while TCS was busy, OTF path not sent")
+            self.log.info("Command superseded while TCS was busy, OTF path not sent")
             return
         self.log.info(f"OTF path start_time: {_start_time_text(payload['start_time'])}")
         self.log.info(
@@ -2220,7 +2251,7 @@ class KOSMA_translator:
 
     def _build_otf_payload(self, obs2tel, t0, duration):
         """
-        OTF path for scan_pattern: points every TRACK_TIME_STEP, aligned so that
+        OTF path for scan_pattern: points every PATH_TIME_STEP, aligned so that
         T0 is a point, from T0 - OTF_RAMP_TIME - OTF_SETTLE_TIME (rounded to the
         step) to T0 + duration + OTF_STOP_TIME (rounded up). Each point is
         transformed in full (no interpolation), so the ramp is not smoothed away.
@@ -2240,11 +2271,11 @@ class KOSMA_translator:
             start_time (unix), coordsys and points [[t, az, el, v_az, v_el], ...]
         """
         t_build = time.perf_counter()
-        n_before = int(round((OTF_RAMP_TIME + OTF_SETTLE_TIME) / TRACK_TIME_STEP))
-        n_after = int(np.ceil((duration + OTF_STOP_TIME) / TRACK_TIME_STEP - 1e-9))
+        n_before = int(round((OTF_RAMP_TIME + OTF_SETTLE_TIME) / PATH_TIME_STEP))
+        n_after = int(np.ceil((duration + OTF_STOP_TIME) / PATH_TIME_STEP - 1e-9))
         # at least 3 points for the second-order velocities
         n_after = max(n_after, 2 - n_before)
-        tau = np.arange(-n_before, n_after + 1) * TRACK_TIME_STEP
+        tau = np.arange(-n_before, n_after + 1) * PATH_TIME_STEP
         f = _otf_scan_time(tau, duration, OTF_RAMP_TIME, OTF_STOP_TIME)
         az, el = self._otf_horizon_positions(obs2tel, t0 + tau, f)
 
@@ -2419,7 +2450,7 @@ def main():
     except KeyboardInterrupt:
         translator.log.info("Shutdown requested (Ctrl+C or SIGTERM), shutting down...")
     finally:
-        translator.stop_track()
+        translator.stop_command()
         if hasattr(ocs, "close"):
             ocs.close()
         translator.log.info("All threads closed, exiting.")
